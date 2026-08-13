@@ -1,0 +1,11 @@
+server:
+  port: 8090
+  mode: debug # debug / release / test
+
+app:
+  name: env-vault
+  version: 0.1.0
+
+auth:
+  jwt-public-key: MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqyaNcMcq/PL94alSk4+6fPt2ivzz7bCjwRopJM8P/rQvZpV8h7i9xrEdVlF0LgkH1a/990OnxJW3vMTT76JRaHX+UwAAWeSEQfuVIbPB92l1+YyfhHCsaoLHl1fI/PIRRar5c9XG7ntb4SBQQcXSqr/T5HW570dZ+v6LgIjHILX8BCt+sh6P84OTo1/tqJRSWsPsuFXm3nP22/GXqemj88JOrlLuzg824f/tBqQJcEJkP4e6BAggNVYBVZTVw0xQ0aykCdRlWgeFK58tQohT8inaGDOodHw51TA/H8bGdH/P1jK1gHyBtZJXbhwz9fTbdxaRNnoz2wI1HPrAyEeCNQIDAQAB
+  
