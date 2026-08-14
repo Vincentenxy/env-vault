@@ -82,7 +82,7 @@ func extractBearerToken(header string) (string, error) {
 func parsePublicKey(key string) (*rsa.PublicKey, error) {
 	key = strings.TrimSpace(key)
 	if key == "" {
-		return nil, errors.New("auth.jwt-public-key is empty")
+		return nil, errors.New("auth.jwt_public_key is empty")
 	}
 
 	// PEM 格式（包含 BEGIN 标记）

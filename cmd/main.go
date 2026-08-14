@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"env-vault/internal/infrastructure/config"
+	"env-vault/internal/infrastructure/postgres"
+	"env-vault/internal/infrastructure/redis"
 	"env-vault/internal/interfaces/router"
 	"env-vault/pkg/logger"
 
@@ -28,8 +30,27 @@ func main() {
 	logger.Init(cfg.Server.Mode)
 	defer logger.Sync()
 
+	// 初始化 PostgreSQL
+	db, err := postgres.New(cfg.Database)
+	if err != nil {
+		logger.L().Fatal("init postgres failed", zap.Error(err))
+	}
+
+	// 初始化 Redis（enabled=false 时返回 nil，不启用缓存）
+	redisClient, err := redis.New(cfg.Redis)
+	if err != nil {
+		logger.L().Fatal("init redis failed", zap.Error(err))
+	}
+	if redisClient != nil {
+		defer func() { _ = redisClient.Close() }()
+		logger.L().Info("redis connected",
+			zap.String("mode", cfg.Redis.Mode),
+			zap.Strings("addrs", cfg.Redis.Addrs),
+		)
+	}
+
 	// 初始化路由
-	r, err := router.New(cfg)
+	r, err := router.New(cfg, db)
 	if err != nil {
 		logger.L().Fatal("init router failed", zap.Error(err))
 	}

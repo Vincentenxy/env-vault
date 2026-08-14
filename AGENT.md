@@ -38,9 +38,24 @@
 | 范围 | 含义 |
 |------|------|
 | `0` | 成功 |
-| `-1` | 通用失败 |
+| `-1` | **默认通用失败**：所有未单独定义业务码的失败一律返回 `-1`，msg 由 service / handler 给出可读信息 |
 | `1 ~ 1000` | 系统预留失败状态码，其中 600 以内与 HTTP 状态码保持一致 |
-| `10000 以上` | 业务失败状态码 |
+| `10000 以上` | **特例业务码**：仅在客户端必须按业务码做差异化处理（如不同 UI 文案、特殊跳转、不同重试策略等）时使用，由各模块 owner 评审后才新增 |
+
+**错误码分配原则**：
+
+- **默认情况下所有业务错误都使用 `code=-1`**，msg 体现具体失败原因（"tenant code already exists"、"organization not found" 等）
+- 只有"特例"才定义明确的业务码：例如支付场景必须区分 `余额不足 / 通道异常` 等不同分支、登录场景必须区分 `密码错误 / 账号锁定`、第三方对接必须区分 `限流 / 鉴权失败 / 服务降级` 等
+- 各模块 handler 的 `respondError` 默认行为：
+  ```go
+  switch {
+  case errors.Is(err, <任意业务错误>):
+      response.Error(c, err.Error()) // code=-1
+  default:
+      response.Error(c, "internal error")
+  }
+  ```
+- 新增业务码位时，必须在 AGENT.md 记录码位 + 使用场景 + 客户端处理方式，三者缺一不可
 
 ### 1.4 错误处理（硬性要求）
 
@@ -63,6 +78,29 @@ HTTP body：
 
 - 使用 **swaggo**（swag 注解）方式编写接口文档，注解写在 handler 上，生成文件输出到 `docs/`（该目录不提交版本库）
 - 同时维护一份符合 **OpenAPI 协议**的独立文档，用于对外分发（生成后导出，方便提供给外部）
+
+### 1.6 分页规范（硬性要求）
+
+所有分页接口统一使用 `pkg/page` 包定义的结构：
+
+- **请求**：`PageRequest { pageNum, pageSize }`
+  - `pageNum`：页码，从 1 开始；缺省 / ≤0 时取 1
+  - `pageSize`：页内条数；缺省 / ≤0 时取 20，上限 200
+  - 业务 request 通过**匿名嵌入** `page.Request` 继承两字段，handler 内统一调用 `req.Normalize()` 归一化
+- **响应**：`PageResp { total, list }`
+  - **只暴露 `total`（总条数） 与 `list`（数据列表）**；禁止在响应中回显 `pageNum` / `pageSize`
+  - 使用泛型版本：`page.Response[T any]{ Total int64, List []T }`
+
+```go
+// 请求示例
+type ListRequest struct {
+    Code string `json:"code"`
+    page.Request // 内嵌分页字段
+}
+
+// 响应示例
+response.Success(c, page.Response[TenantDTO]{ Total: total, List: items })
+```
 
 ---
 
@@ -100,6 +138,23 @@ HTTP body：
 | `update_at` | 更新时间 |
 | `create_by` | 创建人 |
 | `update_by` | 更新人 |
+| `delete_at` | 删除时间（软删除，未删除为 NULL） |
+| `delete_by` | 删除人 |
+| `is_deleted` | 软删除标记（boolean，默认 false） |
+
+- **软删除**：所有表采用软删除（`is_deleted` + `delete_at` + `delete_by`），查询默认过滤已删除数据，禁止物理删除
+
+### 3.1 表设计硬性规则
+
+1. **禁止使用外键依赖**：表间关联关系全部在代码层面维护
+2. **禁止数据库侧特殊校验**：除 NOT NULL / 默认值外，不加 CHECK、UNIQUE 之外的数据库约束（必要的查询索引除外），业务校验全部放在代码层面显式实现
+3. **表设计先行审批流程（强制）**：
+   - 所有涉及数据库表的需求，**必须先完成表设计并写入 `design/database.md`，提交给项目 Owner 审核**
+   - **Owner 确认后才能开始动手开发功能代码**
+   - 未获确认前，禁止编写任何与该表相关的 model / repository / handler 代码
+4. **避免数据库保留关键字**：表名、列名不得使用 PG 保留字（如 `user`、`order`、`comment` 等需评估，必要时换用同义词或加后缀）
+5. **信息类表统一 `_info` 后缀**：如 `tenant_info`、`organization_info`、`system_info`
+6. **实体层级**：租户（tenant_info）→ 组织（organization_info）→ 系统（system_info）。租户类比公司、组织类比部门、系统类比业务系统，上层是下层的归属
 
 ---
 
@@ -146,6 +201,7 @@ env-vault/
 │   └── infrastructure/                  # 基础设施层（config / db / redis / jwt）
 ├── pkg/
 │   ├── logger/                          # 全局统一日志（zap 封装，禁止绕过）
+│   ├── page/                            # 统一分页结构（Request/Response）
 │   ├── response/                        # 统一响应封装
 │   └── userctx/                         # 认证用户上下文（JWT 解析结果存取）
 └── Dockerfile                           # 多阶段构建，K8s 部署

@@ -7,5 +7,35 @@ app:
   version: 0.1.0
 
 auth:
-  jwt-public-key: MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqyaNcMcq/PL94alSk4+6fPt2ivzz7bCjwRopJM8P/rQvZpV8h7i9xrEdVlF0LgkH1a/990OnxJW3vMTT76JRaHX+UwAAWeSEQfuVIbPB92l1+YyfhHCsaoLHl1fI/PIRRar5c9XG7ntb4SBQQcXSqr/T5HW570dZ+v6LgIjHILX8BCt+sh6P84OTo1/tqJRSWsPsuFXm3nP22/GXqemj88JOrlLuzg824f/tBqQJcEJkP4e6BAggNVYBVZTVw0xQ0aykCdRlWgeFK58tQohT8inaGDOodHw51TA/H8bGdH/P1jK1gHyBtZJXbhwz9fTbdxaRNnoz2wI1HPrAyEeCNQIDAQAB
-  
+  jwt_public_key: MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqyaNcMcq/PL94alSk4+6fPt2ivzz7bCjwRopJM8P/rQvZpV8h7i9xrEdVlF0LgkH1a/990OnxJW3vMTT76JRaHX+UwAAWeSEQfuVIbPB92l1+YyfhHCsaoLHl1fI/PIRRar5c9XG7ntb4SBQQcXSqr/T5HW570dZ+v6LgIjHILX8BCt+sh6P84OTo1/tqJRSWsPsuFXm3nP22/GXqemj88JOrlLuzg824f/tBqQJcEJkP4e6BAggNVYBVZTVw0xQ0aykCdRlWgeFK58tQohT8inaGDOodHw51TA/H8bGdH/P1jK1gHyBtZJXbhwz9fTbdxaRNnoz2wI1HPrAyEeCNQIDAQAB
+
+
+database:
+  #  host: "192.168.1.110"
+  host: "127.0.0.1"
+  port: 5432
+  user: "env_vault"
+  password: "123456"
+  name: "env_vault"
+  ssl_mode: "disable"
+  max_open_conns: 25
+  max_idle_conns: 5
+  conn_max_lifetime: "30m"
+  connect_timeout: "5s"
+
+redis:
+  enabled: true
+  mode: "single"
+  addrs:
+    - "127.0.0.1:6379"
+  #    - "192.168.1.110:6379"
+  password: "123456"
+  db: 1
+  key_prefix: "env_vault"
+  warm_up_on_start: true
+  pool_size: 10
+  min_idle_conns: 2
+  max_retries: 3
+  dial_timeout: "5s"
+  read_timeout: "3s"
+  write_timeout: "3s"
