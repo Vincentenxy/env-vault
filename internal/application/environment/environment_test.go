@@ -1,0 +1,392 @@
+package environment
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	envdomain "env-vault/internal/domain/environment"
+)
+
+// stubRepo 内存实现的 Repository，便于 application 层单测
+type stubRepo struct {
+	getByProjectCode func(ctx context.Context, projectID uuid.UUID, code string) (*envdomain.Environment, error)
+	getByID          func(ctx context.Context, id uuid.UUID) (*envdomain.Environment, error)
+	createBatch      func(ctx context.Context, environments []*envdomain.Environment) error
+	update           func(ctx context.Context, e *envdomain.Environment) error
+	delete           func(ctx context.Context, id uuid.UUID, deleteBy string) error
+	list             func(ctx context.Context, projectID uuid.UUID) ([]*envdomain.Environment, error)
+}
+
+func (s *stubRepo) CreateBatch(ctx context.Context, environments []*envdomain.Environment) error {
+	if s.createBatch != nil {
+		return s.createBatch(ctx, environments)
+	}
+	return nil
+}
+func (s *stubRepo) Update(ctx context.Context, e *envdomain.Environment) error {
+	if s.update != nil {
+		return s.update(ctx, e)
+	}
+	return nil
+}
+func (s *stubRepo) Delete(ctx context.Context, id uuid.UUID, deleteBy string) error {
+	if s.delete != nil {
+		return s.delete(ctx, id, deleteBy)
+	}
+	return nil
+}
+func (s *stubRepo) GetByID(ctx context.Context, id uuid.UUID) (*envdomain.Environment, error) {
+	if s.getByID != nil {
+		return s.getByID(ctx, id)
+	}
+	return nil, nil
+}
+func (s *stubRepo) GetByProjectCode(ctx context.Context, projectID uuid.UUID, code string) (*envdomain.Environment, error) {
+	if s.getByProjectCode != nil {
+		return s.getByProjectCode(ctx, projectID, code)
+	}
+	return nil, nil
+}
+func (s *stubRepo) List(ctx context.Context, projectID uuid.UUID) ([]*envdomain.Environment, error) {
+	if s.list != nil {
+		return s.list(ctx, projectID)
+	}
+	return nil, nil
+}
+
+func newTestEnvironment(projectID uuid.UUID, code string) *envdomain.Environment {
+	now := time.Now()
+	return &envdomain.Environment{
+		ID:        uuid.New(),
+		Code:      code,
+		Name:      "name-" + code,
+		Remark:    "",
+		ProjectID: projectID,
+		OrderNo:   10,
+		CreateAt:  now,
+		UpdateAt:  now,
+	}
+}
+
+func TestService_Create_Success(t *testing.T) {
+	projectID := uuid.New()
+	repo := &stubRepo{
+		getByProjectCode: func(ctx context.Context, pid uuid.UUID, code string) (*envdomain.Environment, error) {
+			if pid != projectID {
+				t.Fatalf("unexpected lookup project=%v code=%s", pid, code)
+			}
+			return nil, nil
+		},
+		createBatch: func(ctx context.Context, environments []*envdomain.Environment) error {
+			if len(environments) != 3 {
+				t.Fatalf("expected 3 environments, got %d", len(environments))
+			}
+			for _, e := range environments {
+				if e.ID == uuid.Nil {
+					t.Fatal("ID should be generated")
+				}
+				if e.ProjectID != projectID {
+					t.Fatalf("projectID not propagated: %+v", e)
+				}
+			}
+			return nil
+		},
+	}
+	svc := NewService(repo)
+	got, err := svc.Create(context.Background(), CreateInput{
+		ProjectID: projectID,
+		Environments: []CreateItemInput{
+			{Code: "dev", Name: "开发环境", IsCheckPerm: false},
+			{Code: "test", Name: "测试环境", IsCheckPerm: false},
+			{Code: "prod", Name: "生产环境", IsCheckPerm: true},
+		},
+	}, "operator-1")
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	// orderNo 按列表顺序填充：10/20/30
+	for i, wantNo := range []int{10, 20, 30} {
+		if got[i].OrderNo != wantNo {
+			t.Fatalf("expected orderNo %d at index %d, got %d", wantNo, i, got[i].OrderNo)
+		}
+		if got[i].CreateBy != "operator-1" || got[i].UpdateBy != "operator-1" {
+			t.Fatalf("operator not propagated: %+v", got[i])
+		}
+	}
+	if !got[2].IsCheckPerm {
+		t.Fatalf("expected isCheckPerm true for prod, got false")
+	}
+	if got[0].IsCheckPerm {
+		t.Fatalf("expected default isCheckPerm false for dev")
+	}
+}
+
+func TestService_Create_InvalidParam(t *testing.T) {
+	svc := NewService(&stubRepo{})
+
+	cases := []CreateInput{
+		{ProjectID: uuid.Nil, Environments: []CreateItemInput{{Code: "c", Name: "n"}}},
+		{ProjectID: uuid.New(), Environments: nil},
+		{ProjectID: uuid.New(), Environments: []CreateItemInput{{Code: "", Name: "n"}}},
+		{ProjectID: uuid.New(), Environments: []CreateItemInput{{Code: "c", Name: ""}}},
+	}
+	for _, in := range cases {
+		if _, err := svc.Create(context.Background(), in, "u"); !errors.Is(err, ErrInvalidParam) {
+			t.Fatalf("expected ErrInvalidParam for %+v, got %v", in, err)
+		}
+	}
+}
+
+func TestService_Create_CodeDuplicatedInRequest(t *testing.T) {
+	svc := NewService(&stubRepo{}) // 数组内重复应在查询库前拦截
+	_, err := svc.Create(context.Background(), CreateInput{
+		ProjectID: uuid.New(),
+		Environments: []CreateItemInput{
+			{Code: "dev", Name: "开发环境"},
+			{Code: "dev", Name: "开发环境2"},
+		},
+	}, "u")
+	if !errors.Is(err, ErrCodeDuplicated) {
+		t.Fatalf("expected ErrCodeDuplicated, got %v", err)
+	}
+}
+
+func TestService_Create_CodeExists(t *testing.T) {
+	projectID := uuid.New()
+	repo := &stubRepo{
+		getByProjectCode: func(ctx context.Context, pid uuid.UUID, code string) (*envdomain.Environment, error) {
+			if code == "dev" {
+				return newTestEnvironment(pid, code), nil
+			}
+			return nil, nil
+		},
+	}
+	svc := NewService(repo)
+	_, err := svc.Create(context.Background(), CreateInput{
+		ProjectID: projectID,
+		Environments: []CreateItemInput{
+			{Code: "test", Name: "测试环境"},
+			{Code: "dev", Name: "开发环境"},
+		},
+	}, "u")
+	if !errors.Is(err, ErrCodeExists) {
+		t.Fatalf("expected ErrCodeExists, got %v", err)
+	}
+}
+
+func TestService_Update_Success(t *testing.T) {
+	id := uuid.New()
+	projectID := uuid.New()
+	existing := newTestEnvironment(projectID, "dev")
+	existing.ID = id
+	existing.OrderNo = 20
+
+	repo := &stubRepo{
+		getByID: func(ctx context.Context, gid uuid.UUID) (*envdomain.Environment, error) {
+			if gid != id {
+				t.Fatalf("unexpected id %s", gid)
+			}
+			return existing, nil
+		},
+		update: func(ctx context.Context, e *envdomain.Environment) error {
+			if e.Name != "测试环境" || e.Remark != "new-remark" {
+				t.Fatalf("fields not updated: %+v", e)
+			}
+			if e.OrderNo != 30 {
+				t.Fatalf("expected orderNo updated to 30, got %d", e.OrderNo)
+			}
+			if !e.IsCheckPerm {
+				t.Fatalf("expected isCheckPerm true")
+			}
+			if e.UpdateBy != "operator-2" {
+				t.Fatalf("updateBy not set")
+			}
+			return nil
+		},
+	}
+	svc := NewService(repo)
+	got, err := svc.Update(context.Background(), UpdateInput{
+		ID: id, Name: "测试环境", Remark: "new-remark", OrderNo: 30, IsCheckPerm: true,
+	}, "operator-2")
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if got.OrderNo != 30 || !got.IsCheckPerm {
+		t.Fatalf("returned environment not updated: %+v", got)
+	}
+}
+
+func TestService_Update_OrderNoKeptWhenZero(t *testing.T) {
+	id := uuid.New()
+	projectID := uuid.New()
+	existing := newTestEnvironment(projectID, "dev")
+	existing.ID = id
+	existing.OrderNo = 25
+
+	repo := &stubRepo{
+		getByID: func(ctx context.Context, gid uuid.UUID) (*envdomain.Environment, error) {
+			return existing, nil
+		},
+		update: func(ctx context.Context, e *envdomain.Environment) error {
+			if e.OrderNo != 25 {
+				t.Fatalf("expected orderNo kept 25, got %d", e.OrderNo)
+			}
+			return nil
+		},
+	}
+	svc := NewService(repo)
+	_, err := svc.Update(context.Background(), UpdateInput{
+		ID: id, Name: "开发环境", OrderNo: 0,
+	}, "u")
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+}
+
+func TestService_Update_InvalidParam(t *testing.T) {
+	svc := NewService(&stubRepo{})
+	if _, err := svc.Update(context.Background(), UpdateInput{ID: uuid.Nil, Name: "n"}, "u"); !errors.Is(err, ErrInvalidParam) {
+		t.Fatalf("expected ErrInvalidParam for nil id")
+	}
+	if _, err := svc.Update(context.Background(), UpdateInput{ID: uuid.New(), Name: ""}, "u"); !errors.Is(err, ErrInvalidParam) {
+		t.Fatalf("expected ErrInvalidParam for empty name")
+	}
+}
+
+func TestService_Update_NotFound(t *testing.T) {
+	repo := &stubRepo{
+		getByID: func(ctx context.Context, id uuid.UUID) (*envdomain.Environment, error) {
+			return nil, nil
+		},
+	}
+	svc := NewService(repo)
+	_, err := svc.Update(context.Background(), UpdateInput{ID: uuid.New(), Name: "n"}, "u")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestService_Delete_Success(t *testing.T) {
+	id := uuid.New()
+	projectID := uuid.New()
+	called := false
+	repo := &stubRepo{
+		getByID: func(ctx context.Context, gid uuid.UUID) (*envdomain.Environment, error) {
+			if gid != id {
+				t.Fatalf("unexpected id %s", gid)
+			}
+			return newTestEnvironment(projectID, "dev"), nil
+		},
+		delete: func(ctx context.Context, gid uuid.UUID, by string) error {
+			called = true
+			if gid != id || by != "operator" {
+				t.Fatalf("delete args wrong: id=%s by=%s", gid, by)
+			}
+			return nil
+		},
+	}
+	svc := NewService(repo)
+	if err := svc.Delete(context.Background(), id, "operator"); err != nil {
+		t.Fatalf("expected nil, got %v", err)
+	}
+	if !called {
+		t.Fatal("repo.Delete not called")
+	}
+}
+
+func TestService_Delete_NotFound(t *testing.T) {
+	repo := &stubRepo{
+		getByID: func(ctx context.Context, id uuid.UUID) (*envdomain.Environment, error) {
+			return nil, nil
+		},
+	}
+	svc := NewService(repo)
+	if err := svc.Delete(context.Background(), uuid.New(), "u"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestService_Delete_InvalidParam(t *testing.T) {
+	svc := NewService(&stubRepo{})
+	if err := svc.Delete(context.Background(), uuid.Nil, "u"); !errors.Is(err, ErrInvalidParam) {
+		t.Fatalf("expected ErrInvalidParam, got %v", err)
+	}
+}
+
+func TestService_GetByID_Success(t *testing.T) {
+	id := uuid.New()
+	want := newTestEnvironment(uuid.New(), "dev")
+	want.ID = id
+	repo := &stubRepo{
+		getByID: func(ctx context.Context, gid uuid.UUID) (*envdomain.Environment, error) {
+			if gid != id {
+				t.Fatalf("unexpected id %s", gid)
+			}
+			return want, nil
+		},
+	}
+	svc := NewService(repo)
+	got, err := svc.GetByID(context.Background(), id)
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if got.ID != id {
+		t.Fatalf("expected id %s, got %s", id, got.ID)
+	}
+}
+
+func TestService_GetByID_NotFound(t *testing.T) {
+	repo := &stubRepo{
+		getByID: func(ctx context.Context, id uuid.UUID) (*envdomain.Environment, error) {
+			return nil, nil
+		},
+	}
+	svc := NewService(repo)
+	if _, err := svc.GetByID(context.Background(), uuid.New()); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestService_GetByID_InvalidParam(t *testing.T) {
+	svc := NewService(&stubRepo{})
+	if _, err := svc.GetByID(context.Background(), uuid.Nil); !errors.Is(err, ErrInvalidParam) {
+		t.Fatalf("expected ErrInvalidParam, got %v", err)
+	}
+}
+
+func TestService_List_Success(t *testing.T) {
+	projectID := uuid.New()
+	repo := &stubRepo{
+		list: func(ctx context.Context, pid uuid.UUID) ([]*envdomain.Environment, error) {
+			if pid != projectID {
+				t.Fatalf("expected projectID %s, got %s", projectID, pid)
+			}
+			return []*envdomain.Environment{newTestEnvironment(projectID, "dev")}, nil
+		},
+	}
+	svc := NewService(repo)
+	got, err := svc.List(context.Background(), ListInput{ProjectID: projectID})
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 environment, got %d", len(got))
+	}
+}
+
+func TestService_List_InvalidParam(t *testing.T) {
+	repo := &stubRepo{
+		list: func(ctx context.Context, projectID uuid.UUID) ([]*envdomain.Environment, error) {
+			t.Fatal("repo.List must not be called with nil projectID")
+			return nil, nil
+		},
+	}
+	svc := NewService(repo)
+	if _, err := svc.List(context.Background(), ListInput{ProjectID: uuid.Nil}); !errors.Is(err, ErrInvalidParam) {
+		t.Fatalf("expected ErrInvalidParam, got %v", err)
+	}
+}

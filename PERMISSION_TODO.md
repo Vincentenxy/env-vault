@@ -1,4 +1,4 @@
-# env-vault 权限模块骨架 —— 实施 TODO
+   d# env-vault 权限模块骨架 —— 实施 
 
 > 目标：在 handler 入口加 ABAC 权限校验；模块内聚在 `internal/permission/`；骨架 + fail-closed 框架 + 占位 DSL（真 DSL 待定）。
 >
