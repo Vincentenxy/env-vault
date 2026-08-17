@@ -404,3 +404,80 @@ func TestProjectHandler_InternalError_FallbackToCodeMinusOne(t *testing.T) {
 		t.Fatalf("expected code -1 for unmapped error, got %v", body["code"])
 	}
 }
+
+// ---------- handler 字段校验失败（svc 不应被调用） ----------
+
+func TestProjectHandler_Create_FieldsRequired(t *testing.T) {
+	neverCalled := func(label string) projapp.IService {
+		return &stubProjectService{
+			createFn: func(ctx context.Context, in projapp.CreateInput, operator string) (*projdomain.Project, error) {
+				t.Fatalf("svc.Create must not be called (%s)", label)
+				return nil, nil
+			},
+		}
+	}
+	cases := []struct {
+		name string
+		body map[string]any
+	}{
+		{"missing code", map[string]any{"name": "n", "orgId": uuid.New()}},
+		{"missing name", map[string]any{"code": "c", "orgId": uuid.New()}},
+		{"missing orgId", map[string]any{"code": "c", "name": "n"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newProjectTestEngine(neverCalled(tc.name), testUser())
+			w := doJSONP(t, r, http.MethodPost, "/api/v1/project/create", tc.body)
+			expectInvalidParams(t, w)
+		})
+	}
+}
+
+func TestProjectHandler_Update_FieldsRequired(t *testing.T) {
+	neverCalled := func(label string) projapp.IService {
+		return &stubProjectService{
+			updateFn: func(ctx context.Context, in projapp.UpdateInput, operator string) (*projdomain.Project, error) {
+				t.Fatalf("svc.Update must not be called (%s)", label)
+				return nil, nil
+			},
+		}
+	}
+	cases := []struct {
+		name string
+		body map[string]any
+	}{
+		{"missing id", map[string]any{"name": "n"}},
+		{"missing name", map[string]any{"id": uuid.New()}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newProjectTestEngine(neverCalled(tc.name), testUser())
+			w := doJSONP(t, r, http.MethodPost, "/api/v1/project/update", tc.body)
+			expectInvalidParams(t, w)
+		})
+	}
+}
+
+func TestProjectHandler_Delete_FieldsRequired(t *testing.T) {
+	svc := &stubProjectService{
+		deleteFn: func(ctx context.Context, id uuid.UUID, operator string) error {
+			t.Fatal("svc.Delete must not be called")
+			return nil
+		},
+	}
+	r := newProjectTestEngine(svc, testUser())
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/project/delete", map[string]any{})
+	expectInvalidParams(t, w)
+}
+
+func TestProjectHandler_Detail_FieldsRequired(t *testing.T) {
+	svc := &stubProjectService{
+		getByID: func(ctx context.Context, id uuid.UUID) (*projdomain.Project, error) {
+			t.Fatal("svc.GetByID must not be called")
+			return nil, nil
+		},
+	}
+	r := newProjectTestEngine(svc, testUser())
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/project/detail", map[string]any{})
+	expectInvalidParams(t, w)
+}

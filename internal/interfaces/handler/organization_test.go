@@ -420,3 +420,92 @@ func TestOrgHandler_InternalError_FallbackToCodeMinusOne(t *testing.T) {
 		t.Fatalf("expected code -1 for unmapped error, got %v", body["code"])
 	}
 }
+
+// ---------- handler 字段校验失败（svc 不应被调用） ----------
+
+// expectInvalidParams 断言响应 code=-1 / msg="invalid params"
+func expectInvalidParams(t *testing.T, w *httptest.ResponseRecorder) {
+	t.Helper()
+	body := decodeBody(t, w)
+	if body["code"].(float64) != -1 {
+		t.Fatalf("expected code -1, got %v", body["code"])
+	}
+	if body["msg"].(string) != "invalid params" {
+		t.Fatalf("expected msg \"invalid params\", got %q", body["msg"])
+	}
+}
+
+func TestOrgHandler_Create_FieldsRequired(t *testing.T) {
+	neverCalled := func(label string) orgapp.IService {
+		return &stubOrgService{
+			createFn: func(ctx context.Context, in orgapp.CreateInput, operator string) (*orgdomain.Organization, error) {
+				t.Fatalf("svc.Create must not be called (%s)", label)
+				return nil, nil
+			},
+		}
+	}
+	cases := []struct {
+		name string
+		body map[string]any
+	}{
+		{"missing code", map[string]any{"name": "n", "tenantId": uuid.New()}},
+		{"missing name", map[string]any{"code": "c", "tenantId": uuid.New()}},
+		{"missing tenantId", map[string]any{"code": "c", "name": "n"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newOrgTestEngine(neverCalled(tc.name), testUser())
+			w := doJSON(t, r, http.MethodPost, "/api/v1/org/create", tc.body)
+			expectInvalidParams(t, w)
+		})
+	}
+}
+
+func TestOrgHandler_Update_FieldsRequired(t *testing.T) {
+	neverCalled := func(label string) orgapp.IService {
+		return &stubOrgService{
+			updateFn: func(ctx context.Context, in orgapp.UpdateInput, operator string) (*orgdomain.Organization, error) {
+				t.Fatalf("svc.Update must not be called (%s)", label)
+				return nil, nil
+			},
+		}
+	}
+	cases := []struct {
+		name string
+		body map[string]any
+	}{
+		{"missing id", map[string]any{"name": "n"}},
+		{"missing name", map[string]any{"id": uuid.New()}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newOrgTestEngine(neverCalled(tc.name), testUser())
+			w := doJSON(t, r, http.MethodPost, "/api/v1/org/update", tc.body)
+			expectInvalidParams(t, w)
+		})
+	}
+}
+
+func TestOrgHandler_Delete_FieldsRequired(t *testing.T) {
+	svc := &stubOrgService{
+		deleteFn: func(ctx context.Context, id uuid.UUID, operator string) error {
+			t.Fatal("svc.Delete must not be called")
+			return nil
+		},
+	}
+	r := newOrgTestEngine(svc, testUser())
+	w := doJSON(t, r, http.MethodPost, "/api/v1/org/delete", map[string]any{})
+	expectInvalidParams(t, w)
+}
+
+func TestOrgHandler_Detail_FieldsRequired(t *testing.T) {
+	svc := &stubOrgService{
+		getByID: func(ctx context.Context, id uuid.UUID) (*orgdomain.Organization, error) {
+			t.Fatal("svc.GetByID must not be called")
+			return nil, nil
+		},
+	}
+	r := newOrgTestEngine(svc, testUser())
+	w := doJSON(t, r, http.MethodPost, "/api/v1/org/detail", map[string]any{})
+	expectInvalidParams(t, w)
+}

@@ -45,26 +45,28 @@ type CreateSubInput struct {
 	Type           string
 }
 
-// UpdateInput 批量更新文件夹入参（仅 name/remark，按各环境下的 id 集合）
+// UpdateInput 批量更新文件夹入参（仅 name/remark，按 group_id 全环境同步）
 type UpdateInput struct {
-	IDList []uuid.UUID
-	Name   string
-	Remark string
+	GroupID uuid.UUID
+	Name    string
+	Remark  string
 }
 
-// DeleteInput 删除文件夹入参（按项目 + 编码，删除所有环境下的记录）
+// DeleteInput 删除文件夹入参（按 group_id，软删除全环境记录）
 type DeleteInput struct {
-	ProjectID  uuid.UUID
-	FolderCode string
+	GroupID uuid.UUID
 }
 
-// ListInput 文件夹列表查询入参（仅顶级目录）
+// ListInput 文件夹列表查询入参：
+//   - ParentFolderID 非空：查询该 parent 下的子目录（跨环境去重）
+//   - ParentFolderID 为空：按 ProjectID 查询项目下顶级目录
 type ListInput struct {
-	ProjectID uuid.UUID
-	Code      string
-	Name      string
-	PageNum   int
-	PageSize  int
+	ProjectID      uuid.UUID
+	ParentFolderID *uuid.UUID
+	Code           string
+	Name           string
+	PageNum        int
+	PageSize       int
 }
 
 // IService 文件夹应用服务接口（handler 仅依赖接口，便于单测替换实现）
@@ -91,15 +93,9 @@ func NewService(repo folderdomain.Repository, envRepo envdomain.Repository) *Ser
 // 确保 Service 满足 IService 编译期断言
 var _ IService = (*Service)(nil)
 
-// CreateTop 创建顶级文件夹：项目下所有环境各创建一条，folder-code 项目内唯一
+// CreateTop 创建顶级文件夹：项目下所有环境各创建一条，全环境共享同一 group_id
+// 入参必填性校验已在 handler 层完成，service 仅负责业务编排。
 func (s *Service) CreateTop(ctx context.Context, in CreateTopInput, operator string) ([]*folderdomain.Folder, error) {
-	if in.ProjectID == uuid.Nil || in.Code == "" || in.Name == "" {
-		return nil, ErrInvalidParam
-	}
-	if err := validateTopType(in.Type, in.Code); err != nil {
-		return nil, err
-	}
-
 	envs, err := s.projectEnvs(ctx, in.ProjectID)
 	if err != nil {
 		return nil, err
@@ -119,11 +115,14 @@ func (s *Service) CreateTop(ctx context.Context, in CreateTopInput, operator str
 		return nil, ErrCodeExists
 	}
 
+	// 业务组 ID：一次性生成，全环境共享（标识"业务上是同一个 folder"）
+	groupID := uuid.New()
 	now := time.Now()
 	folders := make([]*folderdomain.Folder, 0, len(envs))
 	for _, e := range envs {
 		folders = append(folders, &folderdomain.Folder{
 			ID:       uuid.New(),
+			GroupID:  groupID,
 			Code:     in.Code,
 			Name:     in.Name,
 			EnvID:    e.ID,
@@ -142,15 +141,9 @@ func (s *Service) CreateTop(ctx context.Context, in CreateTopInput, operator str
 }
 
 // CreateSub 创建二级文件夹：入参为任意环境下 groups 的 id，定位项目后在全环境 groups 下各创建一条
+// 子 folder 与父 folder 分属不同业务实体，子 folder 自有独立的 group_id
+// 入参必填性校验已在 handler 层完成，service 仅负责业务编排。
 func (s *Service) CreateSub(ctx context.Context, in CreateSubInput, operator string) ([]*folderdomain.Folder, error) {
-	if in.ParentFolderID == uuid.Nil || in.Code == "" || in.Name == "" {
-		return nil, ErrInvalidParam
-	}
-	// 二级目录仅支持 common 类型（customer 仅一级）
-	if in.Type != folderdomain.TypeCommon {
-		return nil, ErrInvalidType
-	}
-
 	// 上级必须是顶级 groups 目录
 	parent, err := s.repo.GetByID(ctx, in.ParentFolderID)
 	if err != nil {
@@ -196,12 +189,15 @@ func (s *Service) CreateSub(ctx context.Context, in CreateSubInput, operator str
 		groupsIDs = append(groupsIDs, groups.ID)
 	}
 
+	// 子 folder 的业务组 ID：一次性生成，全环境共享
+	groupID := uuid.New()
 	now := time.Now()
 	folders := make([]*folderdomain.Folder, 0, len(envs))
 	for i, e := range envs {
 		parentID := groupsIDs[i]
 		folders = append(folders, &folderdomain.Folder{
 			ID:             uuid.New(),
+			GroupID:        groupID,
 			Code:           in.Code,
 			Name:           in.Name,
 			EnvID:          e.ID,
@@ -220,13 +216,9 @@ func (s *Service) CreateSub(ctx context.Context, in CreateSubInput, operator str
 	return folders, nil
 }
 
-// Update 批量更新文件夹（按各环境下的 id 集合，仅 name/remark）
+// Update 批量更新文件夹（按 group_id 全环境同步，仅 name/remark）
 func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) error {
-	if len(in.IDList) == 0 || in.Name == "" {
-		return ErrInvalidParam
-	}
-
-	affected, err := s.repo.UpdateByIDs(ctx, in.IDList, in.Name, in.Remark, operator, time.Now())
+	affected, err := s.repo.UpdateByGroupID(ctx, in.GroupID, in.Name, in.Remark, operator, time.Now())
 	if err != nil {
 		return err
 	}
@@ -236,24 +228,10 @@ func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) e
 	return nil
 }
 
-// Delete 删除文件夹：按项目 + 编码删除所有环境下的记录（逻辑删除）
+// Delete 删除文件夹：按 group_id 软删除全环境记录
 func (s *Service) Delete(ctx context.Context, in DeleteInput, operator string) error {
-	if in.ProjectID == uuid.Nil || in.FolderCode == "" {
-		return ErrInvalidParam
-	}
-
-	envs, err := s.projectEnvs(ctx, in.ProjectID)
-	if err != nil {
-		return err
-	}
-
-	envIDs := make([]uuid.UUID, 0, len(envs))
-	for _, e := range envs {
-		envIDs = append(envIDs, e.ID)
-	}
-
 	// 先确认存在再删除（与其它资源删除语义一致）
-	existing, err := s.repo.GetByEnvIDsCode(ctx, envIDs, in.FolderCode)
+	existing, err := s.repo.GetByGroupID(ctx, in.GroupID)
 	if err != nil {
 		return err
 	}
@@ -261,16 +239,12 @@ func (s *Service) Delete(ctx context.Context, in DeleteInput, operator string) e
 		return ErrNotFound
 	}
 
-	_, err = s.repo.DeleteByEnvIDsCode(ctx, envIDs, in.FolderCode, operator)
+	_, err = s.repo.DeleteByGroupID(ctx, in.GroupID, operator)
 	return err
 }
 
 // GetByID 按 ID 查询文件夹
 func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*folderdomain.Folder, error) {
-	if id == uuid.Nil {
-		return nil, ErrInvalidParam
-	}
-
 	f, err := s.repo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -281,32 +255,44 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*folderdomain.Fold
 	return f, nil
 }
 
-// List 分页查询项目下顶级文件夹列表
+// List 分页查询文件夹列表（按 group_id 聚合，屏蔽环境层级）
+// 入参必填性与分页归一化已在 handler 层完成。
+//   - in.ParentFolderID 非空：查询该 parent 下的子目录
+//   - in.ParentFolderID 为空：按 in.ProjectID 查询项目下顶级目录
 func (s *Service) List(ctx context.Context, in ListInput) ([]*folderdomain.Folder, int64, error) {
-	if in.ProjectID == uuid.Nil {
-		return nil, 0, ErrInvalidParam
-	}
-	if in.PageNum <= 0 {
-		in.PageNum = 1
-	}
-	if in.PageSize <= 0 {
-		in.PageSize = 20
-	}
-	if in.PageSize > 200 {
-		in.PageSize = 200
+	var groupIDs []uuid.UUID
+	if in.ParentFolderID != nil && *in.ParentFolderID != uuid.Nil {
+		// 子目录查询
+		gids, err := s.repo.ListSubGroupIDsByParentFolderID(ctx, *in.ParentFolderID)
+		if err != nil {
+			return nil, 0, err
+		}
+		groupIDs = gids
+	} else {
+		// 顶级目录查询
+		envs, err := s.projectEnvs(ctx, in.ProjectID)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		envIDs := make([]uuid.UUID, 0, len(envs))
+		for _, e := range envs {
+			envIDs = append(envIDs, e.ID)
+		}
+
+		gids, err := s.repo.ListTopGroupIDsByEnvIDs(ctx, envIDs)
+		if err != nil {
+			return nil, 0, err
+		}
+		groupIDs = gids
 	}
 
-	envs, err := s.projectEnvs(ctx, in.ProjectID)
-	if err != nil {
-		return nil, 0, err
+	if len(groupIDs) == 0 {
+		return []*folderdomain.Folder{}, 0, nil
 	}
 
-	envIDs := make([]uuid.UUID, 0, len(envs))
-	for _, e := range envs {
-		envIDs = append(envIDs, e.ID)
-	}
-
-	return s.repo.ListTopByEnvIDs(ctx, envIDs, folderdomain.ListFilter{
+	// 按 group_id 集合分页查询（每 group_id 一条代表记录）
+	return s.repo.ListByGroupIDs(ctx, groupIDs, folderdomain.ListFilter{
 		Code:     in.Code,
 		Name:     in.Name,
 		PageNum:  in.PageNum,
@@ -324,19 +310,4 @@ func (s *Service) projectEnvs(ctx context.Context, projectID uuid.UUID) ([]*envd
 		return nil, ErrNoEnvironment
 	}
 	return envs, nil
-}
-
-// validateTopType 校验顶级文件夹类型：type 必须合法；common 顶级目录仅支持 global / groups
-func validateTopType(t, code string) error {
-	switch t {
-	case folderdomain.TypeCommon:
-		if code != "global" && code != "groups" {
-			return ErrCommonCodeInvalid
-		}
-	case folderdomain.TypeCustomer:
-		// customer 仅一级，顶级创建合法
-	default:
-		return ErrInvalidType
-	}
-	return nil
 }

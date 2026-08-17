@@ -11,8 +11,8 @@ auth:
 
 
 database:
-  host: "192.168.1.110"
-#  host: "127.0.0.1"
+#  host: "192.168.1.110"
+  host: "127.0.0.1"
   port: 5432
   user: "env_vault"
   password: "123456"
@@ -27,8 +27,8 @@ redis:
   enabled: true
   mode: "single"
   addrs:
-#    - "127.0.0.1:6379"
-      - "192.168.1.110:6379"
+    - "127.0.0.1:6379"
+#      - "192.168.1.110:6379"
   password: "123456"
   db: 1
   key_prefix: "env_vault"

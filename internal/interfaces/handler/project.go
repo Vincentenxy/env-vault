@@ -77,6 +77,11 @@ func (h *ProjectHandler) Create(c *gin.Context) {
 		return
 	}
 
+	if req.Code == "" || req.Name == "" || req.OrgID == uuid.Nil {
+		response.Error(c, "invalid params")
+		return
+	}
+
 	p, err := h.svc.Create(c, projapp.CreateInput{
 		Code:   req.Code,
 		Name:   req.Name,
@@ -95,6 +100,11 @@ func (h *ProjectHandler) Update(c *gin.Context) {
 	var req UpdateProjectRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, err)
+		return
+	}
+
+	if req.ID == uuid.Nil || req.Name == "" {
+		response.Error(c, "invalid params")
 		return
 	}
 
@@ -118,6 +128,11 @@ func (h *ProjectHandler) Delete(c *gin.Context) {
 		return
 	}
 
+	if req.ID == uuid.Nil {
+		response.Error(c, "invalid params")
+		return
+	}
+
 	err := h.svc.Delete(c, req.ID, operator(c))
 	h.respondError(c, err)
 	if err != nil {
@@ -131,6 +146,11 @@ func (h *ProjectHandler) Detail(c *gin.Context) {
 	var req DetailProjectRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, err)
+		return
+	}
+
+	if req.ID == uuid.Nil {
+		response.Error(c, "invalid params")
 		return
 	}
 

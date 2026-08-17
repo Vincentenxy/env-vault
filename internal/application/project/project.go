@@ -65,11 +65,8 @@ func NewService(repo projdomain.Repository) *Service {
 var _ IService = (*Service)(nil)
 
 // Create 创建项目（业务校验：组织内编码唯一在代码层面显式检查）
+// 入参必填性校验已在 handler 层完成，service 仅负责业务编排。
 func (s *Service) Create(ctx context.Context, in CreateInput, operator string) (*projdomain.Project, error) {
-	if in.Code == "" || in.Name == "" || in.OrgID == uuid.Nil {
-		return nil, ErrInvalidParam
-	}
-
 	existing, err := s.repo.GetByOrgCode(ctx, in.OrgID, in.Code)
 	if err != nil {
 		return nil, err
@@ -98,10 +95,6 @@ func (s *Service) Create(ctx context.Context, in CreateInput, operator string) (
 
 // Update 更新项目
 func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) (*projdomain.Project, error) {
-	if in.ID == uuid.Nil || in.Name == "" {
-		return nil, ErrInvalidParam
-	}
-
 	p, err := s.repo.GetByID(ctx, in.ID)
 	if err != nil {
 		return nil, err
@@ -123,10 +116,6 @@ func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) (
 
 // Delete 软删除项目
 func (s *Service) Delete(ctx context.Context, id uuid.UUID, operator string) error {
-	if id == uuid.Nil {
-		return ErrInvalidParam
-	}
-
 	p, err := s.repo.GetByID(ctx, id)
 	if err != nil {
 		return err
@@ -140,10 +129,6 @@ func (s *Service) Delete(ctx context.Context, id uuid.UUID, operator string) err
 
 // GetByID 按 ID 查询项目
 func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*projdomain.Project, error) {
-	if id == uuid.Nil {
-		return nil, ErrInvalidParam
-	}
-
 	p, err := s.repo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err

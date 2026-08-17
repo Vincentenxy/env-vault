@@ -215,12 +215,12 @@ func TestFolderHandler_Create_BusinessErrors(t *testing.T) {
 // ---------- Update ----------
 
 func TestFolderHandler_Update_Success(t *testing.T) {
-	idList := []uuid.UUID{uuid.New(), uuid.New()}
+	groupID := uuid.New()
 	called := false
 	svc := &stubFolderService{
 		updateFn: func(ctx context.Context, in folderapp.UpdateInput, operator string) error {
 			called = true
-			if len(in.IDList) != 2 || in.Name != "new-name" || in.Remark != "r" {
+			if in.GroupID != groupID || in.Name != "new-name" || in.Remark != "r" {
 				t.Fatalf("input not passed: %+v", in)
 			}
 			return nil
@@ -228,7 +228,7 @@ func TestFolderHandler_Update_Success(t *testing.T) {
 	}
 	r := newFolderTestEngine(svc, testUser())
 	w := doJSONP(t, r, http.MethodPost, "/api/v1/folder/update", map[string]any{
-		"idList": idList, "name": "new-name", "remark": "r",
+		"groupId": groupID, "name": "new-name", "remark": "r",
 	})
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
@@ -250,7 +250,7 @@ func TestFolderHandler_Update_NotFound(t *testing.T) {
 	}
 	r := newFolderTestEngine(svc, testUser())
 	w := doJSONP(t, r, http.MethodPost, "/api/v1/folder/update", map[string]any{
-		"idList": []uuid.UUID{uuid.New()}, "name": "n",
+		"groupId": uuid.New(), "name": "n",
 	})
 	body := decodeBody(t, w)
 	if body["code"].(float64) != -1 {
@@ -261,12 +261,12 @@ func TestFolderHandler_Update_NotFound(t *testing.T) {
 // ---------- Delete ----------
 
 func TestFolderHandler_Delete_Success(t *testing.T) {
-	projectID := uuid.New()
+	groupID := uuid.New()
 	called := false
 	svc := &stubFolderService{
 		deleteFn: func(ctx context.Context, in folderapp.DeleteInput, operator string) error {
 			called = true
-			if in.ProjectID != projectID || in.FolderCode != "global" {
+			if in.GroupID != groupID {
 				t.Fatalf("input not passed: %+v", in)
 			}
 			return nil
@@ -274,7 +274,7 @@ func TestFolderHandler_Delete_Success(t *testing.T) {
 	}
 	r := newFolderTestEngine(svc, testUser())
 	w := doJSONP(t, r, http.MethodPost, "/api/v1/folder/delete", map[string]any{
-		"projectId": projectID, "folderCode": "global",
+		"groupId": groupID,
 	})
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
@@ -412,5 +412,215 @@ func TestFolderHandler_InternalError_FallbackToCodeMinusOne(t *testing.T) {
 	body := decodeBody(t, w)
 	if body["code"].(float64) != -1 {
 		t.Fatalf("expected code -1 for unmapped error, got %v", body["code"])
+	}
+}
+
+// ---------- handler 字段校验失败（svc 不应被调用） ----------
+
+func TestFolderHandler_Create_TopLevel_FieldsRequired(t *testing.T) {
+	neverCalled := func(label string) folderapp.IService {
+		return &stubFolderService{
+			createTopFn: func(ctx context.Context, in folderapp.CreateTopInput, operator string) ([]*folderdomain.Folder, error) {
+				t.Fatalf("svc.CreateTop must not be called (%s)", label)
+				return nil, nil
+			},
+			createSubFn: func(ctx context.Context, in folderapp.CreateSubInput, operator string) ([]*folderdomain.Folder, error) {
+				t.Fatalf("svc.CreateSub must not be called (%s)", label)
+				return nil, nil
+			},
+		}
+	}
+	cases := []struct {
+		name string
+		body map[string]any
+	}{
+		{"missing code", map[string]any{"projectId": uuid.New(), "name": "n", "type": "common"}},
+		{"missing name", map[string]any{"projectId": uuid.New(), "code": "global", "type": "common"}},
+		{"missing type", map[string]any{"projectId": uuid.New(), "code": "global", "name": "n"}},
+		{"missing projectId", map[string]any{"code": "global", "name": "n", "type": "common"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newFolderTestEngine(neverCalled(tc.name), testUser())
+			w := doJSONP(t, r, http.MethodPost, "/api/v1/folder/create", tc.body)
+			expectInvalidParams(t, w)
+		})
+	}
+}
+
+func TestFolderHandler_Create_TopLevel_TypeConstraints(t *testing.T) {
+	// common 顶级目录仅支持 global / groups；其它 code → ErrCommonCodeInvalid
+	neverCalled := func() folderapp.IService {
+		return &stubFolderService{
+			createTopFn: func(ctx context.Context, in folderapp.CreateTopInput, operator string) ([]*folderdomain.Folder, error) {
+				t.Fatal("svc.CreateTop must not be called when type/code constraint fails")
+				return nil, nil
+			},
+		}
+	}
+	r := newFolderTestEngine(neverCalled(), testUser())
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/folder/create", map[string]any{
+		"projectId": uuid.New(), "code": "random", "name": "n", "type": "common",
+	})
+	body := decodeBody(t, w)
+	if body["code"].(float64) != -1 {
+		t.Fatalf("expected code -1, got %v", body["code"])
+	}
+	if body["msg"].(string) != folderapp.ErrCommonCodeInvalid.Error() {
+		t.Fatalf("expected msg %q, got %v", folderapp.ErrCommonCodeInvalid.Error(), body["msg"])
+	}
+}
+
+func TestFolderHandler_Create_SubLevel_TypeMustBeCommon(t *testing.T) {
+	neverCalled := func() folderapp.IService {
+		return &stubFolderService{
+			createSubFn: func(ctx context.Context, in folderapp.CreateSubInput, operator string) ([]*folderdomain.Folder, error) {
+				t.Fatal("svc.CreateSub must not be called when type != common")
+				return nil, nil
+			},
+		}
+	}
+	r := newFolderTestEngine(neverCalled(), testUser())
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/folder/create", map[string]any{
+		"parentFolderId": uuid.New(), "code": "x", "name": "n", "type": "customer",
+	})
+	body := decodeBody(t, w)
+	if body["code"].(float64) != -1 {
+		t.Fatalf("expected code -1, got %v", body["code"])
+	}
+	if body["msg"].(string) != folderapp.ErrInvalidType.Error() {
+		t.Fatalf("expected msg %q, got %v", folderapp.ErrInvalidType.Error(), body["msg"])
+	}
+}
+
+func TestFolderHandler_Update_FieldsRequired(t *testing.T) {
+	neverCalled := func(label string) folderapp.IService {
+		return &stubFolderService{
+			updateFn: func(ctx context.Context, in folderapp.UpdateInput, operator string) error {
+				t.Fatalf("svc.Update must not be called (%s)", label)
+				return nil
+			},
+		}
+	}
+	// handler 语义——groupId 为 nil 且 (name 或 remark 为空) 才视为非法；
+	// 仅 groupId 缺失 / 仅 name 缺失都不会触发。
+	cases := []struct {
+		name string
+		body map[string]any
+	}{
+		{"groupId nil and name empty", map[string]any{"remark": "r"}},
+		{"groupId nil and remark empty", map[string]any{"name": "n"}},
+		{"all empty", map[string]any{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newFolderTestEngine(neverCalled(tc.name), testUser())
+			w := doJSONP(t, r, http.MethodPost, "/api/v1/folder/update", tc.body)
+			expectInvalidParams(t, w)
+		})
+	}
+}
+
+func TestFolderHandler_Delete_FieldsRequired(t *testing.T) {
+	svc := &stubFolderService{
+		deleteFn: func(ctx context.Context, in folderapp.DeleteInput, operator string) error {
+			t.Fatal("svc.Delete must not be called")
+			return nil
+		},
+	}
+	r := newFolderTestEngine(svc, testUser())
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/folder/delete", map[string]any{})
+	expectInvalidParams(t, w)
+}
+
+func TestFolderHandler_Detail_FieldsRequired(t *testing.T) {
+	svc := &stubFolderService{
+		getByID: func(ctx context.Context, id uuid.UUID) (*folderdomain.Folder, error) {
+			t.Fatal("svc.GetByID must not be called")
+			return nil, nil
+		},
+	}
+	r := newFolderTestEngine(svc, testUser())
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/folder/info", map[string]any{})
+	expectInvalidParams(t, w)
+}
+
+func TestFolderHandler_List_FieldsRequired(t *testing.T) {
+	svc := &stubFolderService{
+		listFn: func(ctx context.Context, in folderapp.ListInput) ([]*folderdomain.Folder, int64, error) {
+			t.Fatal("svc.List must not be called")
+			return nil, 0, nil
+		},
+	}
+	r := newFolderTestEngine(svc, testUser())
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/folder/list", map[string]any{})
+	expectInvalidParams(t, w)
+}
+
+// ---------- List：按 parentFolderId 查询子目录 ----------
+
+func TestFolderHandler_List_ByParentFolderID(t *testing.T) {
+	parentID := uuid.New()
+	envID := uuid.New()
+	var captured folderapp.ListInput
+	svc := &stubFolderService{
+		listFn: func(ctx context.Context, in folderapp.ListInput) ([]*folderdomain.Folder, int64, error) {
+			captured = in
+			return []*folderdomain.Folder{
+				{ID: uuid.New(), GroupID: uuid.New(), Code: "ob_efficient_cfg", Name: "OB高效配置", EnvID: envID, ParentFolderID: &parentID, Type: "common"},
+			}, 1, nil
+		},
+	}
+	r := newFolderTestEngine(svc, testUser())
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/folder/list", map[string]any{
+		"parentFolderId": parentID, "code": "ob", "name": "OB",
+	})
+	body := decodeBody(t, w)
+	if body["code"].(float64) != 0 {
+		t.Fatalf("expected 0, got %v body=%s", body["code"], w.Body.String())
+	}
+	if captured.ParentFolderID == nil || *captured.ParentFolderID != parentID {
+		t.Fatalf("expected parentFolderId=%s, got %+v", parentID, captured)
+	}
+	if captured.ProjectID != uuid.Nil {
+		t.Fatalf("expected projectId zero, got %v", captured.ProjectID)
+	}
+	if captured.Code != "ob" || captured.Name != "OB" {
+		t.Fatalf("filters lost: %+v", captured)
+	}
+	data := body["data"].(map[string]any)
+	if data["total"].(float64) != 1 {
+		t.Fatalf("expected total 1, got %v", data["total"])
+	}
+	if len(data["list"].([]any)) != 1 {
+		t.Fatalf("expected 1 item, got %v", data["list"])
+	}
+}
+
+func TestFolderHandler_List_TopLevel_WithoutParent(t *testing.T) {
+	// parentFolderId 缺省时仍走 projectId 顶级目录分支
+	projectID := uuid.New()
+	var captured folderapp.ListInput
+	svc := &stubFolderService{
+		listFn: func(ctx context.Context, in folderapp.ListInput) ([]*folderdomain.Folder, int64, error) {
+			captured = in
+			return []*folderdomain.Folder{
+				{ID: uuid.New(), GroupID: uuid.New(), Code: "global", Name: "全局目录", Type: "common"},
+			}, 1, nil
+		},
+	}
+	r := newFolderTestEngine(svc, testUser())
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/folder/list", map[string]any{
+		"projectId": projectID,
+	})
+	body := decodeBody(t, w)
+	if body["code"].(float64) != 0 {
+		t.Fatalf("expected 0, got %v body=%s", body["code"], w.Body.String())
+	}
+	if captured.ProjectID != projectID {
+		t.Fatalf("expected projectId=%s, got %v", projectID, captured.ProjectID)
+	}
+	if captured.ParentFolderID != nil {
+		t.Fatalf("expected parentFolderId nil, got %+v", captured)
 	}
 }

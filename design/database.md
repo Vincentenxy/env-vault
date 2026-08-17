@@ -174,14 +174,19 @@ CREATE INDEX IF NOT EXISTS idx_environment_info_project_order ON environment_inf
 
 **说明**：文件夹表。文件夹归属环境之下（`env_id` 关联环境，代码层面维护，无外键），`parent_folder_id` 自关联表示层级（NULL 为顶层，非 NULL 为二级），最多 2 层。
 
-**逻辑视图约定**：业务上"项目下的一个 folder"在物理上展开为该项目每个环境下的各一条记录（创建时对项目下所有环境批量落库），所有操作从逻辑上将这些记录视为一个整体。
+**业务组（`group_id`）约定**：业务上"项目下的一个 folder"在物理上展开为该项目每个环境下的各一条记录（创建时对项目下所有环境批量落库）。所有这些环境实例**共享同一个 `group_id`**，即"业务上是同一个 folder"用一个显式字段 `group_id` 关联。`group_id` 在创建时由服务端一次性生成，全环境共享。`group_id` 的引入将后续：
+- **聚合查询**：直接按 `group_id` 过滤（替代之前的 `DISTINCT ON (code)` 方案）
+- **批量更新**：按 `group_id` 一次更新全环境（替代之前传 `idList`）
+- **批量删除**：按 `group_id` 一次删除全环境
+- **后续子资源**（变量、密钥等）可通过挂 `folder_group_id` 关联
 
 **保留字评估**：`type` 在 PostgreSQL 中属于 non-reserved 关键字（不可用作函数名/类型名），**可安全用作列名**；`folder` 非关键字。
 
 ```sql
 CREATE TABLE IF NOT EXISTS folder_info (
     id               uuid        PRIMARY KEY,
-    code             text        NOT NULL,                 -- 文件夹编码（项目内唯一）
+    group_id         uuid        NOT NULL,                 -- 业务组 ID：跨环境共享同一 group_id 的 folder 视为"业务上是同一个 folder"（创建时全环境共享同一 group_id）
+    code             text        NOT NULL,                 -- 文件夹编码（同一 env_id 内唯一；顶级跨环境去重由 group_id 关联）
     name             text        NOT NULL,                 -- 文件夹名称
     env_id           uuid        NOT NULL,                 -- 所属环境 ID（代码层面关联，无外键）
     parent_folder_id uuid,                                 -- 父文件夹 ID（NULL 为顶层，非 NULL 为二级）
@@ -196,6 +201,8 @@ CREATE TABLE IF NOT EXISTS folder_info (
     update_at        timestamptz NOT NULL DEFAULT now()
 );
 
+-- 按业务组查询/批量更新/批量删除（屏蔽环境层级）
+CREATE INDEX IF NOT EXISTS idx_folder_info_group ON folder_info (group_id);
 -- 按环境查询文件夹列表
 CREATE INDEX IF NOT EXISTS idx_folder_info_env ON folder_info (env_id);
 -- 环境内按编码查询文件夹（唯一性在代码层面保证）
@@ -210,6 +217,7 @@ CREATE INDEX IF NOT EXISTS idx_folder_info_parent_code ON folder_info (parent_fo
 
 | 索引名 | 字段 | 说明 |
 |--------|------|------|
+| `idx_folder_info_group` | `group_id` | 业务组维度：聚合查询 / 批量更新 / 批量删除（屏蔽环境层级） |
 | `idx_folder_info_env` | `env_id` | 查询环境下全部文件夹 |
 | `idx_folder_info_env_code` | `env_id, code` | 环境内按编码定位文件夹 |
 | `idx_folder_info_parent` | `parent_folder_id` | 按父文件夹查询二级目录 |
@@ -224,6 +232,13 @@ CREATE INDEX IF NOT EXISTS idx_folder_info_parent_code ON folder_info (parent_fo
 | `common` 顶级目录 | 仅支持 `global` 与 `groups` 两个编码 |
 | `global` 仅一层 | global 下不允许建二级目录 |
 | `groups` 两层 | groups 下可建二级目录（如 groups/ob_efficient_cfg） |
-| 项目内编码唯一 | 顶级 folder 的 code 在项目（跨环境）内唯一；二级 folder 的 code 在 groups 下唯一 |
+| `group_id` 一致性 | 同一业务 folder 的所有环境实例必须共享同一 `group_id`（创建时一次性生成） |
+| `(env_id, code)` 唯一 | 同一环境内同一 `code` 只能有一条 folder 记录（顶级 / 二级均按所在环境唯一） |
+| `(parent_folder_id, code)` 唯一 | 同一父 folder 下同一 `code` 只能有一条子 folder 记录（二级目录唯一性） |
 
 **project_id 关联说明**：folder_info 仅冗余直接父级 `env_id`（遵循项目层级惯例，如 project_info 只存 org_id）。按项目维度查询/删除时，通过 `env_id` 关联 environment_info 过滤 `project_id` 实现。
+
+**group_id 与 parent_folder_id 关系**：
+- `parent_folder_id` 仍是某个具体环境下父 folder 的 `id`（用于定位层级）
+- 子 folder 与父 folder 分属不同业务实体，因此**子 folder 的 `group_id` 与父 folder 的 `group_id` 不同**
+- 二级目录创建时，先通过 `parent_folder_id` 找到该父 folder 记录，定位项目后再展开全环境，每个环境下的子 folder 共享子 folder 的同一个 `group_id`

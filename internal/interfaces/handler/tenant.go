@@ -77,6 +77,11 @@ func (h *TenantHandler) Create(c *gin.Context) {
 		return
 	}
 
+	if req.Code == "" || req.Name == "" {
+		response.Error(c, "invalid params")
+		return
+	}
+
 	t, err := h.svc.Create(c, tenantapp.CreateInput{
 		Code:   req.Code,
 		Name:   req.Name,
@@ -94,6 +99,11 @@ func (h *TenantHandler) Update(c *gin.Context) {
 	var req UpdateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, err)
+		return
+	}
+
+	if req.ID == uuid.Nil || req.Name == "" {
+		response.Error(c, "invalid params")
 		return
 	}
 
@@ -117,6 +127,11 @@ func (h *TenantHandler) Delete(c *gin.Context) {
 		return
 	}
 
+	if req.ID == uuid.Nil {
+		response.Error(c, "invalid params")
+		return
+	}
+
 	err := h.svc.Delete(c, req.ID, operator(c))
 	h.respondError(c, err)
 	if err != nil {
@@ -130,6 +145,11 @@ func (h *TenantHandler) Detail(c *gin.Context) {
 	var req DetailRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, err)
+		return
+	}
+
+	if req.ID == uuid.Nil {
+		response.Error(c, "invalid params")
 		return
 	}
 

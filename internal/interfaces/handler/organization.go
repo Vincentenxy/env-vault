@@ -77,6 +77,11 @@ func (h *OrganizationHandler) Create(c *gin.Context) {
 		return
 	}
 
+	if req.Code == "" || req.Name == "" || req.TenantID == uuid.Nil {
+		response.Error(c, "invalid params")
+		return
+	}
+
 	o, err := h.svc.Create(c, orgapp.CreateInput{
 		Code:     req.Code,
 		Name:     req.Name,
@@ -95,6 +100,11 @@ func (h *OrganizationHandler) Update(c *gin.Context) {
 	var req UpdateOrgRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, err)
+		return
+	}
+
+	if req.ID == uuid.Nil || req.Name == "" {
+		response.Error(c, "invalid params")
 		return
 	}
 
@@ -118,6 +128,11 @@ func (h *OrganizationHandler) Delete(c *gin.Context) {
 		return
 	}
 
+	if req.ID == uuid.Nil {
+		response.Error(c, "invalid params")
+		return
+	}
+
 	err := h.svc.Delete(c, req.ID, operator(c))
 	h.respondError(c, err)
 	if err != nil {
@@ -131,6 +146,11 @@ func (h *OrganizationHandler) Detail(c *gin.Context) {
 	var req DetailOrgRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, err)
+		return
+	}
+
+	if req.ID == uuid.Nil {
+		response.Error(c, "invalid params")
 		return
 	}
 

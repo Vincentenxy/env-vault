@@ -14,14 +14,17 @@ import (
 
 // stubFolderRepo 内存实现的文件夹 Repository，便于 application 层单测
 type stubFolderRepo struct {
-	createBatch     func(ctx context.Context, folders []*folderdomain.Folder) error
-	updateByIDs     func(ctx context.Context, ids []uuid.UUID, name, remark, updateBy string, updateAt time.Time) (int64, error)
-	deleteByEnvCode func(ctx context.Context, envIDs []uuid.UUID, code, deleteBy string) (int64, error)
-	getByID         func(ctx context.Context, id uuid.UUID) (*folderdomain.Folder, error)
-	getByEnvIDsCode func(ctx context.Context, envIDs []uuid.UUID, code string) (*folderdomain.Folder, error)
-	getByEnvCode    func(ctx context.Context, envID uuid.UUID, code string) (*folderdomain.Folder, error)
-	getByParentCode func(ctx context.Context, parentID uuid.UUID, code string) (*folderdomain.Folder, error)
-	listTopByEnvIDs func(ctx context.Context, envIDs []uuid.UUID, filter folderdomain.ListFilter) ([]*folderdomain.Folder, int64, error)
+	createBatch                     func(ctx context.Context, folders []*folderdomain.Folder) error
+	updateByGroupID                 func(ctx context.Context, groupID uuid.UUID, name, remark, updateBy string, updateAt time.Time) (int64, error)
+	deleteByGroupID                 func(ctx context.Context, groupID uuid.UUID, deleteBy string) (int64, error)
+	getByID                         func(ctx context.Context, id uuid.UUID) (*folderdomain.Folder, error)
+	getByGroupID                    func(ctx context.Context, groupID uuid.UUID) (*folderdomain.Folder, error)
+	getByEnvIDsCode                 func(ctx context.Context, envIDs []uuid.UUID, code string) (*folderdomain.Folder, error)
+	getByEnvCode                    func(ctx context.Context, envID uuid.UUID, code string) (*folderdomain.Folder, error)
+	getByParentCode                 func(ctx context.Context, parentID uuid.UUID, code string) (*folderdomain.Folder, error)
+	listTopGroupIDsByEnvIDs         func(ctx context.Context, envIDs []uuid.UUID) ([]uuid.UUID, error)
+	listSubGroupIDsByParentFolderID func(ctx context.Context, parentFolderID uuid.UUID) ([]uuid.UUID, error)
+	listByGroupIDs                  func(ctx context.Context, groupIDs []uuid.UUID, filter folderdomain.ListFilter) ([]*folderdomain.Folder, int64, error)
 }
 
 func (s *stubFolderRepo) CreateBatch(ctx context.Context, folders []*folderdomain.Folder) error {
@@ -30,21 +33,27 @@ func (s *stubFolderRepo) CreateBatch(ctx context.Context, folders []*folderdomai
 	}
 	return nil
 }
-func (s *stubFolderRepo) UpdateByIDs(ctx context.Context, ids []uuid.UUID, name, remark, updateBy string, updateAt time.Time) (int64, error) {
-	if s.updateByIDs != nil {
-		return s.updateByIDs(ctx, ids, name, remark, updateBy, updateAt)
+func (s *stubFolderRepo) UpdateByGroupID(ctx context.Context, groupID uuid.UUID, name, remark, updateBy string, updateAt time.Time) (int64, error) {
+	if s.updateByGroupID != nil {
+		return s.updateByGroupID(ctx, groupID, name, remark, updateBy, updateAt)
 	}
-	return int64(len(ids)), nil
+	return 1, nil
 }
-func (s *stubFolderRepo) DeleteByEnvIDsCode(ctx context.Context, envIDs []uuid.UUID, code, deleteBy string) (int64, error) {
-	if s.deleteByEnvCode != nil {
-		return s.deleteByEnvCode(ctx, envIDs, code, deleteBy)
+func (s *stubFolderRepo) DeleteByGroupID(ctx context.Context, groupID uuid.UUID, deleteBy string) (int64, error) {
+	if s.deleteByGroupID != nil {
+		return s.deleteByGroupID(ctx, groupID, deleteBy)
 	}
 	return 1, nil
 }
 func (s *stubFolderRepo) GetByID(ctx context.Context, id uuid.UUID) (*folderdomain.Folder, error) {
 	if s.getByID != nil {
 		return s.getByID(ctx, id)
+	}
+	return nil, nil
+}
+func (s *stubFolderRepo) GetByGroupID(ctx context.Context, groupID uuid.UUID) (*folderdomain.Folder, error) {
+	if s.getByGroupID != nil {
+		return s.getByGroupID(ctx, groupID)
 	}
 	return nil, nil
 }
@@ -66,9 +75,21 @@ func (s *stubFolderRepo) GetByParentCode(ctx context.Context, parentID uuid.UUID
 	}
 	return nil, nil
 }
-func (s *stubFolderRepo) ListTopByEnvIDs(ctx context.Context, envIDs []uuid.UUID, filter folderdomain.ListFilter) ([]*folderdomain.Folder, int64, error) {
-	if s.listTopByEnvIDs != nil {
-		return s.listTopByEnvIDs(ctx, envIDs, filter)
+func (s *stubFolderRepo) ListTopGroupIDsByEnvIDs(ctx context.Context, envIDs []uuid.UUID) ([]uuid.UUID, error) {
+	if s.listTopGroupIDsByEnvIDs != nil {
+		return s.listTopGroupIDsByEnvIDs(ctx, envIDs)
+	}
+	return nil, nil
+}
+func (s *stubFolderRepo) ListSubGroupIDsByParentFolderID(ctx context.Context, parentFolderID uuid.UUID) ([]uuid.UUID, error) {
+	if s.listSubGroupIDsByParentFolderID != nil {
+		return s.listSubGroupIDsByParentFolderID(ctx, parentFolderID)
+	}
+	return nil, nil
+}
+func (s *stubFolderRepo) ListByGroupIDs(ctx context.Context, groupIDs []uuid.UUID, filter folderdomain.ListFilter) ([]*folderdomain.Folder, int64, error) {
+	if s.listByGroupIDs != nil {
+		return s.listByGroupIDs(ctx, groupIDs, filter)
 	}
 	return nil, 0, nil
 }
@@ -200,35 +221,6 @@ func TestService_CreateTop_CodeExists(t *testing.T) {
 	}
 }
 
-func TestService_CreateTop_InvalidType(t *testing.T) {
-	projectID := uuid.New()
-	envRepo := &stubEnvRepo{list: func(ctx context.Context, pid uuid.UUID) ([]*envdomain.Environment, error) {
-		return newTestEnvs(projectID, 1), nil
-	}}
-	svc := NewService(&stubFolderRepo{}, envRepo)
-	_, err := svc.CreateTop(context.Background(), CreateTopInput{
-		ProjectID: projectID, Code: "xxx", Name: "n", Type: "unknown",
-	}, "u")
-	if !errors.Is(err, ErrInvalidType) {
-		t.Fatalf("expected ErrInvalidType, got %v", err)
-	}
-}
-
-func TestService_CreateTop_CommonCodeInvalid(t *testing.T) {
-	projectID := uuid.New()
-	envRepo := &stubEnvRepo{list: func(ctx context.Context, pid uuid.UUID) ([]*envdomain.Environment, error) {
-		return newTestEnvs(projectID, 1), nil
-	}}
-	svc := NewService(&stubFolderRepo{}, envRepo)
-	// common 顶级目录仅支持 global / groups
-	_, err := svc.CreateTop(context.Background(), CreateTopInput{
-		ProjectID: projectID, Code: "other", Name: "n", Type: folderdomain.TypeCommon,
-	}, "u")
-	if !errors.Is(err, ErrCommonCodeInvalid) {
-		t.Fatalf("expected ErrCommonCodeInvalid, got %v", err)
-	}
-}
-
 func TestService_CreateTop_CustomerCodeAllowed(t *testing.T) {
 	projectID := uuid.New()
 	envs := newTestEnvs(projectID, 2)
@@ -273,20 +265,6 @@ func TestService_CreateTop_NoEnvironment(t *testing.T) {
 	}, "u")
 	if !errors.Is(err, ErrNoEnvironment) {
 		t.Fatalf("expected ErrNoEnvironment, got %v", err)
-	}
-}
-
-func TestService_CreateTop_InvalidParam(t *testing.T) {
-	svc := NewService(&stubFolderRepo{}, &stubEnvRepo{})
-	cases := []CreateTopInput{
-		{ProjectID: uuid.Nil, Code: "c", Name: "n", Type: folderdomain.TypeCommon},
-		{ProjectID: uuid.New(), Code: "", Name: "n", Type: folderdomain.TypeCommon},
-		{ProjectID: uuid.New(), Code: "c", Name: "", Type: folderdomain.TypeCommon},
-	}
-	for _, in := range cases {
-		if _, err := svc.CreateTop(context.Background(), in, "u"); !errors.Is(err, ErrInvalidParam) {
-			t.Fatalf("expected ErrInvalidParam for %+v, got %v", in, err)
-		}
 	}
 }
 
@@ -400,25 +378,6 @@ func TestService_CreateSub_ParentNotFound(t *testing.T) {
 	}
 }
 
-func TestService_CreateSub_InvalidType(t *testing.T) {
-	// 二级目录只允许 common（customer 仅一级）
-	parentID := uuid.New()
-	folderRepo := &stubFolderRepo{
-		getByID: func(ctx context.Context, id uuid.UUID) (*folderdomain.Folder, error) {
-			f := newTestFolder(uuid.New(), "groups", nil)
-			f.ID = parentID
-			return f, nil
-		},
-	}
-	svc := NewService(folderRepo, &stubEnvRepo{})
-	_, err := svc.CreateSub(context.Background(), CreateSubInput{
-		ParentFolderID: parentID, Code: "x", Name: "n", Type: folderdomain.TypeCustomer,
-	}, "u")
-	if !errors.Is(err, ErrInvalidType) {
-		t.Fatalf("expected ErrInvalidType, got %v", err)
-	}
-}
-
 func TestService_CreateSub_CodeExistsUnderGroups(t *testing.T) {
 	projectID := uuid.New()
 	envs := newTestEnvs(projectID, 1)
@@ -488,13 +447,13 @@ func TestService_CreateSub_GroupsMissingInEnv(t *testing.T) {
 }
 
 func TestService_Update_Success(t *testing.T) {
-	ids := []uuid.UUID{uuid.New(), uuid.New()}
+	groupID := uuid.New()
 	called := false
 	folderRepo := &stubFolderRepo{
-		updateByIDs: func(ctx context.Context, gids []uuid.UUID, name, remark, updateBy string, updateAt time.Time) (int64, error) {
+		updateByGroupID: func(ctx context.Context, gid uuid.UUID, name, remark, updateBy string, updateAt time.Time) (int64, error) {
 			called = true
-			if len(gids) != 2 || name != "new-name" || remark != "new-remark" {
-				t.Fatalf("update args wrong: ids=%v name=%s remark=%s", gids, name, remark)
+			if gid != groupID || name != "new-name" || remark != "new-remark" {
+				t.Fatalf("update args wrong: gid=%v name=%s remark=%s", gid, name, remark)
 			}
 			if updateBy != "operator" {
 				t.Fatalf("updateBy not set: %s", updateBy)
@@ -504,34 +463,24 @@ func TestService_Update_Success(t *testing.T) {
 	}
 	svc := NewService(folderRepo, &stubEnvRepo{})
 	if err := svc.Update(context.Background(), UpdateInput{
-		IDList: ids, Name: "new-name", Remark: "new-remark",
+		GroupID: groupID, Name: "new-name", Remark: "new-remark",
 	}, "operator"); err != nil {
 		t.Fatalf("expected nil err, got %v", err)
 	}
 	if !called {
-		t.Fatal("repo.UpdateByIDs not called")
-	}
-}
-
-func TestService_Update_InvalidParam(t *testing.T) {
-	svc := NewService(&stubFolderRepo{}, &stubEnvRepo{})
-	if err := svc.Update(context.Background(), UpdateInput{IDList: nil, Name: "n"}, "u"); !errors.Is(err, ErrInvalidParam) {
-		t.Fatalf("expected ErrInvalidParam for empty idList")
-	}
-	if err := svc.Update(context.Background(), UpdateInput{IDList: []uuid.UUID{uuid.New()}, Name: ""}, "u"); !errors.Is(err, ErrInvalidParam) {
-		t.Fatalf("expected ErrInvalidParam for empty name")
+		t.Fatal("repo.UpdateByGroupID not called")
 	}
 }
 
 func TestService_Update_NotFound(t *testing.T) {
 	folderRepo := &stubFolderRepo{
-		updateByIDs: func(ctx context.Context, ids []uuid.UUID, name, remark, updateBy string, updateAt time.Time) (int64, error) {
+		updateByGroupID: func(ctx context.Context, gid uuid.UUID, name, remark, updateBy string, updateAt time.Time) (int64, error) {
 			return 0, nil
 		},
 	}
 	svc := NewService(folderRepo, &stubEnvRepo{})
 	err := svc.Update(context.Background(), UpdateInput{
-		IDList: []uuid.UUID{uuid.New()}, Name: "n",
+		GroupID: uuid.New(), Name: "n",
 	}, "u")
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
@@ -539,60 +488,51 @@ func TestService_Update_NotFound(t *testing.T) {
 }
 
 func TestService_Delete_Success(t *testing.T) {
-	projectID := uuid.New()
-	envs := newTestEnvs(projectID, 2)
+	groupID := uuid.New()
+	calledGet := false
+	calledDel := false
 	folderRepo := &stubFolderRepo{
-		getByEnvIDsCode: func(ctx context.Context, ids []uuid.UUID, code string) (*folderdomain.Folder, error) {
-			if len(ids) != 2 || code != "global" {
-				t.Fatalf("lookup args wrong: ids=%v code=%s", ids, code)
+		getByGroupID: func(ctx context.Context, gid uuid.UUID) (*folderdomain.Folder, error) {
+			calledGet = true
+			if gid != groupID {
+				t.Fatalf("get groupID wrong: %v", gid)
 			}
-			return newTestFolder(ids[0], code, nil), nil
+			return newTestFolder(uuid.New(), "global", nil), nil
 		},
-		deleteByEnvCode: func(ctx context.Context, ids []uuid.UUID, code, by string) (int64, error) {
-			if len(ids) != 2 || code != "global" || by != "operator" {
-				t.Fatalf("delete args wrong: ids=%v code=%s by=%s", ids, code, by)
+		deleteByGroupID: func(ctx context.Context, gid uuid.UUID, by string) (int64, error) {
+			calledDel = true
+			if gid != groupID || by != "operator" {
+				t.Fatalf("delete args wrong: gid=%v by=%s", gid, by)
 			}
 			return 2, nil
 		},
 	}
-	envRepo := &stubEnvRepo{list: func(ctx context.Context, pid uuid.UUID) ([]*envdomain.Environment, error) {
-		return envs, nil
-	}}
-	svc := NewService(folderRepo, envRepo)
+	svc := NewService(folderRepo, &stubEnvRepo{})
 	if err := svc.Delete(context.Background(), DeleteInput{
-		ProjectID: projectID, FolderCode: "global",
+		GroupID: groupID,
 	}, "operator"); err != nil {
 		t.Fatalf("expected nil err, got %v", err)
+	}
+	if !calledGet {
+		t.Fatal("repo.GetByGroupID not called")
+	}
+	if !calledDel {
+		t.Fatal("repo.DeleteByGroupID not called")
 	}
 }
 
 func TestService_Delete_NotFound(t *testing.T) {
-	projectID := uuid.New()
-	envs := newTestEnvs(projectID, 1)
 	folderRepo := &stubFolderRepo{
-		getByEnvIDsCode: func(ctx context.Context, ids []uuid.UUID, code string) (*folderdomain.Folder, error) {
+		getByGroupID: func(ctx context.Context, gid uuid.UUID) (*folderdomain.Folder, error) {
 			return nil, nil
 		},
 	}
-	envRepo := &stubEnvRepo{list: func(ctx context.Context, pid uuid.UUID) ([]*envdomain.Environment, error) {
-		return envs, nil
-	}}
-	svc := NewService(folderRepo, envRepo)
+	svc := NewService(folderRepo, &stubEnvRepo{})
 	err := svc.Delete(context.Background(), DeleteInput{
-		ProjectID: projectID, FolderCode: "global",
+		GroupID: uuid.New(),
 	}, "u")
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
-	}
-}
-
-func TestService_Delete_InvalidParam(t *testing.T) {
-	svc := NewService(&stubFolderRepo{}, &stubEnvRepo{})
-	if err := svc.Delete(context.Background(), DeleteInput{ProjectID: uuid.Nil, FolderCode: "c"}, "u"); !errors.Is(err, ErrInvalidParam) {
-		t.Fatalf("expected ErrInvalidParam for nil project")
-	}
-	if err := svc.Delete(context.Background(), DeleteInput{ProjectID: uuid.New(), FolderCode: ""}, "u"); !errors.Is(err, ErrInvalidParam) {
-		t.Fatalf("expected ErrInvalidParam for empty code")
 	}
 }
 
@@ -608,13 +548,20 @@ func TestService_List_Success_PassesFilters(t *testing.T) {
 	envs := newTestEnvs(projectID, 2)
 	envIDs := []uuid.UUID{envs[0].ID, envs[1].ID}
 	captured := folderdomain.ListFilter{}
+	groupIDs := []uuid.UUID{uuid.New(), uuid.New()}
 	folderRepo := &stubFolderRepo{
-		listTopByEnvIDs: func(ctx context.Context, ids []uuid.UUID, filter folderdomain.ListFilter) ([]*folderdomain.Folder, int64, error) {
+		listTopGroupIDsByEnvIDs: func(ctx context.Context, ids []uuid.UUID) ([]uuid.UUID, error) {
 			if len(ids) != 2 {
 				t.Fatalf("expected 2 env ids, got %v", ids)
 			}
+			return groupIDs, nil
+		},
+		listByGroupIDs: func(ctx context.Context, gids []uuid.UUID, filter folderdomain.ListFilter) ([]*folderdomain.Folder, int64, error) {
+			if len(gids) != 2 {
+				t.Fatalf("expected 2 group ids, got %v", gids)
+			}
 			captured = filter
-			return []*folderdomain.Folder{newTestFolder(ids[0], "global", nil)}, 1, nil
+			return []*folderdomain.Folder{newTestFolder(envs[0].ID, "global", nil)}, 1, nil
 		},
 	}
 	envRepo := &stubEnvRepo{list: func(ctx context.Context, pid uuid.UUID) ([]*envdomain.Environment, error) {
@@ -643,7 +590,10 @@ func TestService_List_DefaultPagination(t *testing.T) {
 	projectID := uuid.New()
 	captured := folderdomain.ListFilter{}
 	folderRepo := &stubFolderRepo{
-		listTopByEnvIDs: func(ctx context.Context, ids []uuid.UUID, filter folderdomain.ListFilter) ([]*folderdomain.Folder, int64, error) {
+		listTopGroupIDsByEnvIDs: func(ctx context.Context, ids []uuid.UUID) ([]uuid.UUID, error) {
+			return []uuid.UUID{uuid.New()}, nil
+		},
+		listByGroupIDs: func(ctx context.Context, gids []uuid.UUID, filter folderdomain.ListFilter) ([]*folderdomain.Folder, int64, error) {
 			captured = filter
 			return nil, 0, nil
 		},
@@ -652,15 +602,60 @@ func TestService_List_DefaultPagination(t *testing.T) {
 		return newTestEnvs(projectID, 1), nil
 	}}
 	svc := NewService(folderRepo, envRepo)
+	// 字段校验与分页归一化均在 handler 层完成；service 直接透传 input
 	_, _, _ = svc.List(context.Background(), ListInput{ProjectID: projectID})
-	if captured.PageNum != 1 || captured.PageSize != 20 {
-		t.Fatalf("expected default pageNum=1 pageSize=20, got %+v", captured)
+	if captured.PageNum != 0 || captured.PageSize != 0 {
+		t.Fatalf("service must not normalize page params, got %+v", captured)
 	}
 }
 
-func TestService_List_InvalidParam(t *testing.T) {
-	svc := NewService(&stubFolderRepo{}, &stubEnvRepo{})
-	if _, _, err := svc.List(context.Background(), ListInput{ProjectID: uuid.Nil}); !errors.Is(err, ErrInvalidParam) {
-		t.Fatalf("expected ErrInvalidParam, got %v", err)
+func TestService_List_ByParentFolderID(t *testing.T) {
+	parentFolderID := uuid.New()
+	captured := folderdomain.ListFilter{}
+	groupIDs := []uuid.UUID{uuid.New(), uuid.New()}
+
+	folderRepo := &stubFolderRepo{
+		listSubGroupIDsByParentFolderID: func(ctx context.Context, pid uuid.UUID) ([]uuid.UUID, error) {
+			if pid != parentFolderID {
+				t.Fatalf("unexpected parent id %s", pid)
+			}
+			return groupIDs, nil
+		},
+		listByGroupIDs: func(ctx context.Context, gids []uuid.UUID, filter folderdomain.ListFilter) ([]*folderdomain.Folder, int64, error) {
+			if len(gids) != 2 {
+				t.Fatalf("expected 2 group ids, got %v", gids)
+			}
+			captured = filter
+			return []*folderdomain.Folder{newTestFolder(uuid.New(), "ob_efficient_cfg", &parentFolderID)}, 1, nil
+		},
+		// 顶级入口不应被调用
+		listTopGroupIDsByEnvIDs: func(ctx context.Context, ids []uuid.UUID) ([]uuid.UUID, error) {
+			t.Fatal("ListTopGroupIDsByEnvIDs must not be called when ParentFolderID is set")
+			return nil, nil
+		},
+	}
+	envRepo := &stubEnvRepo{
+		list: func(ctx context.Context, pid uuid.UUID) ([]*envdomain.Environment, error) {
+			t.Fatal("envRepo.List must not be called when ParentFolderID is set")
+			return nil, nil
+		},
+	}
+	svc := NewService(folderRepo, envRepo)
+	parent := parentFolderID
+	_, total, err := svc.List(context.Background(), ListInput{
+		ParentFolderID: &parent,
+		Code:           "ob",
+		Name:           "OB",
+		PageNum:        1,
+		PageSize:       10,
+	})
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("expected total 1, got %d", total)
+	}
+	if captured.Code != "ob" || captured.Name != "OB" {
+		t.Fatalf("filters lost: %+v", captured)
 	}
 }

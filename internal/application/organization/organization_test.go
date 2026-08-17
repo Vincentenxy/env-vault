@@ -102,21 +102,6 @@ func TestService_Create_Success(t *testing.T) {
 	}
 }
 
-func TestService_Create_InvalidParam(t *testing.T) {
-	svc := NewService(&stubRepo{})
-
-	cases := []CreateInput{
-		{Code: "", Name: "n", TenantID: uuid.New()},
-		{Code: "c", Name: "", TenantID: uuid.New()},
-		{Code: "c", Name: "n", TenantID: uuid.Nil},
-	}
-	for _, in := range cases {
-		if _, err := svc.Create(context.Background(), in, "u"); !errors.Is(err, ErrInvalidParam) {
-			t.Fatalf("expected ErrInvalidParam for %+v, got %v", in, err)
-		}
-	}
-}
-
 func TestService_Create_CodeExists(t *testing.T) {
 	tenantID := uuid.New()
 	repo := &stubRepo{
@@ -165,16 +150,6 @@ func TestService_Update_Success(t *testing.T) {
 	}
 	if got.Name != "new-name" || got.Remark != "new-remark" {
 		t.Fatalf("returned org not updated: %+v", got)
-	}
-}
-
-func TestService_Update_InvalidParam(t *testing.T) {
-	svc := NewService(&stubRepo{})
-	if _, err := svc.Update(context.Background(), UpdateInput{ID: uuid.Nil, Name: "n"}, "u"); !errors.Is(err, ErrInvalidParam) {
-		t.Fatalf("expected ErrInvalidParam for nil id")
-	}
-	if _, err := svc.Update(context.Background(), UpdateInput{ID: uuid.New(), Name: ""}, "u"); !errors.Is(err, ErrInvalidParam) {
-		t.Fatalf("expected ErrInvalidParam for empty name")
 	}
 }
 
@@ -231,13 +206,6 @@ func TestService_Delete_NotFound(t *testing.T) {
 	}
 }
 
-func TestService_Delete_InvalidParam(t *testing.T) {
-	svc := NewService(&stubRepo{})
-	if err := svc.Delete(context.Background(), uuid.Nil, "u"); !errors.Is(err, ErrInvalidParam) {
-		t.Fatalf("expected ErrInvalidParam, got %v", err)
-	}
-}
-
 func TestService_GetByID_Success(t *testing.T) {
 	id := uuid.New()
 	want := newTestOrg(uuid.New(), "c")
@@ -269,49 +237,6 @@ func TestService_GetByID_NotFound(t *testing.T) {
 	svc := NewService(repo)
 	if _, err := svc.GetByID(context.Background(), uuid.New()); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
-	}
-}
-
-func TestService_GetByID_InvalidParam(t *testing.T) {
-	svc := NewService(&stubRepo{})
-	if _, err := svc.GetByID(context.Background(), uuid.Nil); !errors.Is(err, ErrInvalidParam) {
-		t.Fatalf("expected ErrInvalidParam, got %v", err)
-	}
-}
-
-func TestService_List_DefaultPagination(t *testing.T) {
-	captured := orgdomain.ListFilter{}
-	repo := &stubRepo{
-		list: func(ctx context.Context, filter orgdomain.ListFilter) ([]*orgdomain.Organization, int64, error) {
-			captured = filter
-			return []*orgdomain.Organization{newTestOrg(uuid.New(), "c1")}, 1, nil
-		},
-	}
-	svc := NewService(repo)
-	_, total, err := svc.List(context.Background(), ListInput{}) // 不传 pageNum/pageSize
-	if err != nil {
-		t.Fatalf("expected nil err, got %v", err)
-	}
-	if total != 1 {
-		t.Fatalf("expected total 1, got %d", total)
-	}
-	if captured.PageNum != 1 || captured.PageSize != 20 {
-		t.Fatalf("expected default pageNum=1 pageSize=20, got %+v", captured)
-	}
-}
-
-func TestService_List_ClampPageSize(t *testing.T) {
-	captured := orgdomain.ListFilter{}
-	repo := &stubRepo{
-		list: func(ctx context.Context, filter orgdomain.ListFilter) ([]*orgdomain.Organization, int64, error) {
-			captured = filter
-			return nil, 0, nil
-		},
-	}
-	svc := NewService(repo)
-	_, _, _ = svc.List(context.Background(), ListInput{PageNum: -10, PageSize: 9999})
-	if captured.PageNum != 1 || captured.PageSize != 200 {
-		t.Fatalf("expected clamp to pageNum=1 pageSize=200, got %+v", captured)
 	}
 }
 

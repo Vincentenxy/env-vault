@@ -26,6 +26,7 @@ func NewFolderHandler(svc folderapp.IService) *FolderHandler {
 // FolderDTO 文件夹响应数据（JSON 小驼峰）
 type FolderDTO struct {
 	ID             uuid.UUID  `json:"id"`
+	GroupID        uuid.UUID  `json:"groupId"`
 	Code           string     `json:"code"`
 	Name           string     `json:"name"`
 	EnvID          uuid.UUID  `json:"envId"`
@@ -39,28 +40,27 @@ type FolderDTO struct {
 }
 
 // CreateFolderRequest 创建文件夹请求：
-//   - parentFolderId 为空 → 项目下创建顶级目录（项目下所有环境各一条）
-//   - parentFolderId 非空 → 在 groups 目录下创建二级目录（全环境展开）
+//   - parentFolderId 为空 → 项目下创建顶级目录（项目下所有环境各一条，全环境共享 groupId）
+//   - parentFolderId 非空 → 在 groups 目录下创建二级目录（全环境展开，全环境共享 groupId）
 type CreateFolderRequest struct {
 	ProjectID      uuid.UUID  `json:"projectId"`
 	ParentFolderID *uuid.UUID `json:"parentFolderId"`
 	Code           string     `json:"code"`
 	Name           string     `json:"name"`
 	Remark         string     `json:"remark"`
-	Type           string     `json:"type"`
+	Type           string     `json:"type"` // common/customer
 }
 
-// UpdateFolderRequest 更新文件夹请求（仅 name/remark，按各环境下的 id 集合）
+// UpdateFolderRequest 更新文件夹请求（仅 name/remark，按 group_id 全环境同步）
 type UpdateFolderRequest struct {
-	IDList []uuid.UUID `json:"idList"`
-	Name   string      `json:"name"`
-	Remark string      `json:"remark"`
+	GroupID uuid.UUID `json:"groupId"`
+	Name    string    `json:"name"`
+	Remark  string    `json:"remark"`
 }
 
-// DeleteFolderRequest 删除文件夹请求（按项目 + 编码删除所有环境下的记录）
+// DeleteFolderRequest 删除文件夹请求（按 group_id 软删除全环境记录）
 type DeleteFolderRequest struct {
-	ProjectID  uuid.UUID `json:"projectId"`
-	FolderCode string    `json:"folderCode"`
+	GroupID uuid.UUID `json:"groupId"`
 }
 
 // DetailFolderRequest 文件夹详情请求
@@ -68,11 +68,14 @@ type DetailFolderRequest struct {
 	ID uuid.UUID `json:"id"`
 }
 
-// ListFolderRequest 文件夹列表请求（分页字段 pageNum/pageSize 来自内嵌的 page.Request，仅顶级目录）
+// ListFolderRequest 文件夹列表请求（分页字段 pageNum/pageSize 来自内嵌的 page.Request）：
+//   - parentFolderId 非空 → 查询该 parent 下的子目录（每 code 一条，全环境共享 group_id）
+//   - parentFolderId 为空 → 查询项目下的顶级目录
 type ListFolderRequest struct {
-	ProjectID uuid.UUID `json:"projectId"`
-	Code      string    `json:"code,omitempty"`
-	Name      string    `json:"name,omitempty"`
+	ProjectID      uuid.UUID  `json:"projectId"`
+	ParentFolderID *uuid.UUID `json:"parentFolderId,omitempty"`
+	Code           string     `json:"code,omitempty"`
+	Name           string     `json:"name,omitempty"`
 	page.Request
 }
 
@@ -81,6 +84,27 @@ func (h *FolderHandler) Create(c *gin.Context) {
 	var req CreateFolderRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, err)
+		return
+	}
+
+	// 字段校验（统一在 handler 层完成）
+	if req.Code == "" || req.Name == "" || req.Type == "" {
+		response.Error(c, "invalid params")
+		return
+	}
+	if req.ParentFolderID == nil || *req.ParentFolderID == uuid.Nil {
+		// 顶级：需 ProjectID；Type=common 时 Code 必须是 global/groups
+		if req.ProjectID == uuid.Nil {
+			response.Error(c, "invalid params")
+			return
+		}
+		if err := validateTopType(req.Type, req.Code); err != nil {
+			response.Error(c, err.Error())
+			return
+		}
+	} else if req.Type != folderdomain.TypeCommon {
+		// 二级：Type 必须为 common
+		response.Error(c, folderapp.ErrInvalidType.Error())
 		return
 	}
 
@@ -126,10 +150,15 @@ func (h *FolderHandler) Update(c *gin.Context) {
 		return
 	}
 
+	if req.GroupID == uuid.Nil && (req.Name == "" || req.Remark == "") {
+		response.Error(c, "invalid params")
+		return
+	}
+
 	err := h.svc.Update(c, folderapp.UpdateInput{
-		IDList: req.IDList,
-		Name:   req.Name,
-		Remark: req.Remark,
+		GroupID: req.GroupID,
+		Name:    req.Name,
+		Remark:  req.Remark,
 	}, operator(c))
 	h.respondError(c, err)
 	if err != nil {
@@ -146,9 +175,13 @@ func (h *FolderHandler) Delete(c *gin.Context) {
 		return
 	}
 
+	if req.GroupID == uuid.Nil {
+		response.Error(c, "invalid params")
+		return
+	}
+
 	err := h.svc.Delete(c, folderapp.DeleteInput{
-		ProjectID:  req.ProjectID,
-		FolderCode: req.FolderCode,
+		GroupID: req.GroupID,
 	}, operator(c))
 	h.respondError(c, err)
 	if err != nil {
@@ -165,6 +198,11 @@ func (h *FolderHandler) Detail(c *gin.Context) {
 		return
 	}
 
+	if req.ID == uuid.Nil {
+		response.Error(c, "invalid params")
+		return
+	}
+
 	f, err := h.svc.GetByID(c, req.ID)
 	h.respondError(c, err)
 	if err != nil {
@@ -173,21 +211,35 @@ func (h *FolderHandler) Detail(c *gin.Context) {
 	response.Success(c, toFolderDTO(f))
 }
 
-// List 文件夹列表（分页，仅顶级目录）
+// List 文件夹列表（分页）：
+//   - parentFolderId 非空 → 该 parent 下的子目录
+//   - parentFolderId 为空 → 项目下的顶级目录（需 projectId）
 func (h *FolderHandler) List(c *gin.Context) {
 	var req ListFolderRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, err)
 		return
 	}
+
+	if req.ParentFolderID == nil || *req.ParentFolderID == uuid.Nil {
+		// 顶级目录：projectId 必填
+		if req.ProjectID == uuid.Nil {
+			response.Error(c, "invalid params")
+			return
+		}
+	} else if req.ProjectID == uuid.Nil {
+		// 子目录：projectId 可选；不传时填零值，service 不依赖
+		req.ProjectID = uuid.Nil
+	}
 	req.Normalize()
 
 	folders, total, err := h.svc.List(c, folderapp.ListInput{
-		ProjectID: req.ProjectID,
-		Code:      req.Code,
-		Name:      req.Name,
-		PageNum:   req.PageNum,
-		PageSize:  req.PageSize,
+		ProjectID:      req.ProjectID,
+		ParentFolderID: req.ParentFolderID,
+		Code:           req.Code,
+		Name:           req.Name,
+		PageNum:        req.PageNum,
+		PageSize:       req.PageSize,
 	})
 	h.respondError(c, err)
 	if err != nil {
@@ -202,6 +254,21 @@ func (h *FolderHandler) List(c *gin.Context) {
 		Total: total,
 		List:  list,
 	})
+}
+
+// validateTopType 顶级目录类型校验：type 必须合法；common 顶级目录仅支持 global / groups
+func validateTopType(t, code string) error {
+	switch t {
+	case folderdomain.TypeCommon:
+		if code != "global" && code != "groups" {
+			return folderapp.ErrCommonCodeInvalid
+		}
+	case folderdomain.TypeCustomer:
+		// customer 仅一级，顶级创建合法
+	default:
+		return folderapp.ErrInvalidType
+	}
+	return nil
 }
 
 // respondError 应用层错误统一映射为业务错误码
@@ -229,6 +296,7 @@ func (h *FolderHandler) respondError(c *gin.Context, err error) {
 func toFolderDTO(f *folderdomain.Folder) *FolderDTO {
 	return &FolderDTO{
 		ID:             f.ID,
+		GroupID:        f.GroupID,
 		Code:           f.Code,
 		Name:           f.Name,
 		EnvID:          f.EnvID,
