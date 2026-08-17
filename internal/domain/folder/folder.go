@@ -55,6 +55,8 @@ type Repository interface {
 	GetByID(ctx context.Context, id uuid.UUID) (*Folder, error)
 	// GetByGroupID 按 group_id 查询一条代表记录（不含已删除），不存在返回 nil, nil
 	GetByGroupID(ctx context.Context, groupID uuid.UUID) (*Folder, error)
+	// ListByGroupID 按 group_id 查询业务组下的全部环境实例（不含已删除），供子资源跨环境展开
+	ListByGroupID(ctx context.Context, groupID uuid.UUID) ([]*Folder, error)
 	// GetByEnvIDsCode 按环境集合 + 编码查询文件夹（不含已删除，CreateTop 中校验项目内编码唯一性），不存在返回 nil, nil
 	GetByEnvIDsCode(ctx context.Context, envIDs []uuid.UUID, code string) (*Folder, error)
 	// GetByEnvCode 按环境 + 编码查询文件夹（不含已删除，CreateSub 中定位 groups 顶级目录），不存在返回 nil, nil

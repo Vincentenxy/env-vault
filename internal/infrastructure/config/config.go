@@ -16,6 +16,7 @@ type Config struct {
 	Auth     AuthConfig     `mapstructure:"auth"`
 	Database DatabaseConfig `mapstructure:"database"`
 	Redis    RedisConfig    `mapstructure:"redis"`
+	Security SecurityConfig `mapstructure:"security"`
 }
 
 // ServerConfig HTTP 服务配置
@@ -33,6 +34,11 @@ type AppConfig struct {
 // AuthConfig 认证配置
 type AuthConfig struct {
 	JwtPublicKey string `mapstructure:"jwt_public_key"` // JWT 验签公钥（base64 DER 或 PEM 格式，RSA）
+}
+
+// SecurityConfig 安全相关配置
+type SecurityConfig struct {
+	EncryptionKey string `mapstructure:"encryption_key"` // secret value 加密私钥（AES-256-GCM，32 字节 base64 编码）
 }
 
 // DatabaseConfig PostgreSQL 配置

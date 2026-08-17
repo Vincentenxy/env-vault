@@ -5,8 +5,8 @@
 >
 > **命名约定**：信息类表统一使用 `_info` 后缀（如 `tenant_info`、`organization_info`）。
 >
-> **实体层级**：租户（tenant_info）→ 组织（organization_info）→ 项目（project_info）→ 环境（environment_info）→ 文件夹（folder_info）。
-> 租户类比公司，组织类比公司部门，项目类比部门承接的具体项目，环境类比项目下的部署环境（开发/测试/仿真/生产），文件夹类比环境下的目录结构。系统（system_info）暂未引入。
+> **实体层级**：租户（tenant_info）→ 组织（organization_info）→ 项目（project_info）→ 环境（environment_info）→ 文件夹（folder_info）→ 密钥（secret_info）。
+> 租户类比公司，组织类比公司部门，项目类比部门承接的具体项目，环境类比项目下的部署环境（开发/测试/仿真/生产），文件夹类比环境下的目录结构，密钥类比文件夹下的 key=value 键值对。系统（system_info）暂未引入。
 >
 > **通用字段约定**：所有业务表必须包含以下字段
 >
@@ -242,3 +242,69 @@ CREATE INDEX IF NOT EXISTS idx_folder_info_parent_code ON folder_info (parent_fo
 - `parent_folder_id` 仍是某个具体环境下父 folder 的 `id`（用于定位层级）
 - 子 folder 与父 folder 分属不同业务实体，因此**子 folder 的 `group_id` 与父 folder 的 `group_id` 不同**
 - 二级目录创建时，先通过 `parent_folder_id` 找到该父 folder 记录，定位项目后再展开全环境，每个环境下的子 folder 共享子 folder 的同一个 `group_id`
+
+---
+
+## 表名：`secret_info`
+
+**说明**：密钥表。密钥归属文件夹之下（`folder_id` 关联 folder_info 的 id，代码层面维护，无外键），表示一个 key=value 键值对。同一密钥在每个环境各有一条记录（value 各不相同），共享同一 `group_id`（与 folder_info 的业务组模式一致）。
+
+**保留字评估**：`key` 在 PostgreSQL 中属于 non-reserved 关键字，**可安全用作列名**；`value` 同样为 non-reserved，且本表使用 `value_ciphertext` 后缀形式更无风险；`version` 非关键字；`secret` 非关键字。
+
+**加密存储约定**：`value_ciphertext` 存储加密结果 JSON 字符串（AES-256-GCM），格式参考：
+
+```json
+{"data": "<base64 密文>", "nonce": "<base64 nonce>", "algorithm": "AES-256-GCM"}
+```
+
+加密私钥通过配置文件注入（`configs/config.yaml`），由代码层读取后完成加解密，密文不可逆时接口返回错误。
+
+```sql
+CREATE TABLE IF NOT EXISTS secret_info (
+    id               uuid        PRIMARY KEY,
+    group_id         uuid        NOT NULL,                 -- 业务组 ID：同一 secret 的所有环境实例共享（跨环境定位）
+    folder_id        uuid        NOT NULL,                 -- 所属文件夹 ID（当前环境下 folder_info 的 id，代码层面关联，无外键）
+    env_code         text        NOT NULL,                 -- 冗余：与 folder_id 所属环境的 code 保持一致（创建时写入，env.code 不可更新，安全冗余）
+    key              text        NOT NULL,                 -- 键名（同一业务 folder 内唯一，代码层校验）
+    value_ciphertext text        NOT NULL DEFAULT '',      -- 加密后的值（JSON：data / nonce / algorithm）
+    value_type       text        NOT NULL DEFAULT '',      -- 值类型：number/string（预留，暂不启用）
+    remark           text        NOT NULL DEFAULT '',      -- 备注
+    version          integer     NOT NULL DEFAULT 1,       -- 版本号，数字递增
+    is_deleted       boolean     NOT NULL DEFAULT false,
+    delete_at        timestamptz,
+    delete_by        text        NOT NULL DEFAULT '',
+    create_by        text        NOT NULL DEFAULT '',
+    update_by        text        NOT NULL DEFAULT '',
+    create_at        timestamptz NOT NULL DEFAULT now(),
+    update_at        timestamptz NOT NULL DEFAULT now()
+);
+
+-- 按业务组查询全部环境实例（聚合查询 / 批量删除）
+CREATE INDEX IF NOT EXISTS idx_secret_info_group ON secret_info (group_id);
+-- 按文件夹查询 secrets 列表
+CREATE INDEX IF NOT EXISTS idx_secret_info_folder ON secret_info (folder_id);
+-- 文件夹内按 key 定位（唯一性校验）
+CREATE INDEX IF NOT EXISTS idx_secret_info_folder_key ON secret_info (folder_id, key);
+```
+
+**索引说明**：
+
+| 索引名 | 字段 | 说明 |
+|--------|------|------|
+| `idx_secret_info_group` | `group_id` | 业务组维度：按 secret 聚合查询各环境值 / 批量删除 |
+| `idx_secret_info_folder` | `folder_id` | 按文件夹查询该 folder 下全部 secrets |
+| `idx_secret_info_folder_key` | `folder_id, key` | 文件夹内按 key 定位（唯一性校验） |
+
+**业务规则**（代码层校验，不落数据库约束）：
+
+| 规则 | 说明 |
+|------|------|
+| `group_id` 一致性 | 同一 secret 的所有环境实例共享同一 `group_id`（创建时服务端一次性生成，全环境共享） |
+| key 唯一范围 | 同一业务 folder（逻辑）下 key 唯一；物理上同一 `folder_id` 内唯一。校验时通过 folder 的 `group_id` 展开全部环境实例后比对 |
+| 创建展开 | 入参 `folderGroupId` + 各环境的 value 列表（含 envId），后端按 `folderGroupId + envId` 定位该环境下 folder 的 id 落库 |
+| `env_code` 冗余 | 与 `folder_id` 所属环境的 code 一致（创建时写入）。因 folder.env_id 创建后不变、所有表的 code 均不可更新，该冗余永久有效，查询聚合时无需再跳 folder/env 表 |
+| `value_type` 预留 | 当前默认空串，后续启用 number/string 类型语义 |
+| `version` 递增 | 同一业务组的所有实例共享版本号，默认 1；后续更新接口提供时组内统一递增 |
+| 软删除 | 按 `group_id` 逻辑删除该 secret 的所有环境实例 |
+
+**folder_id 关联说明**：secret_info 的 `folder_id` 指向**某个具体环境下** folder_info 的 `id`（该环境实例挂在该环境的 folder 记录下）。跨环境聚合时通过 `group_id` 屏蔽环境层级（与 folder_info 同模式）。

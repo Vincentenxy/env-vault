@@ -120,6 +120,23 @@ func (r *Repository) GetByGroupID(ctx context.Context, groupID uuid.UUID) (*fold
 	return toDomain(&po), nil
 }
 
+// ListByGroupID 按 group_id 查询业务组下的全部环境实例（不含已删除）
+func (r *Repository) ListByGroupID(ctx context.Context, groupID uuid.UUID) ([]*folderdomain.Folder, error) {
+	var pos []folderPO
+	err := r.db.WithContext(ctx).
+		Where("group_id = ? AND is_deleted = false", groupID).
+		Find(&pos).Error
+	if err != nil {
+		return nil, err
+	}
+
+	folders := make([]*folderdomain.Folder, 0, len(pos))
+	for i := range pos {
+		folders = append(folders, toDomain(&pos[i]))
+	}
+	return folders, nil
+}
+
 // GetByEnvIDsCode 按环境集合 + 编码查询文件夹（不含已删除），不存在返回 nil, nil
 func (r *Repository) GetByEnvIDsCode(ctx context.Context, envIDs []uuid.UUID, code string) (*folderdomain.Folder, error) {
 	var po folderPO

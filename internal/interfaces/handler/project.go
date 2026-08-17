@@ -169,6 +169,7 @@ func (h *ProjectHandler) List(c *gin.Context) {
 		response.BadRequest(c, err)
 		return
 	}
+
 	req.Normalize()
 
 	projects, total, err := h.svc.List(c, projapp.ListInput{

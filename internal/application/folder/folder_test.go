@@ -22,6 +22,7 @@ type stubFolderRepo struct {
 	getByEnvIDsCode                 func(ctx context.Context, envIDs []uuid.UUID, code string) (*folderdomain.Folder, error)
 	getByEnvCode                    func(ctx context.Context, envID uuid.UUID, code string) (*folderdomain.Folder, error)
 	getByParentCode                 func(ctx context.Context, parentID uuid.UUID, code string) (*folderdomain.Folder, error)
+	listByGroupID                   func(ctx context.Context, groupID uuid.UUID) ([]*folderdomain.Folder, error)
 	listTopGroupIDsByEnvIDs         func(ctx context.Context, envIDs []uuid.UUID) ([]uuid.UUID, error)
 	listSubGroupIDsByParentFolderID func(ctx context.Context, parentFolderID uuid.UUID) ([]uuid.UUID, error)
 	listByGroupIDs                  func(ctx context.Context, groupIDs []uuid.UUID, filter folderdomain.ListFilter) ([]*folderdomain.Folder, int64, error)
@@ -72,6 +73,12 @@ func (s *stubFolderRepo) GetByEnvCode(ctx context.Context, envID uuid.UUID, code
 func (s *stubFolderRepo) GetByParentCode(ctx context.Context, parentID uuid.UUID, code string) (*folderdomain.Folder, error) {
 	if s.getByParentCode != nil {
 		return s.getByParentCode(ctx, parentID, code)
+	}
+	return nil, nil
+}
+func (s *stubFolderRepo) ListByGroupID(ctx context.Context, groupID uuid.UUID) ([]*folderdomain.Folder, error) {
+	if s.listByGroupID != nil {
+		return s.listByGroupID(ctx, groupID)
 	}
 	return nil, nil
 }

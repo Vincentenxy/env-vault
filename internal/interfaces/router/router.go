@@ -8,15 +8,18 @@ import (
 	folderapp "env-vault/internal/application/folder"
 	orgapp "env-vault/internal/application/organization"
 	projapp "env-vault/internal/application/project"
+	secretapp "env-vault/internal/application/secret"
 	tenantapp "env-vault/internal/application/tenant"
 	"env-vault/internal/infrastructure/config"
 	envrepo "env-vault/internal/infrastructure/persistence/environment"
 	folderrepo "env-vault/internal/infrastructure/persistence/folder"
 	orgrepo "env-vault/internal/infrastructure/persistence/organization"
 	projrepo "env-vault/internal/infrastructure/persistence/project"
+	secretrepo "env-vault/internal/infrastructure/persistence/secret"
 	tenantrepo "env-vault/internal/infrastructure/persistence/tenant"
 	"env-vault/internal/interfaces/handler"
 	"env-vault/internal/interfaces/middleware"
+	"env-vault/pkg/crypto"
 )
 
 // New 初始化 gin 引擎并注册路由
@@ -45,6 +48,14 @@ func New(cfg *config.Config, db *gorm.DB) (*gin.Engine, error) {
 	folderRepo := folderrepo.NewRepository(db)
 	folderSvc := folderapp.NewService(folderRepo, envRepo)
 
+	// secret value 加解密器（私钥来自配置 security.encryption_key）
+	cipher, err := crypto.New(cfg.Security.EncryptionKey)
+	if err != nil {
+		return nil, err
+	}
+	secretRepo := secretrepo.NewRepository(db)
+	secretSvc := secretapp.NewService(secretRepo, folderRepo, envRepo, cipher)
+
 	healthHandler := handler.NewHealthHandler()
 	userHandler := handler.NewUserHandler()
 	tenantHandler := handler.NewTenantHandler(tenantSvc)
@@ -52,6 +63,7 @@ func New(cfg *config.Config, db *gorm.DB) (*gin.Engine, error) {
 	projectHandler := handler.NewProjectHandler(projSvc)
 	environmentHandler := handler.NewEnvironmentHandler(envSvc)
 	folderHandler := handler.NewFolderHandler(folderSvc)
+	secretHandler := handler.NewSecretHandler(secretSvc)
 
 	// 初始化 JWT 认证中间件（加载配置中的公钥）
 	authMiddleware, err := middleware.Auth(cfg.Auth.JwtPublicKey)
@@ -117,6 +129,15 @@ func New(cfg *config.Config, db *gorm.DB) (*gin.Engine, error) {
 			folderGroup.POST("/delete", folderHandler.Delete)
 			folderGroup.POST("/info", folderHandler.Detail)
 			folderGroup.POST("/list", folderHandler.List)
+		}
+
+		// 密钥管理（带参数统一 POST）
+		secretGroup := auth.Group("/secret")
+		{
+			secretGroup.POST("/create", secretHandler.Create)
+			secretGroup.POST("/list", secretHandler.List)
+			secretGroup.POST("/detail", secretHandler.Detail)
+			secretGroup.POST("/delete", secretHandler.Delete)
 		}
 	}
 
