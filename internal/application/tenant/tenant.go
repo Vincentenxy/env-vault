@@ -51,11 +51,8 @@ func NewService(repo tenant.Repository) *Service {
 }
 
 // Create 创建租户（业务校验：编码唯一性在代码层面显式检查）
+// 入参必填性校验已在 handler 层完成，service 仅负责业务编排。
 func (s *Service) Create(ctx context.Context, in CreateInput, operator string) (*tenant.Tenant, error) {
-	if in.Code == "" || in.Name == "" {
-		return nil, ErrInvalidParam
-	}
-
 	existing, err := s.repo.GetByCode(ctx, in.Code)
 	if err != nil {
 		return nil, err
@@ -83,10 +80,6 @@ func (s *Service) Create(ctx context.Context, in CreateInput, operator string) (
 
 // Update 更新租户
 func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) (*tenant.Tenant, error) {
-	if in.ID == uuid.Nil || in.Name == "" {
-		return nil, ErrInvalidParam
-	}
-
 	t, err := s.repo.GetByID(ctx, in.ID)
 	if err != nil {
 		return nil, err
@@ -108,10 +101,6 @@ func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) (
 
 // Delete 软删除租户
 func (s *Service) Delete(ctx context.Context, id uuid.UUID, operator string) error {
-	if id == uuid.Nil {
-		return ErrInvalidParam
-	}
-
 	t, err := s.repo.GetByID(ctx, id)
 	if err != nil {
 		return err
@@ -125,10 +114,6 @@ func (s *Service) Delete(ctx context.Context, id uuid.UUID, operator string) err
 
 // GetByID 按 ID 查询租户
 func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*tenant.Tenant, error) {
-	if id == uuid.Nil {
-		return nil, ErrInvalidParam
-	}
-
 	t, err := s.repo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
