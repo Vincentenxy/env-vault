@@ -130,7 +130,7 @@ response.Success(c, page.Response[TenantDTO]{ Total: total, List: items })
 - **Redis**：缓存
 - 所有数据库表设计必须记录在 `design/database.md` 中，保持与实现同步
 - 文档格式：Markdown，表结构使用 **SQL 代码块**（```sql）包裹，附索引说明
-- 所有数据表必须包含以下通用字段（数据库列名为下划线风格）：
+- 所有可变业务表必须包含以下通用字段（数据库列名为下划线风格）；只追加、不更新、不删除的历史表仅保留 `create_at` / `create_by`：
 
 | 列名 | 说明 |
 |------|------|
@@ -142,7 +142,7 @@ response.Success(c, page.Response[TenantDTO]{ Total: total, List: items })
 | `delete_by` | 删除人 |
 | `is_deleted` | 软删除标记（boolean，默认 false） |
 
-- **软删除**：所有表采用软删除（`is_deleted` + `delete_at` + `delete_by`），查询默认过滤已删除数据，禁止物理删除
+- **软删除**：所有可变业务表采用软删除（`is_deleted` + `delete_at` + `delete_by`），查询默认过滤已删除数据，禁止物理删除；只追加历史表不提供删除能力
 
 ### 3.1 表设计硬性规则
 

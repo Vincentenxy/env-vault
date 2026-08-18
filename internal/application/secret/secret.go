@@ -8,6 +8,7 @@ package secret
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,13 +21,19 @@ import (
 
 // 业务错误（应用层显式定义，handler 映射为业务错误码）
 var (
-	ErrInvalidParam   = errors.New("invalid param")
-	ErrNotFound       = errors.New("secret not found")
-	ErrFolderNotFound = errors.New("folder not found")
-	ErrEnvNotFound    = errors.New("env not found under folder")
-	ErrKeyExists      = errors.New("secret key already exists under folder")
-	ErrDecrypt        = errors.New("decrypt secret value failed")
+	ErrInvalidParam             = errors.New("invalid param")
+	ErrNotFound                 = errors.New("secret not found")
+	ErrFolderNotFound           = errors.New("folder not found")
+	ErrEnvNotFound              = errors.New("env not found under folder")
+	ErrKeyExists                = errors.New("secret key already exists under folder")
+	ErrDecrypt                  = errors.New("decrypt secret value failed")
+	ErrSecretNotUnderGroup      = errors.New("secret not under group")
+	ErrSecretNotUnderFolder     = ErrSecretNotUnderGroup
+	ErrHistoryGroupNotSupported = errors.New("group history query not supported")
+	ErrVersionConflict          = secretdomain.ErrVersionConflict
 )
+
+const initialCommitMsg = "initial version"
 
 // ValueItemInput 创建时单个环境下的值入参
 type ValueItemInput struct {
@@ -45,12 +52,65 @@ type CreateItemInput struct {
 // CreateInput 批量创建 secrets 入参
 type CreateInput struct {
 	SecretList []CreateItemInput
+	BatchID    uuid.UUID
+}
+
+// UpdateValueInput 更新时单个环境下的值入参
+type UpdateValueInput struct {
+	SecretID uuid.UUID // secret_info.id，唯一定位具体环境实例
+	EnvCode  string    // 透传字段，不参与业务逻辑
+	FolderID uuid.UUID // 透传字段，不参与业务逻辑
+	Value    string    // 明文，入库前加密
+}
+
+// UpdateItemInput 更新时单个 secret 的入参
+type UpdateItemInput struct {
+	GroupID   uuid.UUID // secret 业务组 ID（必填）
+	Key       string    // 透传展示字段，不参与业务校验
+	Remark    string    // 非空时整组 secret 同步更新 remark
+	CommitMsg string
+	Values    []UpdateValueInput // 非空时按 secretId 逐条更新实际变化的 value
+}
+
+// UpdateInput 批量更新 secrets 入参（整请求单事务）
+type UpdateInput struct {
+	BatchID   uuid.UUID
+	CommitMsg string
+	Secrets   []UpdateItemInput
 }
 
 // SecretValueView 单个环境下的值视图（解密后，key 为 env code，无需 envId）
 type SecretValueView struct {
-	FolderID uuid.UUID
-	Value    string
+	SecretID  uuid.UUID
+	FolderID  uuid.UUID
+	Value     string
+	Version   int
+	ValueType string
+}
+
+// HistoryInput 历史查询入参，查询优先级 secretId > batchId > groupId
+type HistoryInput struct {
+	SecretID uuid.UUID
+	BatchID  uuid.UUID
+	GroupID  uuid.UUID
+	PageNum  int
+	PageSize int
+}
+
+// HistoryView 解密后的 value 历史版本
+type HistoryView struct {
+	ID        uuid.UUID
+	SecretID  uuid.UUID
+	BatchID   uuid.UUID
+	GroupID   uuid.UUID
+	FolderID  uuid.UUID
+	EnvCode   string
+	Value     string
+	ValueType string
+	Version   int
+	CommitMsg string
+	CreateBy  string
+	CreateAt  time.Time
 }
 
 // SecretView 一个 secret 的聚合视图（跨环境），查询接口统一返回结构
@@ -64,8 +124,10 @@ type SecretView struct {
 // IService 密钥应用服务接口（handler 仅依赖接口，便于单测替换实现）
 type IService interface {
 	Create(ctx context.Context, in CreateInput, operator string) ([]*secretdomain.Secret, error)
+	Update(ctx context.Context, in UpdateInput, operator string) error
 	ListByFolder(ctx context.Context, folderGroupID uuid.UUID) ([]SecretView, error)
 	GetByGroup(ctx context.Context, groupID uuid.UUID) (*SecretView, error)
+	History(ctx context.Context, in HistoryInput) ([]HistoryView, int64, error)
 	Delete(ctx context.Context, groupID uuid.UUID, operator string) error
 }
 
@@ -91,14 +153,29 @@ func (s *Service) Create(ctx context.Context, in CreateInput, operator string) (
 		return nil, ErrInvalidParam
 	}
 
+	batchID := in.BatchID
+	if batchID == uuid.Nil {
+		batchID = uuid.New()
+	}
 	now := time.Now()
 	created := make([]*secretdomain.Secret, 0)
-	for _, item := range in.SecretList {
-		batch, err := s.createOne(ctx, item, operator, now)
-		if err != nil {
-			return nil, err
+	err := s.repo.WithTx(ctx, func(txCtx context.Context) error {
+		for _, item := range in.SecretList {
+			batch, err := s.createOne(txCtx, item, operator, now)
+			if err != nil {
+				return err
+			}
+			created = append(created, batch...)
 		}
-		created = append(created, batch...)
+
+		histories := make([]*secretdomain.History, 0, len(created))
+		for _, sec := range created {
+			histories = append(histories, newHistory(sec, batchID, initialCommitMsg, operator, now))
+		}
+		return s.repo.CreateHistoryBatch(txCtx, histories)
+	})
+	if err != nil {
+		return nil, err
 	}
 	return created, nil
 }
@@ -181,6 +258,157 @@ func (s *Service) createOne(ctx context.Context, item CreateItemInput, operator 
 		return nil, err
 	}
 	return secrets, nil
+}
+
+// Update 批量更新 secrets（整请求单事务）：
+//   - 按 groupId 定位 secret 业务组
+//   - remark 非空：整组同步更新 remark（不影响 version）
+//   - values 非空：按 secretId 精确定位记录，仅明文实际变化时更新 value/version+1 并写历史
+//   - key 字段透传，不参与业务校验
+//
+// 入参必填性校验已在 handler 层完成，service 仅负责业务编排。
+func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) error {
+	if len(in.Secrets) == 0 {
+		return ErrInvalidParam
+	}
+
+	batchID := in.BatchID
+	if batchID == uuid.Nil {
+		batchID = uuid.New()
+	}
+	seenSecretIDs := make(map[uuid.UUID]struct{})
+	for _, item := range in.Secrets {
+		if item.GroupID == uuid.Nil || effectiveCommitMsg(item.CommitMsg, in.CommitMsg) == "" {
+			return ErrInvalidParam
+		}
+		for _, v := range item.Values {
+			if v.SecretID == uuid.Nil {
+				return ErrInvalidParam
+			}
+			if _, exists := seenSecretIDs[v.SecretID]; exists {
+				return ErrInvalidParam
+			}
+			seenSecretIDs[v.SecretID] = struct{}{}
+		}
+	}
+
+	return s.repo.WithTx(ctx, func(txCtx context.Context) error {
+		now := time.Now()
+		histories := make([]*secretdomain.History, 0)
+		for _, item := range in.Secrets {
+			secrets, err := s.repo.ListByGroupID(txCtx, item.GroupID)
+			if err != nil {
+				return err
+			}
+			if len(secrets) == 0 {
+				return ErrNotFound
+			}
+
+			secretByID := make(map[uuid.UUID]*secretdomain.Secret, len(secrets))
+			for _, sec := range secrets {
+				secretByID[sec.ID] = sec
+			}
+
+			if item.Remark != "" {
+				if _, err := s.repo.UpdateRemarkByGroupID(txCtx, item.GroupID, item.Remark, operator, now); err != nil {
+					return err
+				}
+			}
+
+			if len(item.Values) > 0 {
+				updates := make([]secretdomain.ValueUpdateItem, 0, len(item.Values))
+				for _, v := range item.Values {
+					sec, ok := secretByID[v.SecretID]
+					if !ok {
+						return ErrSecretNotUnderGroup
+					}
+					currentValue, err := s.cipher.Decrypt(sec.ValueCiphertext)
+					if err != nil {
+						return ErrDecrypt
+					}
+					if currentValue == v.Value {
+						continue
+					}
+					ciphertext, err := s.cipher.Encrypt(v.Value)
+					if err != nil {
+						return err
+					}
+					updates = append(updates, secretdomain.ValueUpdateItem{
+						ID:              sec.ID,
+						ValueCiphertext: ciphertext,
+						ExpectedVersion: sec.Version,
+					})
+					updated := *sec
+					updated.ValueCiphertext = ciphertext
+					updated.Version++
+					histories = append(histories, newHistory(&updated, batchID, effectiveCommitMsg(item.CommitMsg, in.CommitMsg), operator, now))
+				}
+				if len(updates) > 0 {
+					if err := s.repo.UpdateValueByIDs(txCtx, updates, operator, now); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		if len(histories) == 0 {
+			return nil
+		}
+		return s.repo.CreateHistoryBatch(txCtx, histories)
+	})
+}
+
+// History 按 secretId 分页或按 batchId 不分页查询历史；groupId 查询暂未实现
+func (s *Service) History(ctx context.Context, in HistoryInput) ([]HistoryView, int64, error) {
+	var histories []*secretdomain.History
+	var total int64
+	var err error
+
+	switch {
+	case in.SecretID != uuid.Nil:
+		if in.PageNum <= 0 {
+			in.PageNum = 1
+		}
+		if in.PageSize <= 0 {
+			in.PageSize = 20
+		}
+		if in.PageSize > 200 {
+			in.PageSize = 200
+		}
+		histories, total, err = s.repo.ListHistoryBySecretID(ctx, in.SecretID, (in.PageNum-1)*in.PageSize, in.PageSize)
+	case in.BatchID != uuid.Nil:
+		histories, err = s.repo.ListHistoryByBatchID(ctx, in.BatchID)
+		total = int64(len(histories))
+	case in.GroupID != uuid.Nil:
+		return nil, 0, ErrHistoryGroupNotSupported
+	default:
+		return nil, 0, ErrInvalidParam
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+
+	views := make([]HistoryView, 0, len(histories))
+	for _, history := range histories {
+		value, err := s.cipher.Decrypt(history.ValueCiphertext)
+		if err != nil {
+			return nil, 0, ErrDecrypt
+		}
+		views = append(views, HistoryView{
+			ID:        history.ID,
+			SecretID:  history.SecretID,
+			BatchID:   history.BatchID,
+			GroupID:   history.GroupID,
+			FolderID:  history.FolderID,
+			EnvCode:   history.EnvCode,
+			Value:     value,
+			ValueType: history.ValueType,
+			Version:   history.Version,
+			CommitMsg: history.CommitMsg,
+			CreateBy:  history.CreateBy,
+			CreateAt:  history.CreateAt,
+		})
+	}
+	return views, total, nil
 }
 
 // ListByFolder 查询1：按 folder 业务组查询其下全部 secrets（返回每个 secret 的聚合视图列表）
@@ -273,8 +501,11 @@ func (s *Service) buildViews(ctx context.Context, secrets []*secretdomain.Secret
 		}
 
 		view.Values[sec.EnvCode] = SecretValueView{
-			FolderID: sec.FolderID,
-			Value:    value,
+			SecretID:  sec.ID,
+			FolderID:  sec.FolderID,
+			Value:     value,
+			Version:   sec.Version,
+			ValueType: sec.ValueType,
 		}
 	}
 
@@ -283,4 +514,28 @@ func (s *Service) buildViews(ctx context.Context, secrets []*secretdomain.Secret
 		views = append(views, *byGroup[gid])
 	}
 	return views, nil
+}
+
+func effectiveCommitMsg(itemMsg, requestMsg string) string {
+	if msg := strings.TrimSpace(itemMsg); msg != "" {
+		return msg
+	}
+	return strings.TrimSpace(requestMsg)
+}
+
+func newHistory(sec *secretdomain.Secret, batchID uuid.UUID, commitMsg, operator string, now time.Time) *secretdomain.History {
+	return &secretdomain.History{
+		ID:              uuid.New(),
+		SecretID:        sec.ID,
+		BatchID:         batchID,
+		GroupID:         sec.GroupID,
+		FolderID:        sec.FolderID,
+		EnvCode:         sec.EnvCode,
+		ValueCiphertext: sec.ValueCiphertext,
+		ValueType:       sec.ValueType,
+		Version:         sec.Version,
+		CommitMsg:       commitMsg,
+		CreateBy:        operator,
+		CreateAt:        now,
+	}
 }

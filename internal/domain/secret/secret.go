@@ -3,10 +3,13 @@ package secret
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+var ErrVersionConflict = errors.New("secret version conflict")
 
 // Secret 密钥领域模型。密钥归属文件夹之下，表示一个 key=value 键值对。
 // 业务上"一个 secret"物理上展开为该项目每个环境下的各一条记录（value 各不相同），
@@ -30,6 +33,29 @@ type Secret struct {
 	UpdateAt        time.Time
 }
 
+// ValueUpdateItem 按 ID 更新单条 secret 的密文（version 由仓储内部 +1）
+type ValueUpdateItem struct {
+	ID              uuid.UUID
+	ValueCiphertext string
+	ExpectedVersion int
+}
+
+// History 密钥值的不可变历史版本快照
+type History struct {
+	ID              uuid.UUID
+	SecretID        uuid.UUID
+	BatchID         uuid.UUID
+	GroupID         uuid.UUID
+	FolderID        uuid.UUID
+	EnvCode         string
+	ValueCiphertext string
+	ValueType       string
+	Version         int
+	CommitMsg       string
+	CreateBy        string
+	CreateAt        time.Time
+}
+
 // Repository 密钥仓储接口（领域层定义，基础设施层实现）
 type Repository interface {
 	// CreateBatch 批量创建密钥（每个环境各一条）
@@ -44,4 +70,16 @@ type Repository interface {
 	ListByFolderIDs(ctx context.Context, folderIDs []uuid.UUID) ([]*Secret, error)
 	// ListByGroupID 按 group_id 查询业务组下的全部环境实例（不含已删除）
 	ListByGroupID(ctx context.Context, groupID uuid.UUID) ([]*Secret, error)
+	// UpdateValueByIDs 按 ID 集合逐条更新 value_ciphertext 与 version（version = version + 1）、update_by、update_at
+	UpdateValueByIDs(ctx context.Context, items []ValueUpdateItem, updateBy string, updateAt time.Time) error
+	// UpdateRemarkByGroupID 按 group_id 全环境同步更新 remark，返回受影响行数
+	UpdateRemarkByGroupID(ctx context.Context, groupID uuid.UUID, remark, updateBy string, updateAt time.Time) (int64, error)
+	// CreateHistoryBatch 批量写入不可变 value 历史快照
+	CreateHistoryBatch(ctx context.Context, histories []*History) error
+	// ListHistoryBySecretID 按具体环境实例分页查询历史
+	ListHistoryBySecretID(ctx context.Context, secretID uuid.UUID, offset, limit int) ([]*History, int64, error)
+	// ListHistoryByBatchID 查询一次变更批次的全部历史
+	ListHistoryByBatchID(ctx context.Context, batchID uuid.UUID) ([]*History, error)
+	// WithTx 在事务中执行 fn：fn 收到的 ctx 透传事务句柄，内部方法须通过 ctx 拿 tx
+	WithTx(ctx context.Context, fn func(ctx context.Context) error) error
 }

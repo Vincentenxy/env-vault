@@ -27,12 +27,18 @@ func testCipher(t *testing.T) *crypto.Cipher {
 
 // stubSecretRepo 内存实现的密钥 Repository
 type stubSecretRepo struct {
-	createBatch     func(ctx context.Context, secrets []*secretdomain.Secret) error
-	deleteByGroupID func(ctx context.Context, groupID uuid.UUID, deleteBy string) (int64, error)
-	getByID         func(ctx context.Context, id uuid.UUID) (*secretdomain.Secret, error)
-	getByFolderKey  func(ctx context.Context, folderIDs []uuid.UUID, key string) (*secretdomain.Secret, error)
-	listByFolders   func(ctx context.Context, folderIDs []uuid.UUID) ([]*secretdomain.Secret, error)
-	listByGroup     func(ctx context.Context, groupID uuid.UUID) ([]*secretdomain.Secret, error)
+	createBatch         func(ctx context.Context, secrets []*secretdomain.Secret) error
+	deleteByGroupID     func(ctx context.Context, groupID uuid.UUID, deleteBy string) (int64, error)
+	getByID             func(ctx context.Context, id uuid.UUID) (*secretdomain.Secret, error)
+	getByFolderKey      func(ctx context.Context, folderIDs []uuid.UUID, key string) (*secretdomain.Secret, error)
+	listByFolders       func(ctx context.Context, folderIDs []uuid.UUID) ([]*secretdomain.Secret, error)
+	listByGroup         func(ctx context.Context, groupID uuid.UUID) ([]*secretdomain.Secret, error)
+	updateValueByIDs    func(ctx context.Context, items []secretdomain.ValueUpdateItem, updateBy string, updateAt time.Time) error
+	updateRemarkByGroup func(ctx context.Context, groupID uuid.UUID, remark, updateBy string, updateAt time.Time) (int64, error)
+	createHistoryBatch  func(ctx context.Context, histories []*secretdomain.History) error
+	listHistoryBySecret func(ctx context.Context, secretID uuid.UUID, offset, limit int) ([]*secretdomain.History, int64, error)
+	listHistoryByBatch  func(ctx context.Context, batchID uuid.UUID) ([]*secretdomain.History, error)
+	withTx              func(ctx context.Context, fn func(ctx context.Context) error) error
 }
 
 func (s *stubSecretRepo) CreateBatch(ctx context.Context, secrets []*secretdomain.Secret) error {
@@ -70,6 +76,42 @@ func (s *stubSecretRepo) ListByGroupID(ctx context.Context, groupID uuid.UUID) (
 		return s.listByGroup(ctx, groupID)
 	}
 	return nil, nil
+}
+func (s *stubSecretRepo) UpdateValueByIDs(ctx context.Context, items []secretdomain.ValueUpdateItem, updateBy string, updateAt time.Time) error {
+	if s.updateValueByIDs != nil {
+		return s.updateValueByIDs(ctx, items, updateBy, updateAt)
+	}
+	return nil
+}
+func (s *stubSecretRepo) UpdateRemarkByGroupID(ctx context.Context, groupID uuid.UUID, remark, updateBy string, updateAt time.Time) (int64, error) {
+	if s.updateRemarkByGroup != nil {
+		return s.updateRemarkByGroup(ctx, groupID, remark, updateBy, updateAt)
+	}
+	return 1, nil
+}
+func (s *stubSecretRepo) CreateHistoryBatch(ctx context.Context, histories []*secretdomain.History) error {
+	if s.createHistoryBatch != nil {
+		return s.createHistoryBatch(ctx, histories)
+	}
+	return nil
+}
+func (s *stubSecretRepo) ListHistoryBySecretID(ctx context.Context, secretID uuid.UUID, offset, limit int) ([]*secretdomain.History, int64, error) {
+	if s.listHistoryBySecret != nil {
+		return s.listHistoryBySecret(ctx, secretID, offset, limit)
+	}
+	return nil, 0, nil
+}
+func (s *stubSecretRepo) ListHistoryByBatchID(ctx context.Context, batchID uuid.UUID) ([]*secretdomain.History, error) {
+	if s.listHistoryByBatch != nil {
+		return s.listHistoryByBatch(ctx, batchID)
+	}
+	return nil, nil
+}
+func (s *stubSecretRepo) WithTx(ctx context.Context, fn func(ctx context.Context) error) error {
+	if s.withTx != nil {
+		return s.withTx(ctx, fn)
+	}
+	return fn(ctx)
 }
 
 // stubFolderRepo 内存实现的文件夹 Repository（secret 应用服务依赖）
@@ -175,6 +217,8 @@ func TestService_Create_Success(t *testing.T) {
 	folders := newTestFolderGroup(folderGroupID, envs)
 	// folderID 集合（校验落库的 folder_id 属于该 folder 组）
 	folderSet := map[uuid.UUID]bool{}
+	batchID := uuid.New()
+	var capturedHistories []*secretdomain.History
 	for _, f := range folders {
 		folderSet[f.ID] = true
 	}
@@ -214,6 +258,10 @@ func TestService_Create_Success(t *testing.T) {
 			}
 			return nil
 		},
+		createHistoryBatch: func(ctx context.Context, histories []*secretdomain.History) error {
+			capturedHistories = histories
+			return nil
+		},
 	}
 	folderRepo := &stubFolderRepo{
 		listByGroupID: func(ctx context.Context, gid uuid.UUID) ([]*folderdomain.Folder, error) {
@@ -235,7 +283,7 @@ func TestService_Create_Success(t *testing.T) {
 	}
 	svc := NewService(secretRepo, folderRepo, envRepo, testCipher(t))
 
-	created, err := svc.Create(context.Background(), CreateInput{SecretList: []CreateItemInput{
+	created, err := svc.Create(context.Background(), CreateInput{BatchID: batchID, SecretList: []CreateItemInput{
 		{
 			FolderGroupID: folderGroupID,
 			Key:           "DB_PASSWORD",
@@ -251,6 +299,20 @@ func TestService_Create_Success(t *testing.T) {
 	}
 	if len(created) != 2 {
 		t.Fatalf("expected 2 created, got %d", len(created))
+	}
+	if len(capturedHistories) != 2 {
+		t.Fatalf("expected 2 initial histories, got %d", len(capturedHistories))
+	}
+	for i, history := range capturedHistories {
+		if history.SecretID != created[i].ID || history.BatchID != batchID || history.Version != 1 {
+			t.Fatalf("unexpected initial history: %+v", history)
+		}
+		if history.CommitMsg != initialCommitMsg || history.CreateBy != "operator-1" {
+			t.Fatalf("initial history audit fields wrong: %+v", history)
+		}
+		if history.ValueCiphertext != created[i].ValueCiphertext {
+			t.Fatalf("initial history must snapshot created ciphertext")
+		}
 	}
 }
 
@@ -353,6 +415,205 @@ func TestService_Create_InvalidParam(t *testing.T) {
 	}
 }
 
+func TestService_Create_Batch_MultipleSecrets(t *testing.T) {
+	envs := newTestEnvs()
+	folderGroupID := uuid.New()
+	folders := newTestFolderGroup(folderGroupID, envs)
+
+	groups := make(map[string]uuid.UUID) // key -> group_id，方便断言不同 secret 拥有不同 group_id
+	secretRepo := &stubSecretRepo{
+		getByFolderKey: func(ctx context.Context, folderIDs []uuid.UUID, key string) (*secretdomain.Secret, error) {
+			return nil, nil // 全部不冲突
+		},
+		createBatch: func(ctx context.Context, secrets []*secretdomain.Secret) error {
+			// 第一次调用: K1 (2 条), 第二次调用: K2 (2 条)
+			k := secrets[0].Key
+			if _, ok := groups[k]; !ok {
+				groups[k] = secrets[0].GroupID
+			}
+			return nil
+		},
+	}
+	folderRepo := &stubFolderRepo{
+		listByGroupID: func(ctx context.Context, gid uuid.UUID) ([]*folderdomain.Folder, error) {
+			return folders, nil
+		},
+	}
+	envRepo := &stubEnvRepo{
+		getByID: func(ctx context.Context, id uuid.UUID) (*envdomain.Environment, error) {
+			for _, e := range envs {
+				if e.ID == id {
+					return e, nil
+				}
+			}
+			return nil, nil
+		},
+	}
+	svc := NewService(secretRepo, folderRepo, envRepo, testCipher(t))
+
+	created, err := svc.Create(context.Background(), CreateInput{SecretList: []CreateItemInput{
+		{FolderGroupID: folderGroupID, Key: "K1", Values: []ValueItemInput{{EnvID: envs[0].ID, Value: "v1a"}, {EnvID: envs[1].ID, Value: "v1b"}}},
+		{FolderGroupID: folderGroupID, Key: "K2", Values: []ValueItemInput{{EnvID: envs[0].ID, Value: "v2a"}, {EnvID: envs[1].ID, Value: "v2b"}}},
+	}}, "u")
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if len(created) != 4 {
+		t.Fatalf("expected 4 created (2 secrets x 2 envs), got %d", len(created))
+	}
+	// 两个 secret 共享 group_id 不一致（各自独立）
+	g1, g2 := groups["K1"], groups["K2"]
+	if g1 == uuid.Nil || g2 == uuid.Nil {
+		t.Fatalf("group_id missing: %+v", groups)
+	}
+	if g1 == g2 {
+		t.Fatalf("K1/K2 must have distinct group_id, both = %s", g1)
+	}
+	// 每个 secret 内部各环境共享同一 group_id
+	countByGroup := make(map[uuid.UUID]int)
+	for _, s := range created {
+		countByGroup[s.GroupID]++
+	}
+	if countByGroup[g1] != 2 || countByGroup[g2] != 2 {
+		t.Fatalf("per-group counts wrong: %+v", countByGroup)
+	}
+}
+
+func TestService_Create_FolderRepoError(t *testing.T) {
+	dbErr := errors.New("db down")
+	folderRepo := &stubFolderRepo{
+		listByGroupID: func(ctx context.Context, gid uuid.UUID) ([]*folderdomain.Folder, error) {
+			return nil, dbErr
+		},
+	}
+	svc := NewService(&stubSecretRepo{}, folderRepo, &stubEnvRepo{}, testCipher(t))
+	_, err := svc.Create(context.Background(), CreateInput{SecretList: []CreateItemInput{
+		{FolderGroupID: uuid.New(), Key: "K", Values: []ValueItemInput{{EnvID: uuid.New(), Value: "v"}}},
+	}}, "u")
+	if !errors.Is(err, dbErr) {
+		t.Fatalf("expected dbErr, got %v", err)
+	}
+}
+
+func TestService_Create_EnvRepoError(t *testing.T) {
+	envs := newTestEnvs()
+	folderGroupID := uuid.New()
+	folders := newTestFolderGroup(folderGroupID, envs)
+	dbErr := errors.New("env db down")
+	folderRepo := &stubFolderRepo{
+		listByGroupID: func(ctx context.Context, gid uuid.UUID) ([]*folderdomain.Folder, error) {
+			return folders, nil
+		},
+	}
+	envRepo := &stubEnvRepo{
+		getByID: func(ctx context.Context, id uuid.UUID) (*envdomain.Environment, error) {
+			return nil, dbErr
+		},
+	}
+	svc := NewService(&stubSecretRepo{}, folderRepo, envRepo, testCipher(t))
+	_, err := svc.Create(context.Background(), CreateInput{SecretList: []CreateItemInput{
+		{FolderGroupID: folderGroupID, Key: "K", Values: []ValueItemInput{{EnvID: envs[0].ID, Value: "v"}}},
+	}}, "u")
+	if !errors.Is(err, dbErr) {
+		t.Fatalf("expected dbErr, got %v", err)
+	}
+}
+
+// 覆盖"folder 引用了一个 env_id，但 env 表已无该记录"场景
+// 与 TestService_Create_EnvNotUnderFolder 不同：folder 业务组内有 env，value 也填了该 env，
+// 但 envRepo 查不到 → 应返回 ErrEnvNotFound。
+func TestService_Create_EnvRecordMissing(t *testing.T) {
+	envs := newTestEnvs()
+	folderGroupID := uuid.New()
+	folders := newTestFolderGroup(folderGroupID, envs)
+
+	folderRepo := &stubFolderRepo{
+		listByGroupID: func(ctx context.Context, gid uuid.UUID) ([]*folderdomain.Folder, error) {
+			return folders, nil
+		},
+	}
+	envRepo := &stubEnvRepo{
+		getByID: func(ctx context.Context, id uuid.UUID) (*envdomain.Environment, error) {
+			return nil, nil // env 表查不到
+		},
+	}
+	svc := NewService(&stubSecretRepo{}, folderRepo, envRepo, testCipher(t))
+	_, err := svc.Create(context.Background(), CreateInput{SecretList: []CreateItemInput{
+		{FolderGroupID: folderGroupID, Key: "K", Values: []ValueItemInput{{EnvID: envs[0].ID, Value: "v"}}},
+	}}, "u")
+	if !errors.Is(err, ErrEnvNotFound) {
+		t.Fatalf("expected ErrEnvNotFound, got %v", err)
+	}
+}
+
+func TestService_Create_GetByFolderKeyError(t *testing.T) {
+	envs := newTestEnvs()
+	folderGroupID := uuid.New()
+	folders := newTestFolderGroup(folderGroupID, envs)
+	dbErr := errors.New("query failed")
+	secretRepo := &stubSecretRepo{
+		getByFolderKey: func(ctx context.Context, folderIDs []uuid.UUID, key string) (*secretdomain.Secret, error) {
+			return nil, dbErr
+		},
+	}
+	folderRepo := &stubFolderRepo{
+		listByGroupID: func(ctx context.Context, gid uuid.UUID) ([]*folderdomain.Folder, error) {
+			return folders, nil
+		},
+	}
+	envRepo := &stubEnvRepo{
+		getByID: func(ctx context.Context, id uuid.UUID) (*envdomain.Environment, error) {
+			for _, e := range envs {
+				if e.ID == id {
+					return e, nil
+				}
+			}
+			return nil, nil
+		},
+	}
+	svc := NewService(secretRepo, folderRepo, envRepo, testCipher(t))
+	_, err := svc.Create(context.Background(), CreateInput{SecretList: []CreateItemInput{
+		{FolderGroupID: folderGroupID, Key: "K", Values: []ValueItemInput{{EnvID: envs[0].ID, Value: "v"}}},
+	}}, "u")
+	if !errors.Is(err, dbErr) {
+		t.Fatalf("expected dbErr, got %v", err)
+	}
+}
+
+func TestService_Create_CreateBatchError(t *testing.T) {
+	envs := newTestEnvs()
+	folderGroupID := uuid.New()
+	folders := newTestFolderGroup(folderGroupID, envs)
+	dbErr := errors.New("insert failed")
+	secretRepo := &stubSecretRepo{
+		createBatch: func(ctx context.Context, secrets []*secretdomain.Secret) error {
+			return dbErr
+		},
+	}
+	folderRepo := &stubFolderRepo{
+		listByGroupID: func(ctx context.Context, gid uuid.UUID) ([]*folderdomain.Folder, error) {
+			return folders, nil
+		},
+	}
+	envRepo := &stubEnvRepo{
+		getByID: func(ctx context.Context, id uuid.UUID) (*envdomain.Environment, error) {
+			for _, e := range envs {
+				if e.ID == id {
+					return e, nil
+				}
+			}
+			return nil, nil
+		},
+	}
+	svc := NewService(secretRepo, folderRepo, envRepo, testCipher(t))
+	_, err := svc.Create(context.Background(), CreateInput{SecretList: []CreateItemInput{
+		{FolderGroupID: folderGroupID, Key: "K", Values: []ValueItemInput{{EnvID: envs[0].ID, Value: "v"}}},
+	}}, "u")
+	if !errors.Is(err, dbErr) {
+		t.Fatalf("expected dbErr, got %v", err)
+	}
+}
+
 func TestService_ListByFolder_Success_Decrypted(t *testing.T) {
 	envs := newTestEnvs()
 	folderGroupID := uuid.New()
@@ -430,8 +691,8 @@ func TestService_GetByGroup_Success(t *testing.T) {
 				t.Fatalf("unexpected group %v", gid)
 			}
 			return []*secretdomain.Secret{
-				{ID: uuid.New(), GroupID: groupID, FolderID: folders[0].ID, EnvCode: "dev", Key: "TOKEN", ValueCiphertext: ct0},
-				{ID: uuid.New(), GroupID: groupID, FolderID: folders[1].ID, EnvCode: "test", Key: "TOKEN", ValueCiphertext: ct1},
+				{ID: uuid.New(), GroupID: groupID, FolderID: folders[0].ID, EnvCode: "dev", Key: "TOKEN", ValueCiphertext: ct0, Version: 3, ValueType: "string"},
+				{ID: uuid.New(), GroupID: groupID, FolderID: folders[1].ID, EnvCode: "test", Key: "TOKEN", ValueCiphertext: ct1, Version: 5, ValueType: "number"},
 			}, nil
 		},
 	}
@@ -444,12 +705,82 @@ func TestService_GetByGroup_Success(t *testing.T) {
 	if view.Values["dev"].Value != "prod-token" || view.Values["test"].Value != "test-token" {
 		t.Fatalf("values not decrypted: %+v", view.Values)
 	}
+	if view.Values["dev"].Version != 3 || view.Values["dev"].ValueType != "string" {
+		t.Fatalf("dev detail fields not propagated: %+v", view.Values["dev"])
+	}
+	if view.Values["test"].Version != 5 || view.Values["test"].ValueType != "number" {
+		t.Fatalf("test detail fields not propagated: %+v", view.Values["test"])
+	}
 }
 
 func TestService_GetByGroup_NotFound(t *testing.T) {
 	svc := NewService(&stubSecretRepo{}, &stubFolderRepo{}, &stubEnvRepo{}, testCipher(t))
 	if _, err := svc.GetByGroup(context.Background(), uuid.New()); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestService_History_SecretIDPriorityAndPagination(t *testing.T) {
+	secretID := uuid.New()
+	batchID := uuid.New()
+	groupID := uuid.New()
+	cipher := testCipher(t)
+	ciphertext, _ := cipher.Encrypt("version-value")
+	repo := &stubSecretRepo{
+		listHistoryBySecret: func(ctx context.Context, gotSecretID uuid.UUID, offset, limit int) ([]*secretdomain.History, int64, error) {
+			if gotSecretID != secretID || offset != 20 || limit != 10 {
+				t.Fatalf("unexpected secret history query: id=%s offset=%d limit=%d", gotSecretID, offset, limit)
+			}
+			return []*secretdomain.History{{
+				ID: uuid.New(), SecretID: secretID, BatchID: batchID, GroupID: groupID,
+				FolderID: uuid.New(), EnvCode: "prod", ValueCiphertext: ciphertext,
+				ValueType: "string", Version: 3, CommitMsg: "rotate", CreateBy: "u",
+			}}, 21, nil
+		},
+		listHistoryByBatch: func(ctx context.Context, batchID uuid.UUID) ([]*secretdomain.History, error) {
+			t.Fatal("batch query must not run when secretId is present")
+			return nil, nil
+		},
+	}
+	svc := NewService(repo, &stubFolderRepo{}, &stubEnvRepo{}, cipher)
+	views, total, err := svc.History(context.Background(), HistoryInput{
+		SecretID: secretID, BatchID: batchID, GroupID: groupID, PageNum: 3, PageSize: 10,
+	})
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if total != 21 || len(views) != 1 {
+		t.Fatalf("unexpected history result total=%d views=%+v", total, views)
+	}
+	if views[0].Value != "version-value" || views[0].Version != 3 || views[0].CommitMsg != "rotate" {
+		t.Fatalf("history not decrypted/mapped: %+v", views[0])
+	}
+}
+
+func TestService_History_BatchWithoutPagination(t *testing.T) {
+	batchID := uuid.New()
+	cipher := testCipher(t)
+	ciphertext, _ := cipher.Encrypt("batch-value")
+	repo := &stubSecretRepo{
+		listHistoryByBatch: func(ctx context.Context, gotBatchID uuid.UUID) ([]*secretdomain.History, error) {
+			if gotBatchID != batchID {
+				t.Fatalf("unexpected batch id %s", gotBatchID)
+			}
+			return []*secretdomain.History{{BatchID: batchID, ValueCiphertext: ciphertext}}, nil
+		},
+	}
+	svc := NewService(repo, &stubFolderRepo{}, &stubEnvRepo{}, cipher)
+	views, total, err := svc.History(context.Background(), HistoryInput{BatchID: batchID, PageNum: 99, PageSize: 1})
+	if err != nil || total != 1 || len(views) != 1 || views[0].Value != "batch-value" {
+		t.Fatalf("unexpected batch history result total=%d views=%+v err=%v", total, views, err)
+	}
+}
+
+func TestService_History_GroupNotSupported(t *testing.T) {
+	svc := NewService(&stubSecretRepo{}, &stubFolderRepo{}, &stubEnvRepo{}, testCipher(t))
+	_, _, err := svc.History(context.Background(), HistoryInput{GroupID: uuid.New()})
+	if !errors.Is(err, ErrHistoryGroupNotSupported) {
+		t.Fatalf("expected ErrHistoryGroupNotSupported, got %v", err)
 	}
 }
 
@@ -488,5 +819,443 @@ func TestService_Delete_InvalidParam(t *testing.T) {
 	svc := NewService(&stubSecretRepo{}, &stubFolderRepo{}, &stubEnvRepo{}, testCipher(t))
 	if err := svc.Delete(context.Background(), uuid.Nil, "u"); !errors.Is(err, ErrInvalidParam) {
 		t.Fatalf("expected ErrInvalidParam, got %v", err)
+	}
+}
+
+// ---------- Update ----------
+
+// newUpdateEnvGroup 构造一对跨环境 folder 业务组：dev + test
+func newUpdateEnvGroup(t *testing.T) (*folderdomain.Folder, *folderdomain.Folder, uuid.UUID) {
+	t.Helper()
+	groupID := uuid.New()
+	dev := &folderdomain.Folder{ID: uuid.New(), GroupID: groupID, EnvID: uuid.New(), Code: "DB", Name: "db", Type: "common"}
+	test := &folderdomain.Folder{ID: uuid.New(), GroupID: groupID, EnvID: uuid.New(), Code: "DB", Name: "db", Type: "common"}
+	return dev, test, groupID
+}
+
+// newUpdateSecretGroup 构造 secret 业务组：两个环境实例（dev/test），每个 secret 关联对应 folder
+func newUpdateSecretGroup(t *testing.T, groupID uuid.UUID, devFolder, testFolder *folderdomain.Folder) ([]*secretdomain.Secret, *secretdomain.Secret, *secretdomain.Secret) {
+	t.Helper()
+	cipher := testCipher(t)
+	devCiphertext, _ := cipher.Encrypt("old-dev-value")
+	testCiphertext, _ := cipher.Encrypt("old-test-value")
+	devSecret := &secretdomain.Secret{
+		ID: uuid.New(), GroupID: groupID, FolderID: devFolder.ID,
+		EnvCode: "dev", Key: "DB_PASSWORD", ValueCiphertext: devCiphertext, Version: 1,
+	}
+	testSecret := &secretdomain.Secret{
+		ID: uuid.New(), GroupID: groupID, FolderID: testFolder.ID,
+		EnvCode: "test", Key: "DB_PASSWORD", ValueCiphertext: testCiphertext, Version: 1,
+	}
+	return []*secretdomain.Secret{devSecret, testSecret}, devSecret, testSecret
+}
+
+func TestService_Update_Success_OnlyRemark(t *testing.T) {
+	dev, test, groupID := newUpdateEnvGroup(t)
+	secrets, _, _ := newUpdateSecretGroup(t, groupID, dev, test)
+
+	remarkCalled := false
+	valueCalled := false
+	secretRepo := &stubSecretRepo{
+		withTx: func(ctx context.Context, fn func(ctx context.Context) error) error { return fn(ctx) },
+		listByGroup: func(ctx context.Context, gid uuid.UUID) ([]*secretdomain.Secret, error) {
+			return secrets, nil
+		},
+		updateRemarkByGroup: func(ctx context.Context, gid uuid.UUID, remark, by string, at time.Time) (int64, error) {
+			remarkCalled = true
+			if gid != groupID || remark != "new remark" || by != "operator-1" {
+				t.Fatalf("updateRemark args wrong: gid=%v remark=%q by=%q", gid, remark, by)
+			}
+			return 2, nil
+		},
+		updateValueByIDs: func(ctx context.Context, items []secretdomain.ValueUpdateItem, by string, at time.Time) error {
+			valueCalled = true
+			return nil
+		},
+	}
+	svc := NewService(secretRepo, &stubFolderRepo{}, &stubEnvRepo{}, testCipher(t))
+
+	err := svc.Update(context.Background(), UpdateInput{CommitMsg: "remark update", Secrets: []UpdateItemInput{
+		{GroupID: groupID, Key: "DB_PASSWORD", Remark: "new remark"},
+	}}, "operator-1")
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if !remarkCalled {
+		t.Fatal("UpdateRemarkByGroupID not called")
+	}
+	if valueCalled {
+		t.Fatal("UpdateValueByIDs must NOT be called when values empty")
+	}
+}
+
+func TestService_Update_Success_OnlyValues(t *testing.T) {
+	dev, test, groupID := newUpdateEnvGroup(t)
+	secrets, _, _ := newUpdateSecretGroup(t, groupID, dev, test)
+
+	cipher := testCipher(t)
+	plaintext := "new-password"
+
+	remarkCalled := false
+	var capturedItems []secretdomain.ValueUpdateItem
+	var capturedHistories []*secretdomain.History
+	batchID := uuid.New()
+	secretRepo := &stubSecretRepo{
+		withTx: func(ctx context.Context, fn func(ctx context.Context) error) error { return fn(ctx) },
+		listByGroup: func(ctx context.Context, gid uuid.UUID) ([]*secretdomain.Secret, error) {
+			return secrets, nil
+		},
+		updateRemarkByGroup: func(ctx context.Context, gid uuid.UUID, remark, by string, at time.Time) (int64, error) {
+			remarkCalled = true
+			return 0, nil
+		},
+		updateValueByIDs: func(ctx context.Context, items []secretdomain.ValueUpdateItem, by string, at time.Time) error {
+			capturedItems = items
+			return nil
+		},
+		createHistoryBatch: func(ctx context.Context, histories []*secretdomain.History) error {
+			capturedHistories = histories
+			return nil
+		},
+	}
+	svc := NewService(secretRepo, &stubFolderRepo{}, &stubEnvRepo{}, cipher)
+
+	err := svc.Update(context.Background(), UpdateInput{BatchID: batchID, CommitMsg: "outer message", Secrets: []UpdateItemInput{
+		{
+			GroupID: groupID, Key: "DB_PASSWORD", Remark: "", CommitMsg: "rotate password",
+			Values: []UpdateValueInput{{SecretID: secrets[0].ID, EnvCode: "dev", FolderID: dev.ID, Value: plaintext}},
+		},
+	}}, "operator-1")
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if remarkCalled {
+		t.Fatal("UpdateRemarkByGroupID must NOT be called when remark empty")
+	}
+	if len(capturedItems) != 1 {
+		t.Fatalf("expected 1 update item, got %d", len(capturedItems))
+	}
+	if capturedItems[0].ID != secrets[0].ID {
+		t.Fatalf("value update mapped to wrong id: got %s want %s", capturedItems[0].ID, secrets[0].ID)
+	}
+	if strings.Contains(capturedItems[0].ValueCiphertext, plaintext) {
+		t.Fatalf("ciphertext must not contain plaintext: %s", capturedItems[0].ValueCiphertext)
+	}
+	if capturedItems[0].ExpectedVersion != 1 {
+		t.Fatalf("expected optimistic version 1, got %d", capturedItems[0].ExpectedVersion)
+	}
+	if len(capturedHistories) != 1 {
+		t.Fatalf("expected 1 history, got %d", len(capturedHistories))
+	}
+	history := capturedHistories[0]
+	if history.SecretID != secrets[0].ID || history.BatchID != batchID || history.Version != 2 {
+		t.Fatalf("unexpected update history: %+v", history)
+	}
+	if history.CommitMsg != "rotate password" {
+		t.Fatalf("item commitMsg must override outer commitMsg: %+v", history)
+	}
+	gotValue, err := cipher.Decrypt(history.ValueCiphertext)
+	if err != nil || gotValue != plaintext {
+		t.Fatalf("history ciphertext does not contain updated value: value=%q err=%v", gotValue, err)
+	}
+}
+
+func TestService_Update_UnchangedValueDoesNotIncreaseVersionOrWriteHistory(t *testing.T) {
+	dev, test, groupID := newUpdateEnvGroup(t)
+	secrets, _, _ := newUpdateSecretGroup(t, groupID, dev, test)
+	valueCalls := 0
+	historyCalls := 0
+	repo := &stubSecretRepo{
+		withTx: func(ctx context.Context, fn func(ctx context.Context) error) error { return fn(ctx) },
+		listByGroup: func(ctx context.Context, gid uuid.UUID) ([]*secretdomain.Secret, error) {
+			return secrets, nil
+		},
+		updateValueByIDs: func(ctx context.Context, items []secretdomain.ValueUpdateItem, by string, at time.Time) error {
+			valueCalls++
+			if len(items) != 0 {
+				t.Fatalf("unchanged value must not produce updates: %+v", items)
+			}
+			return nil
+		},
+		createHistoryBatch: func(ctx context.Context, histories []*secretdomain.History) error {
+			historyCalls++
+			if len(histories) != 0 {
+				t.Fatalf("unchanged value must not produce histories: %+v", histories)
+			}
+			return nil
+		},
+	}
+	svc := NewService(repo, &stubFolderRepo{}, &stubEnvRepo{}, testCipher(t))
+	err := svc.Update(context.Background(), UpdateInput{CommitMsg: "submitted unchanged value", Secrets: []UpdateItemInput{
+		{GroupID: groupID, Values: []UpdateValueInput{{SecretID: secrets[0].ID, Value: "old-dev-value"}}},
+	}}, "u")
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if valueCalls != 0 || historyCalls != 0 {
+		t.Fatalf("unchanged value must not call update/history repositories, value=%d history=%d", valueCalls, historyCalls)
+	}
+}
+
+func TestService_Update_Success_RemarkAndValues(t *testing.T) {
+	dev, test, groupID := newUpdateEnvGroup(t)
+	secrets, _, _ := newUpdateSecretGroup(t, groupID, dev, test)
+
+	remarkCalled := false
+	valueCalled := false
+	historyCalled := false
+	secretRepo := &stubSecretRepo{
+		withTx: func(ctx context.Context, fn func(ctx context.Context) error) error { return fn(ctx) },
+		listByGroup: func(ctx context.Context, gid uuid.UUID) ([]*secretdomain.Secret, error) {
+			return secrets, nil
+		},
+		updateRemarkByGroup: func(ctx context.Context, gid uuid.UUID, remark, by string, at time.Time) (int64, error) {
+			remarkCalled = true
+			return 2, nil
+		},
+		updateValueByIDs: func(ctx context.Context, items []secretdomain.ValueUpdateItem, by string, at time.Time) error {
+			valueCalled = true
+			if len(items) != 2 {
+				t.Fatalf("expected 2 value updates, got %d", len(items))
+			}
+			return nil
+		},
+		createHistoryBatch: func(ctx context.Context, histories []*secretdomain.History) error {
+			historyCalled = true
+			if len(histories) != 2 {
+				t.Fatalf("expected 2 histories, got %d", len(histories))
+			}
+			for _, history := range histories {
+				if history.CommitMsg != "batch update" {
+					t.Fatalf("outer commitMsg must be used as fallback: %+v", history)
+				}
+			}
+			return nil
+		},
+	}
+	svc := NewService(secretRepo, &stubFolderRepo{}, &stubEnvRepo{}, testCipher(t))
+
+	err := svc.Update(context.Background(), UpdateInput{CommitMsg: "batch update", Secrets: []UpdateItemInput{
+		{
+			GroupID: groupID, Key: "DB_PASSWORD", Remark: "remark-update",
+			Values: []UpdateValueInput{
+				{SecretID: secrets[0].ID, EnvCode: "dev", FolderID: dev.ID, Value: "v1"},
+				{SecretID: secrets[1].ID, EnvCode: "test", FolderID: test.ID, Value: "v2"},
+			},
+		},
+	}}, "u")
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if !remarkCalled || !valueCalled || !historyCalled {
+		t.Fatalf("all repo calls expected: remark=%v value=%v history=%v", remarkCalled, valueCalled, historyCalled)
+	}
+}
+
+func TestService_Update_Success_BatchMultipleItems(t *testing.T) {
+	dev1, test1, groupID1 := newUpdateEnvGroup(t)
+	dev2, test2, groupID2 := newUpdateEnvGroup(t)
+	secrets1, _, _ := newUpdateSecretGroup(t, groupID1, dev1, test1)
+	secrets2, _, _ := newUpdateSecretGroup(t, groupID2, dev2, test2)
+
+	remarkGroups := make(map[uuid.UUID]bool)
+	// secret IDs（用于判断两个 group 的 value 都更新到）
+	ids1 := map[uuid.UUID]bool{secrets1[0].ID: true, secrets1[1].ID: true}
+	ids2 := map[uuid.UUID]bool{secrets2[0].ID: true, secrets2[1].ID: true}
+	var seenIDs []uuid.UUID
+
+	secretRepo := &stubSecretRepo{
+		withTx: func(ctx context.Context, fn func(ctx context.Context) error) error { return fn(ctx) },
+		listByGroup: func(ctx context.Context, gid uuid.UUID) ([]*secretdomain.Secret, error) {
+			switch gid {
+			case groupID1:
+				return secrets1, nil
+			case groupID2:
+				return secrets2, nil
+			}
+			return nil, nil
+		},
+		updateRemarkByGroup: func(ctx context.Context, gid uuid.UUID, remark, by string, at time.Time) (int64, error) {
+			remarkGroups[gid] = true
+			return 2, nil
+		},
+		updateValueByIDs: func(ctx context.Context, items []secretdomain.ValueUpdateItem, by string, at time.Time) error {
+			for _, it := range items {
+				seenIDs = append(seenIDs, it.ID)
+			}
+			return nil
+		},
+	}
+	svc := NewService(secretRepo, &stubFolderRepo{}, &stubEnvRepo{}, testCipher(t))
+
+	err := svc.Update(context.Background(), UpdateInput{CommitMsg: "batch update", Secrets: []UpdateItemInput{
+		{GroupID: groupID1, Key: "K1", Remark: "r1", Values: []UpdateValueInput{{SecretID: secrets1[0].ID, FolderID: dev1.ID, Value: "v1"}}},
+		{GroupID: groupID2, Key: "K2", Remark: "r2", Values: []UpdateValueInput{{SecretID: secrets2[0].ID, FolderID: dev2.ID, Value: "v2"}}},
+	}}, "u")
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if !remarkGroups[groupID1] || !remarkGroups[groupID2] {
+		t.Fatalf("both groups should have remark updated: %+v", remarkGroups)
+	}
+	if len(seenIDs) != 2 {
+		t.Fatalf("expected 2 value updates, got %d", len(seenIDs))
+	}
+	got1, got2 := false, false
+	for _, id := range seenIDs {
+		if ids1[id] {
+			got1 = true
+		}
+		if ids2[id] {
+			got2 = true
+		}
+	}
+	if !got1 || !got2 {
+		t.Fatalf("value updates should cover both groups: seen=%v", seenIDs)
+	}
+}
+
+func TestService_Update_EmptySecrets(t *testing.T) {
+	svc := NewService(&stubSecretRepo{}, &stubFolderRepo{}, &stubEnvRepo{}, testCipher(t))
+	if err := svc.Update(context.Background(), UpdateInput{Secrets: nil}, "u"); !errors.Is(err, ErrInvalidParam) {
+		t.Fatalf("expected ErrInvalidParam, got %v", err)
+	}
+}
+
+func TestService_Update_InvalidParam(t *testing.T) {
+	dev, _, groupID := newUpdateEnvGroup(t)
+	secrets, _, _ := newUpdateSecretGroup(t, groupID, dev, &folderdomain.Folder{})
+
+	secretRepo := &stubSecretRepo{
+		withTx: func(ctx context.Context, fn func(ctx context.Context) error) error { return fn(ctx) },
+		listByGroup: func(ctx context.Context, gid uuid.UUID) ([]*secretdomain.Secret, error) {
+			return secrets, nil
+		},
+	}
+	svc := NewService(secretRepo, &stubFolderRepo{}, &stubEnvRepo{}, testCipher(t))
+
+	cases := []UpdateInput{
+		{CommitMsg: "msg", Secrets: []UpdateItemInput{{GroupID: uuid.Nil, Key: "K"}}},
+		{CommitMsg: "msg", Secrets: []UpdateItemInput{{GroupID: groupID, Values: []UpdateValueInput{{SecretID: uuid.Nil, Value: "v"}}}}},
+		{Secrets: []UpdateItemInput{{GroupID: groupID}}},
+	}
+	for _, in := range cases {
+		if err := svc.Update(context.Background(), in, "u"); !errors.Is(err, ErrInvalidParam) {
+			t.Fatalf("expected ErrInvalidParam for %+v, got %v", in, err)
+		}
+	}
+}
+
+func TestService_Update_NotFound(t *testing.T) {
+	secretRepo := &stubSecretRepo{
+		withTx: func(ctx context.Context, fn func(ctx context.Context) error) error { return fn(ctx) },
+		listByGroup: func(ctx context.Context, gid uuid.UUID) ([]*secretdomain.Secret, error) {
+			return nil, nil // 不存在
+		},
+	}
+	svc := NewService(secretRepo, &stubFolderRepo{}, &stubEnvRepo{}, testCipher(t))
+	err := svc.Update(context.Background(), UpdateInput{CommitMsg: "msg", Secrets: []UpdateItemInput{
+		{GroupID: uuid.New(), Key: "K"},
+	}}, "u")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestService_Update_SecretNotUnderGroup(t *testing.T) {
+	dev, _, groupID := newUpdateEnvGroup(t)
+	secrets, _, _ := newUpdateSecretGroup(t, groupID, dev, &folderdomain.Folder{})
+	otherSecretID := uuid.New()
+
+	secretRepo := &stubSecretRepo{
+		withTx: func(ctx context.Context, fn func(ctx context.Context) error) error { return fn(ctx) },
+		listByGroup: func(ctx context.Context, gid uuid.UUID) ([]*secretdomain.Secret, error) {
+			return secrets, nil
+		},
+	}
+	svc := NewService(secretRepo, &stubFolderRepo{}, &stubEnvRepo{}, testCipher(t))
+	err := svc.Update(context.Background(), UpdateInput{CommitMsg: "msg", Secrets: []UpdateItemInput{
+		{GroupID: groupID, Key: "K", Values: []UpdateValueInput{{SecretID: otherSecretID, Value: "v"}}},
+	}}, "u")
+	if !errors.Is(err, ErrSecretNotUnderGroup) {
+		t.Fatalf("expected ErrSecretNotUnderGroup, got %v", err)
+	}
+}
+
+func TestService_Update_UpdateValueError(t *testing.T) {
+	dev, _, groupID := newUpdateEnvGroup(t)
+	secrets, _, _ := newUpdateSecretGroup(t, groupID, dev, &folderdomain.Folder{})
+
+	dbErr := errors.New("update failed")
+	remarkCalled := false
+	secretRepo := &stubSecretRepo{
+		withTx: func(ctx context.Context, fn func(ctx context.Context) error) error { return fn(ctx) },
+		listByGroup: func(ctx context.Context, gid uuid.UUID) ([]*secretdomain.Secret, error) {
+			return secrets, nil
+		},
+		updateRemarkByGroup: func(ctx context.Context, gid uuid.UUID, remark, by string, at time.Time) (int64, error) {
+			remarkCalled = true
+			return 2, nil
+		},
+		updateValueByIDs: func(ctx context.Context, items []secretdomain.ValueUpdateItem, by string, at time.Time) error {
+			return dbErr
+		},
+	}
+	svc := NewService(secretRepo, &stubFolderRepo{}, &stubEnvRepo{}, testCipher(t))
+	err := svc.Update(context.Background(), UpdateInput{CommitMsg: "msg", Secrets: []UpdateItemInput{
+		{GroupID: groupID, Key: "K", Remark: "r", Values: []UpdateValueInput{{SecretID: secrets[0].ID, FolderID: dev.ID, Value: "v"}}},
+	}}, "u")
+	if !errors.Is(err, dbErr) {
+		t.Fatalf("expected dbErr, got %v", err)
+	}
+	// remark 已调用，但 update value 失败 → 事务返回 error；由 WithTx 触发回滚（验证：调用链路走到 updateValueByIDs）
+	if !remarkCalled {
+		t.Fatal("remark should have been called before updateValueByIDs")
+	}
+}
+
+func TestService_Update_TransactionRollback(t *testing.T) {
+	// 两个 item：第一个成功（remark + value），第二个 ListByGroupID 失败 → 整体回滚
+	dev1, _, groupID1 := newUpdateEnvGroup(t)
+	_, _, groupID2 := newUpdateEnvGroup(t)
+	secrets1, _, _ := newUpdateSecretGroup(t, groupID1, dev1, &folderdomain.Folder{})
+
+	secondErr := errors.New("second item failed")
+	remarkCalls := 0
+	valueCalls := 0
+	secretRepo := &stubSecretRepo{
+		withTx: func(ctx context.Context, fn func(ctx context.Context) error) error {
+			// 模拟真实事务：fn 返回 error 时"事务回滚"，但 stub 不真实执行 SQL；通过 fn 是否被调用验证事务边界
+			return fn(ctx)
+		},
+		listByGroup: func(ctx context.Context, gid uuid.UUID) ([]*secretdomain.Secret, error) {
+			if gid == groupID2 {
+				return nil, secondErr
+			}
+			return secrets1, nil
+		},
+		updateRemarkByGroup: func(ctx context.Context, gid uuid.UUID, remark, by string, at time.Time) (int64, error) {
+			remarkCalls++
+			return 2, nil
+		},
+		updateValueByIDs: func(ctx context.Context, items []secretdomain.ValueUpdateItem, by string, at time.Time) error {
+			valueCalls++
+			return nil
+		},
+	}
+	svc := NewService(secretRepo, &stubFolderRepo{}, &stubEnvRepo{}, testCipher(t))
+	err := svc.Update(context.Background(), UpdateInput{CommitMsg: "msg", Secrets: []UpdateItemInput{
+		{GroupID: groupID1, Key: "K1", Remark: "r1"},
+		{GroupID: groupID2, Key: "K2", Remark: "r2"},
+	}}, "u")
+	if !errors.Is(err, secondErr) {
+		t.Fatalf("expected secondErr, got %v", err)
+	}
+	// 第一个 item 的 remark 应该被调用过（在事务内），整体失败由 WithTx 模拟回滚（生产代码中通过 tx.Commit/Rollback 处理）
+	if remarkCalls != 1 {
+		t.Fatalf("expected 1 remark call (item1), got %d", remarkCalls)
+	}
+	if valueCalls != 0 {
+		t.Fatalf("expected 0 value calls (no values in inputs), got %d", valueCalls)
 	}
 }

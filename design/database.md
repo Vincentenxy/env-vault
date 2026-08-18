@@ -8,7 +8,7 @@
 > **实体层级**：租户（tenant_info）→ 组织（organization_info）→ 项目（project_info）→ 环境（environment_info）→ 文件夹（folder_info）→ 密钥（secret_info）。
 > 租户类比公司，组织类比公司部门，项目类比部门承接的具体项目，环境类比项目下的部署环境（开发/测试/仿真/生产），文件夹类比环境下的目录结构，密钥类比文件夹下的 key=value 键值对。系统（system_info）暂未引入。
 >
-> **通用字段约定**：所有业务表必须包含以下字段
+> **通用字段约定**：所有可变业务表必须包含以下字段；只追加、不更新、不删除的历史表仅保留 `create_at` / `create_by`
 >
 > | 列名 | 类型 | 说明 |
 > |------|------|------|
@@ -304,7 +304,54 @@ CREATE INDEX IF NOT EXISTS idx_secret_info_folder_key ON secret_info (folder_id,
 | 创建展开 | 入参 `folderGroupId` + 各环境的 value 列表（含 envId），后端按 `folderGroupId + envId` 定位该环境下 folder 的 id 落库 |
 | `env_code` 冗余 | 与 `folder_id` 所属环境的 code 一致（创建时写入）。因 folder.env_id 创建后不变、所有表的 code 均不可更新，该冗余永久有效，查询聚合时无需再跳 folder/env 表 |
 | `value_type` 预留 | 当前默认空串，后续启用 number/string 类型语义 |
-| `version` 递增 | 同一业务组的所有实例共享版本号，默认 1；后续更新接口提供时组内统一递增 |
+| `version` 递增 | 每个环境实例独立维护版本号，默认 1；仅该环境的 value 实际变化时递增 |
 | 软删除 | 按 `group_id` 逻辑删除该 secret 的所有环境实例 |
 
 **folder_id 关联说明**：secret_info 的 `folder_id` 指向**某个具体环境下** folder_info 的 `id`（该环境实例挂在该环境的 folder 记录下）。跨环境聚合时通过 `group_id` 屏蔽环境层级（与 folder_info 同模式）。
+
+---
+
+## 表名：`secret_info_history`
+
+**说明**：密钥值历史表。每行保存 `secret_info` 中某个具体环境实例的一个 value 版本快照。该表只追加、不更新、不删除，因此不包含 `update_at` / `update_by` / `delete_at` / `delete_by` / `is_deleted`。
+
+```sql
+CREATE TABLE IF NOT EXISTS secret_info_history (
+    id               uuid        PRIMARY KEY,
+    secret_id        uuid        NOT NULL,                 -- secret_info.id，具体环境实例
+    batch_id         uuid        NOT NULL,                 -- 一次 create/update 请求产生的统一批次 ID
+    group_id         uuid        NOT NULL,                 -- 逻辑 Secret ID，同一 Secret 的环境实例共享
+    folder_id        uuid        NOT NULL,                 -- 当前环境对应的 folder_info.id
+    env_code         text        NOT NULL,                 -- 环境编码
+    value_ciphertext text        NOT NULL DEFAULT '',      -- 该版本的加密值
+    value_type       text        NOT NULL DEFAULT '',      -- 该版本的值类型
+    version          integer     NOT NULL,                 -- 该环境实例的版本号
+    commit_msg       text        NOT NULL DEFAULT '',      -- 本次版本变更说明
+    create_by        text        NOT NULL DEFAULT '',      -- 版本提交人
+    create_at        timestamptz NOT NULL DEFAULT now()    -- 版本提交时间
+);
+
+-- 按具体环境实例分页查询历史版本
+CREATE INDEX IF NOT EXISTS idx_secret_info_history_secret_version
+    ON secret_info_history (secret_id, version DESC);
+-- 按批次查询一次 create/update 产生的全部版本记录
+CREATE INDEX IF NOT EXISTS idx_secret_info_history_batch
+    ON secret_info_history (batch_id, create_at ASC);
+-- 预留按逻辑 Secret 查询全部环境历史
+CREATE INDEX IF NOT EXISTS idx_secret_info_history_group_created
+    ON secret_info_history (group_id, create_at DESC);
+```
+
+**业务规则**：
+
+| 规则 | 说明 |
+|------|------|
+| 初始版本 | 创建 Secret 时写入 `version=1` 的历史快照；一次 create 请求共用一个 `batch_id` |
+| 更新批次 | 一次 update 请求生成一个 `batch_id`，请求内所有实际发生 value 变化的历史记录共用该 ID |
+| 独立版本 | 不同环境通过各自的 `secret_id` 独立维护版本；只有新旧明文不同时才更新并递增版本 |
+| 原子性 | 当前值更新与历史快照写入必须在同一事务中完成，任一失败则整体回滚 |
+| commit_msg | update 顶层和单个 Secret 均可传 `commitMsg`；单个 Secret 非空时优先，否则使用顶层值 |
+| 加密存储 | 历史 value 与当前 value 使用相同 AES-256-GCM 密文格式，不存储明文 |
+| 查询优先级 | 历史接口按 `secretId > batchId > groupId` 选择条件；当前仅实现 secretId 分页和 batchId 不分页查询，groupId 返回暂不支持错误 |
+
+**历史数据说明**：上线前已产生但未记录的历史 value 无法恢复。迁移时最多只能将 `secret_info` 当前值按当前 `version` 补为一条基线快照。

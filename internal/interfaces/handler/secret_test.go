@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -18,8 +19,10 @@ import (
 // stubSecretService 内存实现的 secretapp.IService，便于 handler 层单测
 type stubSecretService struct {
 	createFn     func(ctx context.Context, in secretapp.CreateInput, operator string) ([]*secretdomain.Secret, error)
+	updateFn     func(ctx context.Context, in secretapp.UpdateInput, operator string) error
 	listByFolder func(ctx context.Context, folderGroupID uuid.UUID) ([]secretapp.SecretView, error)
 	getByGroup   func(ctx context.Context, groupID uuid.UUID) (*secretapp.SecretView, error)
+	historyFn    func(ctx context.Context, in secretapp.HistoryInput) ([]secretapp.HistoryView, int64, error)
 	deleteFn     func(ctx context.Context, groupID uuid.UUID, operator string) error
 }
 
@@ -28,6 +31,12 @@ func (s *stubSecretService) Create(ctx context.Context, in secretapp.CreateInput
 		return s.createFn(ctx, in, operator)
 	}
 	return nil, nil
+}
+func (s *stubSecretService) Update(ctx context.Context, in secretapp.UpdateInput, operator string) error {
+	if s.updateFn != nil {
+		return s.updateFn(ctx, in, operator)
+	}
+	return nil
 }
 func (s *stubSecretService) ListByFolder(ctx context.Context, folderGroupID uuid.UUID) ([]secretapp.SecretView, error) {
 	if s.listByFolder != nil {
@@ -40,6 +49,12 @@ func (s *stubSecretService) GetByGroup(ctx context.Context, groupID uuid.UUID) (
 		return s.getByGroup(ctx, groupID)
 	}
 	return nil, nil
+}
+func (s *stubSecretService) History(ctx context.Context, in secretapp.HistoryInput) ([]secretapp.HistoryView, int64, error) {
+	if s.historyFn != nil {
+		return s.historyFn(ctx, in)
+	}
+	return nil, 0, nil
 }
 func (s *stubSecretService) Delete(ctx context.Context, groupID uuid.UUID, operator string) error {
 	if s.deleteFn != nil {
@@ -61,8 +76,10 @@ func newSecretTestEngine(svc secretapp.IService, u *userctx.User) *gin.Engine {
 	h := NewSecretHandler(svc)
 	g := r.Group("/api/v1/secret")
 	g.POST("/create", h.Create)
+	g.POST("/update", h.Update)
 	g.POST("/list", h.List)
 	g.POST("/detail", h.Detail)
+	g.POST("/history", h.History)
 	g.POST("/delete", h.Delete)
 	return r
 }
@@ -172,12 +189,91 @@ func TestSecretHandler_Create_InvalidBody(t *testing.T) {
 	}
 }
 
+// 多个 secret 一次性创建时：handler 应把所有 items 都转换并传给 svc，且响应按返回的物理记录逐条映射。
+func TestSecretHandler_Create_BatchMultiple(t *testing.T) {
+	fgA, fgB := uuid.New(), uuid.New()
+	envA1, envA2 := uuid.New(), uuid.New()
+	envB1, envB2 := uuid.New(), uuid.New()
+	gA, gB := uuid.New(), uuid.New()
+
+	svc := &stubSecretService{
+		createFn: func(ctx context.Context, in secretapp.CreateInput, operator string) ([]*secretdomain.Secret, error) {
+			if operator != "u-1" {
+				t.Fatalf("operator not propagated: %q", operator)
+			}
+			if len(in.SecretList) != 2 {
+				t.Fatalf("expected 2 items, got %d", len(in.SecretList))
+			}
+			// 校验每个 item 的 fields 都正确转换
+			if in.SecretList[0].FolderGroupID != fgA || in.SecretList[0].Key != "DB_PASSWORD" ||
+				len(in.SecretList[0].Values) != 2 ||
+				in.SecretList[0].Values[0].EnvID != envA1 || in.SecretList[0].Values[0].Value != "v-a1" ||
+				in.SecretList[0].Values[1].EnvID != envA2 || in.SecretList[0].Values[1].Value != "v-a2" {
+				t.Fatalf("item[0] not passed correctly: %+v", in.SecretList[0])
+			}
+			if in.SecretList[1].FolderGroupID != fgB || in.SecretList[1].Key != "API_TOKEN" ||
+				len(in.SecretList[1].Values) != 2 {
+				t.Fatalf("item[1] not passed correctly: %+v", in.SecretList[1])
+			}
+			return []*secretdomain.Secret{
+				{ID: uuid.New(), GroupID: gA, Key: "DB_PASSWORD", Remark: "r1"},
+				{ID: uuid.New(), GroupID: gB, Key: "API_TOKEN", Remark: "r2"},
+			}, nil
+		},
+	}
+	r := newSecretTestEngine(svc, testUser())
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/secret/create", map[string]any{
+		"secretList": []map[string]any{
+			{
+				"folderGroupId": fgA,
+				"key":           "DB_PASSWORD",
+				"remark":        "r1",
+				"values": []map[string]any{
+					{"envId": envA1, "value": "v-a1"},
+					{"envId": envA2, "value": "v-a2"},
+				},
+			},
+			{
+				"folderGroupId": fgB,
+				"key":           "API_TOKEN",
+				"remark":        "r2",
+				"values": []map[string]any{
+					{"envId": envB1, "value": "v-b1"},
+					{"envId": envB2, "value": "v-b2"},
+				},
+			},
+		},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	body := decodeBody(t, w)
+	if body["code"].(float64) != 0 {
+		t.Fatalf("expected business code 0, got %v", body["code"])
+	}
+	list := body["data"].([]any)
+	if len(list) != 2 {
+		t.Fatalf("expected 2 created, got %d", len(list))
+	}
+	// 响应按 svc 返回顺序映射 groupId / key / remark
+	got0 := list[0].(map[string]any)
+	got1 := list[1].(map[string]any)
+	if got0["groupId"].(string) != gA.String() || got0["key"].(string) != "DB_PASSWORD" || got0["remark"].(string) != "r1" {
+		t.Fatalf("response[0] wrong: %+v", got0)
+	}
+	if got1["groupId"].(string) != gB.String() || got1["key"].(string) != "API_TOKEN" || got1["remark"].(string) != "r2" {
+		t.Fatalf("response[1] wrong: %+v", got1)
+	}
+}
+
 // ---------- List（查询1） ----------
 
 func TestSecretHandler_List_Success(t *testing.T) {
 	folderGroupID := uuid.New()
 	devFolderID := uuid.New()
 	testFolderID := uuid.New()
+	devSecretID := uuid.New()
+	testSecretID := uuid.New()
 	groupID := uuid.New()
 	svc := &stubSecretService{
 		listByFolder: func(ctx context.Context, gid uuid.UUID) ([]secretapp.SecretView, error) {
@@ -190,8 +286,8 @@ func TestSecretHandler_List_Success(t *testing.T) {
 					Key:     "DB_PASSWORD",
 					Remark:  "数据库密码",
 					Values: map[string]secretapp.SecretValueView{
-						"dev":  {FolderID: devFolderID, Value: "dev-pass"},
-						"test": {FolderID: testFolderID, Value: "test-pass"},
+						"dev":  {SecretID: devSecretID, FolderID: devFolderID, Value: "dev-pass", Version: 2, ValueType: "string"},
+						"test": {SecretID: testSecretID, FolderID: testFolderID, Value: "test-pass", Version: 4, ValueType: "number"},
 					},
 				},
 			}, nil
@@ -217,16 +313,22 @@ func TestSecretHandler_List_Success(t *testing.T) {
 	}
 	values := first["values"].(map[string]any)
 	dev := values["dev"].(map[string]any)
-	if dev["value"].(string) != "dev-pass" || dev["folderId"].(string) != devFolderID.String() {
+	if dev["value"].(string) != "dev-pass" || dev["folderId"].(string) != devFolderID.String() || dev["secretId"].(string) != devSecretID.String() {
 		t.Fatalf("unexpected dev value: %+v", dev)
 	}
 	// 方案1：values 项不再输出 envId（key 即 env code）
 	if _, ok := dev["envId"]; ok {
 		t.Fatalf("values item must NOT contain envId: %+v", dev)
 	}
+	if dev["version"].(float64) != 2 || dev["valueType"].(string) != "string" {
+		t.Fatalf("list detail fields missing from dev value: %+v", dev)
+	}
 	test := values["test"].(map[string]any)
 	if test["folderId"].(string) != testFolderID.String() {
 		t.Fatalf("unexpected test value: %+v", test)
+	}
+	if test["version"].(float64) != 4 || test["valueType"].(string) != "number" {
+		t.Fatalf("list detail fields missing from test value: %+v", test)
 	}
 }
 
@@ -234,6 +336,7 @@ func TestSecretHandler_List_Success(t *testing.T) {
 
 func TestSecretHandler_Detail_Success(t *testing.T) {
 	groupID := uuid.New()
+	prodSecretID := uuid.New()
 	svc := &stubSecretService{
 		getByGroup: func(ctx context.Context, gid uuid.UUID) (*secretapp.SecretView, error) {
 			if gid != groupID {
@@ -243,7 +346,7 @@ func TestSecretHandler_Detail_Success(t *testing.T) {
 				GroupID: groupID,
 				Key:     "TOKEN",
 				Values: map[string]secretapp.SecretValueView{
-					"prod": {FolderID: uuid.New(), Value: "prod-token"},
+					"prod": {SecretID: prodSecretID, FolderID: uuid.New(), Value: "prod-token", Version: 7, ValueType: "string"},
 				},
 			}, nil
 		},
@@ -258,6 +361,13 @@ func TestSecretHandler_Detail_Success(t *testing.T) {
 	if data["groupId"].(string) != groupID.String() || data["key"].(string) != "TOKEN" {
 		t.Fatalf("unexpected data: %+v", data)
 	}
+	prod := data["values"].(map[string]any)["prod"].(map[string]any)
+	if prod["secretId"].(string) != prodSecretID.String() {
+		t.Fatalf("detail secretId missing from prod value: %+v", prod)
+	}
+	if prod["version"].(float64) != 7 || prod["valueType"].(string) != "string" {
+		t.Fatalf("detail fields missing from prod value: %+v", prod)
+	}
 }
 
 func TestSecretHandler_Detail_NotFound(t *testing.T) {
@@ -271,6 +381,62 @@ func TestSecretHandler_Detail_NotFound(t *testing.T) {
 	body := decodeBody(t, w)
 	if body["code"].(float64) != -1 {
 		t.Fatalf("expected generic code -1, got %v", body["code"])
+	}
+}
+
+func TestSecretHandler_History_Success(t *testing.T) {
+	secretID := uuid.New()
+	batchID := uuid.New()
+	groupID := uuid.New()
+	createdAt := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
+	svc := &stubSecretService{
+		historyFn: func(ctx context.Context, in secretapp.HistoryInput) ([]secretapp.HistoryView, int64, error) {
+			if in.SecretID != secretID || in.BatchID != batchID || in.GroupID != groupID || in.PageNum != 2 || in.PageSize != 5 {
+				t.Fatalf("history input not passed: %+v", in)
+			}
+			return []secretapp.HistoryView{{
+				ID: uuid.New(), SecretID: secretID, BatchID: batchID, GroupID: groupID,
+				FolderID: uuid.New(), EnvCode: "prod", Value: "secret-v2", ValueType: "string",
+				Version: 2, CommitMsg: "rotate", CreateBy: "u-1", CreateAt: createdAt,
+			}}, 6, nil
+		},
+	}
+	r := newSecretTestEngine(svc, testUser())
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/secret/history", map[string]any{
+		"secretId": secretID,
+		"batchId":  batchID,
+		"groupId":  groupID,
+		"pageNum":  2,
+		"pageSize": 5,
+	})
+	body := decodeBody(t, w)
+	if body["code"].(float64) != 0 {
+		t.Fatalf("expected 0, got body=%+v", body)
+	}
+	data := body["data"].(map[string]any)
+	if data["total"].(float64) != 6 {
+		t.Fatalf("unexpected total: %+v", data)
+	}
+	history := data["historyList"].([]any)[0].(map[string]any)
+	if history["secretId"].(string) != secretID.String() || history["batchId"].(string) != batchID.String() {
+		t.Fatalf("history identity fields missing: %+v", history)
+	}
+	if history["value"].(string) != "secret-v2" || history["version"].(float64) != 2 || history["commitMsg"].(string) != "rotate" {
+		t.Fatalf("unexpected history data: %+v", history)
+	}
+}
+
+func TestSecretHandler_History_GroupNotSupported(t *testing.T) {
+	svc := &stubSecretService{
+		historyFn: func(ctx context.Context, in secretapp.HistoryInput) ([]secretapp.HistoryView, int64, error) {
+			return nil, 0, secretapp.ErrHistoryGroupNotSupported
+		},
+	}
+	r := newSecretTestEngine(svc, testUser())
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/secret/history", map[string]any{"groupId": uuid.New()})
+	body := decodeBody(t, w)
+	if body["code"].(float64) != -1 || body["msg"].(string) != secretapp.ErrHistoryGroupNotSupported.Error() {
+		t.Fatalf("unexpected group history error: %+v", body)
 	}
 }
 
@@ -326,5 +492,257 @@ func TestSecretHandler_InternalError_FallbackToCodeMinusOne(t *testing.T) {
 	body := decodeBody(t, w)
 	if body["code"].(float64) != -1 {
 		t.Fatalf("expected code -1 for unmapped error, got %v", body["code"])
+	}
+}
+
+// ---------- Update ----------
+
+func TestSecretHandler_Update_Success_OnlyRemark(t *testing.T) {
+	groupID := uuid.New()
+	called := false
+	svc := &stubSecretService{
+		updateFn: func(ctx context.Context, in secretapp.UpdateInput, operator string) error {
+			called = true
+			if operator != "u-1" {
+				t.Fatalf("operator not propagated: %q", operator)
+			}
+			if len(in.Secrets) != 1 {
+				t.Fatalf("expected 1 item, got %d", len(in.Secrets))
+			}
+			item := in.Secrets[0]
+			if item.GroupID != groupID || item.Remark != "new-remark" || item.Key != "DB_PASSWORD" {
+				t.Fatalf("item not passed: %+v", item)
+			}
+			if len(item.Values) != 0 {
+				t.Fatalf("values must be empty, got %d", len(item.Values))
+			}
+			return nil
+		},
+	}
+	r := newSecretTestEngine(svc, testUser())
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/secret/update", map[string]any{
+		"commitMsg": "remark update",
+		"secrets": []map[string]any{
+			{"groupId": groupID, "key": "DB_PASSWORD", "remark": "new-remark"},
+		},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	body := decodeBody(t, w)
+	if body["code"].(float64) != 0 {
+		t.Fatalf("expected business code 0, got %v", body["code"])
+	}
+	if !called {
+		t.Fatal("svc.Update not called")
+	}
+}
+
+func TestSecretHandler_Update_Success_WithValues(t *testing.T) {
+	groupID := uuid.New()
+	devFolder := uuid.New()
+	testFolder := uuid.New()
+	devSecret := uuid.New()
+	testSecret := uuid.New()
+	var capturedBatchID uuid.UUID
+	svc := &stubSecretService{
+		updateFn: func(ctx context.Context, in secretapp.UpdateInput, operator string) error {
+			capturedBatchID = in.BatchID
+			if in.BatchID == uuid.Nil || in.CommitMsg != "batch update" {
+				t.Fatalf("batch fields not passed: %+v", in)
+			}
+			if len(in.Secrets) != 1 {
+				t.Fatalf("expected 1 item, got %d", len(in.Secrets))
+			}
+			item := in.Secrets[0]
+			if item.GroupID != groupID || item.Remark != "r1" || item.CommitMsg != "secret update" {
+				t.Fatalf("item fields wrong: %+v", item)
+			}
+			if len(item.Values) != 2 {
+				t.Fatalf("expected 2 values, got %d", len(item.Values))
+			}
+			if item.Values[0].SecretID != devSecret || item.Values[0].FolderID != devFolder || item.Values[0].Value != "v1" || item.Values[0].EnvCode != "dev" {
+				t.Fatalf("values[0] not passed: %+v", item.Values[0])
+			}
+			if item.Values[1].SecretID != testSecret || item.Values[1].FolderID != testFolder || item.Values[1].Value != "v2" || item.Values[1].EnvCode != "test" {
+				t.Fatalf("values[1] not passed: %+v", item.Values[1])
+			}
+			return nil
+		},
+	}
+	r := newSecretTestEngine(svc, testUser())
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/secret/update", map[string]any{
+		"commitMsg": "batch update",
+		"secrets": []map[string]any{
+			{
+				"groupId":   groupID,
+				"key":       "DB_PASSWORD",
+				"remark":    "r1",
+				"commitMsg": "secret update",
+				"values": []map[string]any{
+					{"secretId": devSecret, "envCode": "dev", "folderId": devFolder, "value": "v1"},
+					{"secretId": testSecret, "envCode": "test", "folderId": testFolder, "value": "v2"},
+				},
+			},
+		},
+	})
+	body := decodeBody(t, w)
+	if body["code"].(float64) != 0 {
+		t.Fatalf("expected 0, got %v", body["code"])
+	}
+	data := body["data"].(map[string]any)
+	if data["batchId"].(string) != capturedBatchID.String() {
+		t.Fatalf("response batchId does not match service input: %+v", data)
+	}
+}
+
+func TestSecretHandler_Update_Success_BatchMultiple(t *testing.T) {
+	g1, g2 := uuid.New(), uuid.New()
+	svc := &stubSecretService{
+		updateFn: func(ctx context.Context, in secretapp.UpdateInput, operator string) error {
+			if len(in.Secrets) != 2 {
+				t.Fatalf("expected 2 items, got %d", len(in.Secrets))
+			}
+			if in.Secrets[0].GroupID != g1 || in.Secrets[1].GroupID != g2 {
+				t.Fatalf("group order wrong: %+v", in.Secrets)
+			}
+			return nil
+		},
+	}
+	r := newSecretTestEngine(svc, testUser())
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/secret/update", map[string]any{
+		"commitMsg": "batch update",
+		"secrets": []map[string]any{
+			{"groupId": g1, "key": "K1", "remark": "r1"},
+			{"groupId": g2, "key": "K2", "remark": "r2"},
+		},
+	})
+	body := decodeBody(t, w)
+	if body["code"].(float64) != 0 {
+		t.Fatalf("expected 0, got %v", body["code"])
+	}
+}
+
+func TestSecretHandler_Update_FieldsRequired(t *testing.T) {
+	cases := []struct {
+		name string
+		body map[string]any
+	}{
+		{
+			name: "empty_secrets",
+			body: map[string]any{"secrets": []map[string]any{}},
+		},
+		{
+			name: "nil_groupId",
+			body: map[string]any{
+				"commitMsg": "msg",
+				"secrets": []map[string]any{
+					{"groupId": "00000000-0000-0000-0000-000000000000", "key": "K"},
+				},
+			},
+		},
+		{
+			name: "nil_secretId",
+			body: map[string]any{
+				"commitMsg": "msg",
+				"secrets": []map[string]any{
+					{
+						"groupId": uuid.New(),
+						"key":     "K",
+						"values": []map[string]any{
+							{"secretId": "00000000-0000-0000-0000-000000000000", "envCode": "dev", "value": "v"},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "missing_commitMsg",
+			body: map[string]any{
+				"secrets": []map[string]any{{"groupId": uuid.New()}},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &stubSecretService{
+				updateFn: func(ctx context.Context, in secretapp.UpdateInput, operator string) error {
+					t.Fatal("svc.Update must NOT be called on invalid params")
+					return nil
+				},
+			}
+			r := newSecretTestEngine(svc, testUser())
+			w := doJSONP(t, r, http.MethodPost, "/api/v1/secret/update", tc.body)
+			expectInvalidParams(t, w)
+		})
+	}
+}
+
+func TestSecretHandler_Update_InvalidBody(t *testing.T) {
+	svc := &stubSecretService{
+		updateFn: func(ctx context.Context, in secretapp.UpdateInput, operator string) error {
+			t.Fatal("svc.Update must NOT be called on bind failure")
+			return nil
+		},
+	}
+	r := newSecretTestEngine(svc, testUser())
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/secret/update", strings.NewReader("{not json"))
+	body := decodeBody(t, w)
+	if body["code"].(float64) != -1 {
+		t.Fatalf("expected generic code -1 for bind failure, got %v", body["code"])
+	}
+}
+
+func TestSecretHandler_Update_BusinessErrors(t *testing.T) {
+	cases := []error{
+		secretapp.ErrInvalidParam,
+		secretapp.ErrNotFound,
+		secretapp.ErrSecretNotUnderFolder,
+	}
+	for _, wantErr := range cases {
+		svc := &stubSecretService{
+			updateFn: func(ctx context.Context, in secretapp.UpdateInput, operator string) error {
+				return wantErr
+			},
+		}
+		r := newSecretTestEngine(svc, testUser())
+		w := doJSONP(t, r, http.MethodPost, "/api/v1/secret/update", map[string]any{
+			"commitMsg": "msg",
+			"secrets": []map[string]any{
+				{"groupId": uuid.New(), "key": "K"},
+			},
+		})
+		body := decodeBody(t, w)
+		if body["code"].(float64) != -1 {
+			t.Fatalf("expected generic code -1 for %v, got %v", wantErr, body["code"])
+		}
+		if body["msg"].(string) != wantErr.Error() {
+			t.Fatalf("expected msg %q, got %v", wantErr.Error(), body["msg"])
+		}
+	}
+}
+
+// item.key 任意值都不参与业务校验（groupId 已唯一定位）：通过 updateFn 入参确认 key 透传
+func TestSecretHandler_Update_KeyNotValidated(t *testing.T) {
+	groupID := uuid.New()
+	svc := &stubSecretService{
+		updateFn: func(ctx context.Context, in secretapp.UpdateInput, operator string) error {
+			// key 是 "TOTALLY_WRONG" 也应该照常进入更新路径
+			if in.Secrets[0].Key != "TOTALLY_WRONG" {
+				t.Fatalf("expected key to be passed through, got %q", in.Secrets[0].Key)
+			}
+			return nil
+		},
+	}
+	r := newSecretTestEngine(svc, testUser())
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/secret/update", map[string]any{
+		"commitMsg": "msg",
+		"secrets": []map[string]any{
+			{"groupId": groupID, "key": "TOTALLY_WRONG", "remark": "r"},
+		},
+	})
+	body := decodeBody(t, w)
+	if body["code"].(float64) != 0 {
+		t.Fatalf("expected 0 (key not validated), got %v", body["code"])
 	}
 }
