@@ -50,7 +50,7 @@ func main() {
 	}
 
 	// 初始化路由
-	r, err := router.New(cfg, db)
+	r, err := router.New(cfg, db, redisClient)
 	if err != nil {
 		logger.L().Fatal("init router failed", zap.Error(err))
 	}

@@ -38,10 +38,19 @@ type ProjectDTO struct {
 
 // CreateRequest 创建项目请求
 type CreateProjectRequest struct {
-	Code   string    `json:"code"`
-	Name   string    `json:"name"`
-	Remark string    `json:"remark"`
-	OrgID  uuid.UUID `json:"orgId"`
+	Code         string                         `json:"code"`
+	Name         string                         `json:"name"`
+	Remark       string                         `json:"remark"`
+	OrgID        uuid.UUID                      `json:"orgId"`
+	Environments []CreateProjectEnvironmentItem `json:"environments,omitempty"`
+}
+
+// CreateProjectEnvironmentItem 创建项目时的环境配置。
+type CreateProjectEnvironmentItem struct {
+	Name        string `json:"name"`
+	Code        string `json:"code"`
+	Remark      string `json:"remark"`
+	IsCheckPerm bool   `json:"isCheckPerm"`
 }
 
 // UpdateRequest 更新项目请求
@@ -83,16 +92,30 @@ func (h *ProjectHandler) Create(c *gin.Context) {
 	}
 
 	p, err := h.svc.Create(c, projapp.CreateInput{
-		Code:   req.Code,
-		Name:   req.Name,
-		Remark: req.Remark,
-		OrgID:  req.OrgID,
+		Code:         req.Code,
+		Name:         req.Name,
+		Remark:       req.Remark,
+		OrgID:        req.OrgID,
+		Environments: toCreateEnvironmentInputs(req.Environments),
 	}, operator(c))
 	h.respondError(c, err)
 	if err != nil {
 		return
 	}
 	response.Success(c, toProjectDTO(p))
+}
+
+func toCreateEnvironmentInputs(items []CreateProjectEnvironmentItem) []projapp.CreateEnvironmentInput {
+	inputs := make([]projapp.CreateEnvironmentInput, 0, len(items))
+	for _, item := range items {
+		inputs = append(inputs, projapp.CreateEnvironmentInput{
+			Name:        item.Name,
+			Code:        item.Code,
+			Remark:      item.Remark,
+			IsCheckPerm: item.IsCheckPerm,
+		})
+	}
+	return inputs
 }
 
 // Update 更新项目
@@ -202,7 +225,8 @@ func (h *ProjectHandler) respondError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, projapp.ErrCodeExists),
 		errors.Is(err, projapp.ErrNotFound),
-		errors.Is(err, projapp.ErrInvalidParam):
+		errors.Is(err, projapp.ErrInvalidParam),
+		errors.Is(err, projapp.ErrEnvironmentCodeDuplicated):
 		// 通用业务错误：统一 code=-1，msg 由 service 给出
 		response.Error(c, err.Error())
 	default:

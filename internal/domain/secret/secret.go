@@ -40,6 +40,15 @@ type ValueUpdateItem struct {
 	ExpectedVersion int
 }
 
+// ProjectFolderListFilter 按项目、文件夹编码和环境编码查询 secrets。
+// Keys 为空表示返回匹配目录和环境下的全部 key；非空时按 key 精确过滤。
+type ProjectFolderListFilter struct {
+	ProjectID  uuid.UUID
+	FolderCode string
+	EnvCodes   []string
+	Keys       []string
+}
+
 // History 密钥值的不可变历史版本快照
 type History struct {
 	ID              uuid.UUID
@@ -70,6 +79,8 @@ type Repository interface {
 	ListByFolderIDs(ctx context.Context, folderIDs []uuid.UUID) ([]*Secret, error)
 	// ListByGroupID 按 group_id 查询业务组下的全部环境实例（不含已删除）
 	ListByGroupID(ctx context.Context, groupID uuid.UUID) ([]*Secret, error)
+	// ListByProjectFolder 按 project_id + folder code + env code 查询 secrets，可选 key 精确过滤
+	ListByProjectFolder(ctx context.Context, filter ProjectFolderListFilter) ([]*Secret, error)
 	// UpdateValueByIDs 按 ID 集合逐条更新 value_ciphertext 与 version（version = version + 1）、update_by、update_at
 	UpdateValueByIDs(ctx context.Context, items []ValueUpdateItem, updateBy string, updateAt time.Time) error
 	// UpdateRemarkByGroupID 按 group_id 全环境同步更新 remark，返回受影响行数

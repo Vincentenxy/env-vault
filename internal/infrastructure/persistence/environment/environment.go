@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	envdomain "env-vault/internal/domain/environment"
+	"env-vault/internal/infrastructure/persistence"
 )
 
 // environmentPO environment_info 表持久化对象（数据库列名下划线）
@@ -54,7 +55,7 @@ func (r *Repository) CreateBatch(ctx context.Context, environments []*envdomain.
 	for _, e := range environments {
 		pos = append(pos, toPO(e))
 	}
-	return r.db.WithContext(ctx).Create(&pos).Error
+	return persistence.TxDB(ctx, r.db).WithContext(ctx).Create(&pos).Error
 }
 
 // Update 更新环境（按 ID）

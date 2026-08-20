@@ -153,6 +153,33 @@ func (r *Repository) ListByGroupID(ctx context.Context, groupID uuid.UUID) ([]*s
 	return secrets, nil
 }
 
+// ListByProjectFolder 按项目、目录编码和环境编码查询 secrets。
+// folder_info 与 environment_info 的关联同时保证目录属于指定项目和环境。
+func (r *Repository) ListByProjectFolder(ctx context.Context, filter secretdomain.ProjectFolderListFilter) ([]*secretdomain.Secret, error) {
+	var pos []secretPO
+	query := r.withTxDB(ctx).WithContext(ctx).
+		Model(&secretPO{}).
+		Select("secret_info.*").
+		Joins("JOIN folder_info ON folder_info.id = secret_info.folder_id AND folder_info.is_deleted = false").
+		Joins("JOIN environment_info ON environment_info.id = folder_info.env_id AND environment_info.is_deleted = false").
+		Where("secret_info.is_deleted = false").
+		Where("environment_info.project_id = ?", filter.ProjectID).
+		Where("folder_info.code = ?", filter.FolderCode).
+		Where("environment_info.code IN ?", filter.EnvCodes)
+	if len(filter.Keys) > 0 {
+		query = query.Where("secret_info.key IN ?", filter.Keys)
+	}
+	if err := query.Order("secret_info.create_at DESC").Find(&pos).Error; err != nil {
+		return nil, err
+	}
+
+	secrets := make([]*secretdomain.Secret, 0, len(pos))
+	for i := range pos {
+		secrets = append(secrets, toDomain(&pos[i]))
+	}
+	return secrets, nil
+}
+
 // UpdateValueByIDs 按 ID 集合逐条更新 value_ciphertext 与 version（version = version + 1）。
 // 若 ctx 已携带事务句柄则参与该事务，否则单条自动提交。
 func (r *Repository) UpdateValueByIDs(ctx context.Context, items []secretdomain.ValueUpdateItem, updateBy string, updateAt time.Time) error {

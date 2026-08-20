@@ -1,7 +1,12 @@
 package router
 
 import (
+	"context"
+	"time"
+
 	"github.com/gin-gonic/gin"
+	redislib "github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 
 	envapp "env-vault/internal/application/environment"
@@ -10,6 +15,8 @@ import (
 	projapp "env-vault/internal/application/project"
 	secretapp "env-vault/internal/application/secret"
 	tenantapp "env-vault/internal/application/tenant"
+	userapp "env-vault/internal/application/user"
+	usercache "env-vault/internal/infrastructure/cache/user"
 	"env-vault/internal/infrastructure/config"
 	envrepo "env-vault/internal/infrastructure/persistence/environment"
 	folderrepo "env-vault/internal/infrastructure/persistence/folder"
@@ -17,16 +24,18 @@ import (
 	projrepo "env-vault/internal/infrastructure/persistence/project"
 	secretrepo "env-vault/internal/infrastructure/persistence/secret"
 	tenantrepo "env-vault/internal/infrastructure/persistence/tenant"
+	userrepo "env-vault/internal/infrastructure/persistence/user"
 	"env-vault/internal/interfaces/handler"
 	"env-vault/internal/interfaces/middleware"
 	"env-vault/pkg/crypto"
+	"env-vault/pkg/logger"
 )
 
 // New 初始化 gin 引擎并注册路由
 // 路由规范：/api/[版本]/[pub]/...
 //   - /api/v1/pub/... 无认证接口，可随意调用
 //   - /api/v1/...     需认证接口，挂载 JWT 认证中间件
-func New(cfg *config.Config, db *gorm.DB) (*gin.Engine, error) {
+func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) (*gin.Engine, error) {
 	gin.SetMode(cfg.Server.Mode)
 
 	r := gin.New()
@@ -40,9 +49,8 @@ func New(cfg *config.Config, db *gorm.DB) (*gin.Engine, error) {
 	orgSvc := orgapp.NewService(orgRepo)
 
 	projRepo := projrepo.NewRepository(db)
-	projSvc := projapp.NewService(projRepo)
-
 	envRepo := envrepo.NewRepository(db)
+	projSvc := projapp.NewService(projRepo, envRepo)
 	envSvc := envapp.NewService(envRepo)
 
 	folderRepo := folderrepo.NewRepository(db)
@@ -56,8 +64,13 @@ func New(cfg *config.Config, db *gorm.DB) (*gin.Engine, error) {
 	secretRepo := secretrepo.NewRepository(db)
 	secretSvc := secretapp.NewService(secretRepo, folderRepo, envRepo, cipher)
 
+	userRepo := userrepo.NewRepository(db)
+	userProfileCache := usercache.NewRedisProfileCache(redisClient, cfg.Redis.KeyPrefix)
+	userNameCache := usercache.NewMemoryNameCache()
+	userSvc := userapp.NewService(userRepo, userProfileCache, userNameCache)
+
 	healthHandler := handler.NewHealthHandler()
-	userHandler := handler.NewUserHandler()
+	userHandler := handler.NewUserHandler(userSvc)
 	tenantHandler := handler.NewTenantHandler(tenantSvc)
 	orgHandler := handler.NewOrganizationHandler(orgSvc)
 	projectHandler := handler.NewProjectHandler(projSvc)
@@ -79,7 +92,10 @@ func New(cfg *config.Config, db *gorm.DB) (*gin.Engine, error) {
 
 		// 需认证接口分组
 		auth := v1.Group("", authMiddleware)
-		auth.GET("/user/profile", userHandler.Profile) // 临时验证接口，后续业务开发时移除或调整
+		userGroup := auth.Group("/user")
+		{
+			userGroup.POST("/update", userHandler.Update)
+		}
 
 		// 租户管理（带参数统一 POST）
 		tenantGroup := auth.Group("/tenant")
@@ -143,5 +159,18 @@ func New(cfg *config.Config, db *gorm.DB) (*gin.Engine, error) {
 		}
 	}
 
+	go warmUpUsers(userSvc)
 	return r, nil
+}
+
+func warmUpUsers(svc userapp.IService) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	count, err := svc.WarmUp(ctx)
+	if err != nil {
+		logger.Error(ctx, "warm up user cache failed", zap.Int("count", count), zap.Error(err))
+		return
+	}
+	logger.Info(ctx, "user cache warmed up", zap.Int("count", count))
 }

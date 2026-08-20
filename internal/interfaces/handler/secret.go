@@ -64,9 +64,15 @@ type UpdateSecretRequest struct {
 	Secrets   []UpdateSecretItemRequest `json:"secrets"`
 }
 
-// ListSecretRequest 查询1请求：按 folder 业务组查询其下全部 secrets
+// ListSecretRequest secrets 列表查询请求，支持两种模式：
+//   - 旧模式：传 folderGroupId，按 folder 业务组查询其下全部 secrets
+//   - 新模式：传 projectId + folderCode + envList，keyList 为空查全部 key，非空按 key 精确过滤
 type ListSecretRequest struct {
 	FolderGroupID uuid.UUID `json:"folderGroupId"`
+	ProjectID     uuid.UUID `json:"projectId"`
+	FolderCode    string    `json:"folderCode"`
+	EnvList       []string  `json:"envList"`
+	KeyList       []string  `json:"keyList"`
 }
 
 // DetailSecretRequest 查询2请求：按 secret 业务组查询
@@ -272,7 +278,7 @@ func (h *SecretHandler) History(c *gin.Context) {
 	response.Success(c, SecretHistoryResponse{Total: total, HistoryList: list})
 }
 
-// List 查询1：按 folder 业务组查询其下全部 secrets 的聚合视图列表
+// List 查询 secrets 列表。请求传 folderGroupId 时走旧模式，否则走 projectId + folderCode + envList + keyList 新模式。
 func (h *SecretHandler) List(c *gin.Context) {
 	var req ListSecretRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -280,7 +286,13 @@ func (h *SecretHandler) List(c *gin.Context) {
 		return
 	}
 
-	views, err := h.svc.ListByFolder(c, req.FolderGroupID)
+	views, err := h.svc.List(c, secretapp.ListInput{
+		FolderGroupID: req.FolderGroupID,
+		ProjectID:     req.ProjectID,
+		FolderCode:    req.FolderCode,
+		EnvList:       req.EnvList,
+		KeyList:       req.KeyList,
+	})
 	h.respondError(c, err)
 	if err != nil {
 		return

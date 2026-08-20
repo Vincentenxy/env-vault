@@ -21,6 +21,7 @@ type stubSecretService struct {
 	createFn     func(ctx context.Context, in secretapp.CreateInput, operator string) ([]*secretdomain.Secret, error)
 	updateFn     func(ctx context.Context, in secretapp.UpdateInput, operator string) error
 	listByFolder func(ctx context.Context, folderGroupID uuid.UUID) ([]secretapp.SecretView, error)
+	listFn       func(ctx context.Context, in secretapp.ListInput) ([]secretapp.SecretView, error)
 	getByGroup   func(ctx context.Context, groupID uuid.UUID) (*secretapp.SecretView, error)
 	historyFn    func(ctx context.Context, in secretapp.HistoryInput) ([]secretapp.HistoryView, int64, error)
 	deleteFn     func(ctx context.Context, groupID uuid.UUID, operator string) error
@@ -41,6 +42,15 @@ func (s *stubSecretService) Update(ctx context.Context, in secretapp.UpdateInput
 func (s *stubSecretService) ListByFolder(ctx context.Context, folderGroupID uuid.UUID) ([]secretapp.SecretView, error) {
 	if s.listByFolder != nil {
 		return s.listByFolder(ctx, folderGroupID)
+	}
+	return nil, nil
+}
+func (s *stubSecretService) List(ctx context.Context, in secretapp.ListInput) ([]secretapp.SecretView, error) {
+	if s.listFn != nil {
+		return s.listFn(ctx, in)
+	}
+	if s.listByFolder != nil {
+		return s.listByFolder(ctx, in.FolderGroupID)
 	}
 	return nil, nil
 }
@@ -329,6 +339,38 @@ func TestSecretHandler_List_Success(t *testing.T) {
 	}
 	if test["version"].(float64) != 4 || test["valueType"].(string) != "number" {
 		t.Fatalf("list detail fields missing from test value: %+v", test)
+	}
+}
+
+func TestSecretHandler_List_ProjectFolderMode(t *testing.T) {
+	projectID := uuid.New()
+	svc := &stubSecretService{
+		listFn: func(ctx context.Context, in secretapp.ListInput) ([]secretapp.SecretView, error) {
+			if in.ProjectID != projectID || in.FolderCode != "groups" {
+				t.Fatalf("unexpected project/folder input: %+v", in)
+			}
+			if len(in.EnvList) != 2 || in.EnvList[0] != "dev" || in.EnvList[1] != "test" {
+				t.Fatalf("unexpected env list: %+v", in.EnvList)
+			}
+			if len(in.KeyList) != 1 || in.KeyList[0] != "DB_PASSWORD" {
+				t.Fatalf("unexpected key list: %+v", in.KeyList)
+			}
+			return []secretapp.SecretView{{GroupID: uuid.New(), Key: "DB_PASSWORD", Values: map[string]secretapp.SecretValueView{}}}, nil
+		},
+	}
+	r := newSecretTestEngine(svc, testUser())
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/secret/list", map[string]any{
+		"projectId":  projectID,
+		"folderCode": "groups",
+		"envList":    []string{"dev", "test"},
+		"keyList":    []string{"DB_PASSWORD"},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	body := decodeBody(t, w)
+	if body["code"].(float64) != 0 {
+		t.Fatalf("expected code 0, got %v", body["code"])
 	}
 }
 

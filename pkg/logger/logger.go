@@ -22,11 +22,11 @@ type contextKey string
 // TraceIDKey 是 context 中存储 trace-id 的 key
 const TraceIDKey contextKey = "traceId"
 
-// base 为基础 logger（未加 caller skip 偏移），供两种包装方式复用
-var base *zap.Logger
+// 默认使用空 logger，保证初始化前的测试和独立组件调用也不会 panic。
+var base = zap.NewNop()
 
-// sugared 为带偏移的全局 logger，供 Debug/Info/Warn/Error 包级函数使用
-var sugared *zap.Logger
+// sugared 为带偏移的全局 logger，供 Debug/Info/Warn/Error 包级函数使用。
+var sugared = base.WithOptions(zap.AddCallerSkip(2))
 
 // Init 初始化全局日志
 // mode: debug / release / test（与 gin 模式一致，debug 下输出到控制台且带颜色）
@@ -71,10 +71,6 @@ func Init(mode string) {
 // L 返回全局 Logger（无 trace-id 场景使用，如启动阶段）
 // 返回的是未加偏移的实例，调用方位置准确
 func L() *zap.Logger {
-	if base == nil {
-		// 未初始化时兜底，防止 nil panic
-		base = zap.NewNop()
-	}
 	return base
 }
 

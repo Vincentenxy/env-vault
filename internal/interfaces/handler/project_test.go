@@ -117,12 +117,19 @@ func TestProjectHandler_Create_Success(t *testing.T) {
 			if in.Code != "p-001" || in.OrgID != orgID {
 				t.Fatalf("input not passed: %+v", in)
 			}
+			if len(in.Environments) != 2 || in.Environments[0].Code != "dev" || in.Environments[1].IsCheckPerm {
+				t.Fatalf("environments not passed: %+v", in.Environments)
+			}
 			return want, nil
 		},
 	}
 	r := newProjectTestEngine(svc, testUser())
 	w := doJSONP(t, r, http.MethodPost, "/api/v1/project/create", map[string]any{
 		"code": "p-001", "name": "电商平台", "orgId": orgID,
+		"environments": []map[string]any{
+			{"code": "dev", "name": "开发环境", "remark": "开发环境", "isCheckPerm": false},
+			{"code": "test", "name": "测试环境", "remark": "测试环境", "isCheckPerm": false},
+		},
 	})
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())

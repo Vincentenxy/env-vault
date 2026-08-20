@@ -8,8 +8,11 @@ import (
 
 	"github.com/google/uuid"
 
+	envdomain "env-vault/internal/domain/environment"
 	projdomain "env-vault/internal/domain/project"
 )
+
+type testTxKey struct{}
 
 // stubRepo 内存实现的 Repository，便于 application 层单测
 type stubRepo struct {
@@ -19,6 +22,7 @@ type stubRepo struct {
 	update       func(ctx context.Context, p *projdomain.Project) error
 	delete       func(ctx context.Context, id uuid.UUID, deleteBy string) error
 	list         func(ctx context.Context, filter projdomain.ListFilter) ([]*projdomain.Project, int64, error)
+	withTx       func(ctx context.Context, fn func(context.Context) error) error
 }
 
 func (s *stubRepo) Create(ctx context.Context, p *projdomain.Project) error {
@@ -56,6 +60,35 @@ func (s *stubRepo) List(ctx context.Context, filter projdomain.ListFilter) ([]*p
 		return s.list(ctx, filter)
 	}
 	return nil, 0, nil
+}
+
+func (s *stubRepo) WithTx(ctx context.Context, fn func(context.Context) error) error {
+	if s.withTx != nil {
+		return s.withTx(ctx, fn)
+	}
+	return fn(ctx)
+}
+
+type stubEnvironmentRepo struct {
+	createBatch func(ctx context.Context, environments []*envdomain.Environment) error
+}
+
+func (s *stubEnvironmentRepo) CreateBatch(ctx context.Context, environments []*envdomain.Environment) error {
+	if s.createBatch != nil {
+		return s.createBatch(ctx, environments)
+	}
+	return nil
+}
+func (s *stubEnvironmentRepo) Update(context.Context, *envdomain.Environment) error { return nil }
+func (s *stubEnvironmentRepo) Delete(context.Context, uuid.UUID, string) error      { return nil }
+func (s *stubEnvironmentRepo) GetByID(context.Context, uuid.UUID) (*envdomain.Environment, error) {
+	return nil, nil
+}
+func (s *stubEnvironmentRepo) GetByProjectCode(context.Context, uuid.UUID, string) (*envdomain.Environment, error) {
+	return nil, nil
+}
+func (s *stubEnvironmentRepo) List(context.Context, uuid.UUID) ([]*envdomain.Environment, error) {
+	return nil, nil
 }
 
 func newTestProject(orgID uuid.UUID, code string) *projdomain.Project {
@@ -115,6 +148,73 @@ func TestService_Create_CodeExists(t *testing.T) {
 	}, "u")
 	if !errors.Is(err, ErrCodeExists) {
 		t.Fatalf("expected ErrCodeExists, got %v", err)
+	}
+}
+
+func TestService_Create_WithEnvironments(t *testing.T) {
+	orgID := uuid.New()
+	var projectID uuid.UUID
+	transactionCalled := false
+	projectCreateCalled := false
+	environmentCreateCalled := false
+
+	repo := &stubRepo{
+		getByOrgCode: func(context.Context, uuid.UUID, string) (*projdomain.Project, error) {
+			return nil, nil
+		},
+		withTx: func(ctx context.Context, fn func(context.Context) error) error {
+			transactionCalled = true
+			return fn(context.WithValue(ctx, testTxKey{}, "transaction"))
+		},
+		create: func(ctx context.Context, p *projdomain.Project) error {
+			projectCreateCalled = true
+			projectID = p.ID
+			if ctx.Value(testTxKey{}) != "transaction" {
+				t.Fatal("project create did not receive transaction context")
+			}
+			return nil
+		},
+	}
+	envRepo := &stubEnvironmentRepo{
+		createBatch: func(ctx context.Context, environments []*envdomain.Environment) error {
+			environmentCreateCalled = true
+			if ctx.Value(testTxKey{}) != "transaction" {
+				t.Fatal("environment create did not receive transaction context")
+			}
+			if len(environments) != 2 {
+				t.Fatalf("expected 2 environments, got %d", len(environments))
+			}
+			for i, environment := range environments {
+				if environment.ProjectID != projectID {
+					t.Fatalf("environment project ID mismatch: %+v", environment)
+				}
+				if environment.OrderNo != (i+1)*10 {
+					t.Fatalf("expected orderNo %d, got %d", (i+1)*10, environment.OrderNo)
+				}
+				if environment.CreateBy != "operator-1" || environment.UpdateBy != "operator-1" {
+					t.Fatalf("operator not propagated: %+v", environment)
+				}
+			}
+			return nil
+		},
+	}
+
+	svc := NewService(repo, envRepo)
+	got, err := svc.Create(context.Background(), CreateInput{
+		Code: "p-001", Name: "电商平台", OrgID: orgID,
+		Environments: []CreateEnvironmentInput{
+			{Code: "dev", Name: "开发环境"},
+			{Code: "test", Name: "测试环境", IsCheckPerm: true},
+		},
+	}, "operator-1")
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if got.ID != projectID {
+		t.Fatalf("unexpected project ID: %s", got.ID)
+	}
+	if !transactionCalled || !projectCreateCalled || !environmentCreateCalled {
+		t.Fatalf("expected transaction, project create, and environment create to be called")
 	}
 }
 

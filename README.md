@@ -251,10 +251,10 @@ req.Header.Set("Cookie", user.Cookie)
 ```go
 // internal/interfaces/router/router.go
 auth := v1.Group("", authMiddleware)
-auth.GET("/user/profile", userHandler.Profile)   // 需认证
+auth.POST("/user/update", userHandler.Update)   // 需认证
 ```
 
-无认证接口注册到 `pub` 分组即可。当前 `GET /api/v1/user/profile` 为临时验证接口（返回当前用户信息），后续业务开发时可移除或调整。
+无认证接口注册到 `pub` 分组即可。
 
 ## 开发规范
 

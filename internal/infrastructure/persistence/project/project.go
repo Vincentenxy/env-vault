@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	projdomain "env-vault/internal/domain/project"
+	"env-vault/internal/infrastructure/persistence"
 )
 
 // projectPO project_info 表持久化对象（数据库列名下划线）
@@ -45,7 +46,14 @@ func NewRepository(db *gorm.DB) *Repository {
 
 // Create 创建项目
 func (r *Repository) Create(ctx context.Context, p *projdomain.Project) error {
-	return r.db.WithContext(ctx).Create(toPO(p)).Error
+	return persistence.TxDB(ctx, r.db).WithContext(ctx).Create(toPO(p)).Error
+}
+
+// WithTx 在事务中执行跨项目与环境的创建操作。
+func (r *Repository) WithTx(ctx context.Context, fn func(context.Context) error) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return fn(persistence.WithTx(ctx, tx))
+	})
 }
 
 // Update 更新项目（按 ID）

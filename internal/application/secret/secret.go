@@ -97,6 +97,16 @@ type HistoryInput struct {
 	PageSize int
 }
 
+// ListInput secrets 列表查询入参。
+// FolderGroupID 非空时保留原有按 folder 业务组查询模式；否则使用项目 + folderCode + envList + keyList 模式。
+type ListInput struct {
+	FolderGroupID uuid.UUID
+	ProjectID     uuid.UUID
+	FolderCode    string
+	EnvList       []string
+	KeyList       []string
+}
+
 // HistoryView 解密后的 value 历史版本
 type HistoryView struct {
 	ID        uuid.UUID
@@ -125,6 +135,7 @@ type SecretView struct {
 type IService interface {
 	Create(ctx context.Context, in CreateInput, operator string) ([]*secretdomain.Secret, error)
 	Update(ctx context.Context, in UpdateInput, operator string) error
+	List(ctx context.Context, in ListInput) ([]SecretView, error)
 	ListByFolder(ctx context.Context, folderGroupID uuid.UUID) ([]SecretView, error)
 	GetByGroup(ctx context.Context, groupID uuid.UUID) (*SecretView, error)
 	History(ctx context.Context, in HistoryInput) ([]HistoryView, int64, error)
@@ -411,6 +422,33 @@ func (s *Service) History(ctx context.Context, in HistoryInput) ([]HistoryView, 
 	return views, total, nil
 }
 
+// List 查询 secrets 列表，支持两种查询模式：
+//  1. 旧模式：FolderGroupID 非空，按 folder 业务组查询其下全部 secrets。
+//  2. 新模式：按 ProjectID + FolderCode + EnvList 查询，KeyList 为空返回全部 key，非空按 key 精确过滤。
+func (s *Service) List(ctx context.Context, in ListInput) ([]SecretView, error) {
+	if in.FolderGroupID != uuid.Nil {
+		return s.ListByFolder(ctx, in.FolderGroupID)
+	}
+
+	in.FolderCode = strings.TrimSpace(in.FolderCode)
+	in.EnvList = normalizeList(in.EnvList)
+	in.KeyList = normalizeList(in.KeyList)
+	if in.ProjectID == uuid.Nil || in.FolderCode == "" || len(in.EnvList) == 0 {
+		return nil, ErrInvalidParam
+	}
+
+	secrets, err := s.repo.ListByProjectFolder(ctx, secretdomain.ProjectFolderListFilter{
+		ProjectID:  in.ProjectID,
+		FolderCode: in.FolderCode,
+		EnvCodes:   in.EnvList,
+		Keys:       in.KeyList,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.buildViews(ctx, secrets)
+}
+
 // ListByFolder 查询1：按 folder 业务组查询其下全部 secrets（返回每个 secret 的聚合视图列表）
 func (s *Service) ListByFolder(ctx context.Context, folderGroupID uuid.UUID) ([]SecretView, error) {
 	if folderGroupID == uuid.Nil {
@@ -435,6 +473,26 @@ func (s *Service) ListByFolder(ctx context.Context, folderGroupID uuid.UUID) ([]
 		return nil, err
 	}
 	return s.buildViews(ctx, secrets)
+}
+
+func normalizeList(items []string) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(items))
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		result = append(result, item)
+	}
+	return result
 }
 
 // GetByGroup 查询2：按 secret 业务组查询所有环境下的值信息（聚合视图）

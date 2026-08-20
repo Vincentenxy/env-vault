@@ -90,6 +90,68 @@ CREATE INDEX IF NOT EXISTS idx_organization_info_tenant_code ON organization_inf
 
 ---
 
+## 表名：`user_info`
+
+**说明**：用户信息表。`id` 为系统内部生成的 UUID，`user_id` 为外部系统传入的用户标识，对应当前 JWT 中的 `staffuserid`。用户归属租户和组织，关联关系由代码层维护，不使用外键。密码字段仅允许保存不可逆哈希，当前不设置密码时保存空字符串。
+
+```sql
+CREATE TABLE IF NOT EXISTS user_info (
+    id            uuid        PRIMARY KEY,               -- 系统内部生成
+    user_id       text        NOT NULL,                  -- 外部用户 ID，对应 JWT staffuserid
+    nickname      text        NOT NULL DEFAULT '',       -- 用户姓名/昵称
+    username      text        NOT NULL DEFAULT '',       -- 登录名
+    password_hash text        NOT NULL DEFAULT '',       -- 密码哈希，当前不设置
+    email         text        NOT NULL DEFAULT '',       -- 邮箱，当前不设置
+    phone         text        NOT NULL DEFAULT '',       -- 手机号，当前不设置
+    tenant_id     uuid        NOT NULL,                  -- 所属租户 ID（代码层面关联，无外键）
+    org_id        uuid        NOT NULL,                  -- 所属组织 ID（代码层面关联，无外键）
+    is_deleted    boolean     NOT NULL DEFAULT false,
+    delete_at     timestamptz,
+    delete_by     text        NOT NULL DEFAULT '',
+    create_by     text        NOT NULL DEFAULT '',
+    update_by     text        NOT NULL DEFAULT '',
+    create_at     timestamptz NOT NULL DEFAULT now(),
+    update_at     timestamptz NOT NULL DEFAULT now()
+);
+
+-- 根据外部用户 ID 定位用户（唯一性在代码层面保证）
+CREATE INDEX IF NOT EXISTS idx_user_info_user_id ON user_info (user_id);
+-- 按租户查询用户
+CREATE INDEX IF NOT EXISTS idx_user_info_tenant ON user_info (tenant_id);
+-- 按组织查询用户
+CREATE INDEX IF NOT EXISTS idx_user_info_org ON user_info (org_id);
+-- 租户内按登录名定位用户（唯一性在代码层面保证）
+CREATE INDEX IF NOT EXISTS idx_user_info_tenant_username ON user_info (tenant_id, username);
+```
+
+**索引说明**：
+
+| 索引名 | 字段 | 说明 |
+|--------|------|------|
+| `idx_user_info_user_id` | `user_id` | 根据外部用户 ID 定位用户 |
+| `idx_user_info_tenant` | `tenant_id` | 查询租户下全部用户 |
+| `idx_user_info_org` | `org_id` | 查询组织下全部用户 |
+| `idx_user_info_tenant_username` | `tenant_id, username` | 租户内按登录名定位用户 |
+
+**业务规则**（代码层校验）：
+
+- `user_id` 在未删除用户中全局唯一。
+- `username` 在同一租户的未删除用户中唯一。
+- 用户更新接口只更新已存在的用户，不承担创建职责；用户创建由后续登录相关接口实现。
+- `password_hash` 仅允许保存不可逆密码哈希，禁止保存明文密码。
+
+**缓存规则**：
+
+- PostgreSQL 是用户信息的权威数据源。
+- 系统启动后异步查询全部未删除用户，将用户资料刷新到 Redis，并将 `user_id -> nickname` 刷新到进程内存。
+- 查询用户姓名时依次查询进程内存、Redis、PostgreSQL；Redis 或 PostgreSQL 命中后回填前级缓存，PostgreSQL 仍未查询到时返回用户不存在错误。
+- 用户资料更新成功后，同步刷新当前实例的内存姓名缓存和 Redis 用户资料缓存；缓存刷新失败不回滚已提交的数据库更新。
+- Redis 用户资料不保存 `password_hash`，避免扩大密码凭证的存储范围。
+
+**待办**：Kubernetes 多实例部署时，引入 Redis Pub/Sub 或等价的缓存变更通知机制，使一个实例更新用户姓名后，其余实例同步刷新进程内存。本期暂不实现跨实例内存同步。
+
+---
+
 ## 表名：`project_info`
 
 **说明**：项目表。项目归属组织之下（一个组织承接多个具体项目），`org_id` 关联组织（代码层面维护，无外键）。组织内编码唯一。

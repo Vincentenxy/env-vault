@@ -33,6 +33,7 @@ type stubSecretRepo struct {
 	getByFolderKey      func(ctx context.Context, folderIDs []uuid.UUID, key string) (*secretdomain.Secret, error)
 	listByFolders       func(ctx context.Context, folderIDs []uuid.UUID) ([]*secretdomain.Secret, error)
 	listByGroup         func(ctx context.Context, groupID uuid.UUID) ([]*secretdomain.Secret, error)
+	listByProjectFolder func(ctx context.Context, filter secretdomain.ProjectFolderListFilter) ([]*secretdomain.Secret, error)
 	updateValueByIDs    func(ctx context.Context, items []secretdomain.ValueUpdateItem, updateBy string, updateAt time.Time) error
 	updateRemarkByGroup func(ctx context.Context, groupID uuid.UUID, remark, updateBy string, updateAt time.Time) (int64, error)
 	createHistoryBatch  func(ctx context.Context, histories []*secretdomain.History) error
@@ -74,6 +75,12 @@ func (s *stubSecretRepo) ListByFolderIDs(ctx context.Context, folderIDs []uuid.U
 func (s *stubSecretRepo) ListByGroupID(ctx context.Context, groupID uuid.UUID) ([]*secretdomain.Secret, error) {
 	if s.listByGroup != nil {
 		return s.listByGroup(ctx, groupID)
+	}
+	return nil, nil
+}
+func (s *stubSecretRepo) ListByProjectFolder(ctx context.Context, filter secretdomain.ProjectFolderListFilter) ([]*secretdomain.Secret, error) {
+	if s.listByProjectFolder != nil {
+		return s.listByProjectFolder(ctx, filter)
 	}
 	return nil, nil
 }
@@ -672,6 +679,74 @@ func TestService_ListByFolder_FolderNotFound(t *testing.T) {
 	_, err := svc.ListByFolder(context.Background(), uuid.New())
 	if !errors.Is(err, ErrFolderNotFound) {
 		t.Fatalf("expected ErrFolderNotFound, got %v", err)
+	}
+}
+
+func TestService_List_ProjectFolderMode(t *testing.T) {
+	projectID := uuid.New()
+	c := testCipher(t)
+	devCiphertext, _ := c.Encrypt("dev-value")
+	testCiphertext, _ := c.Encrypt("test-value")
+	groupID := uuid.New()
+
+	repo := &stubSecretRepo{
+		listByProjectFolder: func(ctx context.Context, filter secretdomain.ProjectFolderListFilter) ([]*secretdomain.Secret, error) {
+			if filter.ProjectID != projectID || filter.FolderCode != "groups" {
+				t.Fatalf("unexpected project/folder filter: %+v", filter)
+			}
+			if len(filter.EnvCodes) != 2 || filter.EnvCodes[0] != "dev" || filter.EnvCodes[1] != "test" {
+				t.Fatalf("unexpected env filter: %+v", filter.EnvCodes)
+			}
+			if len(filter.Keys) != 1 || filter.Keys[0] != "DB_PASSWORD" {
+				t.Fatalf("unexpected key filter: %+v", filter.Keys)
+			}
+			return []*secretdomain.Secret{
+				{ID: uuid.New(), GroupID: groupID, FolderID: uuid.New(), EnvCode: "dev", Key: "DB_PASSWORD", ValueCiphertext: devCiphertext},
+				{ID: uuid.New(), GroupID: groupID, FolderID: uuid.New(), EnvCode: "test", Key: "DB_PASSWORD", ValueCiphertext: testCiphertext},
+			}, nil
+		},
+	}
+	svc := NewService(repo, &stubFolderRepo{}, &stubEnvRepo{}, c)
+
+	views, err := svc.List(context.Background(), ListInput{
+		ProjectID: projectID, FolderCode: " groups ", EnvList: []string{" dev ", "test", "dev"}, KeyList: []string{" DB_PASSWORD ", "DB_PASSWORD"},
+	})
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if len(views) != 1 || views[0].Key != "DB_PASSWORD" || len(views[0].Values) != 2 {
+		t.Fatalf("unexpected project folder views: %+v", views)
+	}
+}
+
+func TestService_List_ProjectFolderMode_AllKeysWhenKeyListEmpty(t *testing.T) {
+	projectID := uuid.New()
+	c := testCipher(t)
+	valueCiphertext, _ := c.Encrypt("value")
+	called := false
+	repo := &stubSecretRepo{
+		listByProjectFolder: func(ctx context.Context, filter secretdomain.ProjectFolderListFilter) ([]*secretdomain.Secret, error) {
+			called = true
+			if len(filter.Keys) != 0 {
+				t.Fatalf("expected empty key filter, got %+v", filter.Keys)
+			}
+			return []*secretdomain.Secret{{
+				ID: uuid.New(), GroupID: uuid.New(), FolderID: uuid.New(), EnvCode: "prod", Key: "ANY_KEY", ValueCiphertext: valueCiphertext,
+			}}, nil
+		},
+	}
+	svc := NewService(repo, &stubFolderRepo{}, &stubEnvRepo{}, c)
+	_, err := svc.List(context.Background(), ListInput{ProjectID: projectID, FolderCode: "global", EnvList: []string{"prod"}})
+	if err != nil || !called {
+		t.Fatalf("unexpected result err=%v called=%v", err, called)
+	}
+}
+
+func TestService_List_ProjectFolderMode_InvalidParams(t *testing.T) {
+	svc := NewService(&stubSecretRepo{}, &stubFolderRepo{}, &stubEnvRepo{}, testCipher(t))
+	_, err := svc.List(context.Background(), ListInput{ProjectID: uuid.New(), FolderCode: "global"})
+	if !errors.Is(err, ErrInvalidParam) {
+		t.Fatalf("expected ErrInvalidParam, got %v", err)
 	}
 }
 
