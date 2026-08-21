@@ -205,6 +205,9 @@ func TestService_CreateTop_Success_AllEnvs(t *testing.T) {
 	if got[0].CreateBy != "operator-1" || got[0].UpdateBy != "operator-1" {
 		t.Fatalf("operator not propagated: %+v", got[0])
 	}
+	if got[0].Manager != "operator-1" {
+		t.Fatalf("manager should default to operator, got %q", got[0].Manager)
+	}
 	_ = envIDs
 }
 

@@ -33,6 +33,7 @@ type FolderDTO struct {
 	ParentFolderID *uuid.UUID `json:"parentFolderId"`
 	Remark         string     `json:"remark"`
 	Type           string     `json:"type"`
+	Manager        string     `json:"manager"`
 	CreateBy       string     `json:"createBy"`
 	UpdateBy       string     `json:"updateBy"`
 	CreateAt       time.Time  `json:"createAt"`
@@ -49,6 +50,7 @@ type CreateFolderRequest struct {
 	Name           string     `json:"name"`
 	Remark         string     `json:"remark"`
 	Type           string     `json:"type"` // common/customer
+	Manager        string     `json:"manager,omitempty"`
 }
 
 // UpdateFolderRequest 更新文件夹请求（仅 name/remark，按 group_id 全环境同步）
@@ -119,6 +121,7 @@ func (h *FolderHandler) Create(c *gin.Context) {
 			Name:      req.Name,
 			Remark:    req.Remark,
 			Type:      req.Type,
+			Manager:   req.Manager,
 		}, operator)
 	} else {
 		// 创建接口2：在 groups 目录下创建二级目录
@@ -128,6 +131,7 @@ func (h *FolderHandler) Create(c *gin.Context) {
 			Name:           req.Name,
 			Remark:         req.Remark,
 			Type:           req.Type,
+			Manager:        req.Manager,
 		}, operator)
 	}
 	h.respondError(c, err)
@@ -303,6 +307,7 @@ func toFolderDTO(f *folderdomain.Folder) *FolderDTO {
 		ParentFolderID: f.ParentFolderID,
 		Remark:         f.Remark,
 		Type:           f.Type,
+		Manager:        f.Manager,
 		CreateBy:       f.CreateBy,
 		UpdateBy:       f.UpdateBy,
 		CreateAt:       f.CreateAt,

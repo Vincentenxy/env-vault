@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	orgdomain "env-vault/internal/domain/organization"
 )
 
 // Tenant 租户领域模型。租户是系统内最顶级实体（类比公司）。
@@ -14,6 +16,7 @@ type Tenant struct {
 	Code      string
 	Name      string
 	Remark    string
+	Manager   string
 	IsDeleted bool
 	DeleteAt  *time.Time
 	DeleteBy  string
@@ -31,6 +34,19 @@ type ListFilter struct {
 	PageSize int    // 每页条数
 }
 
+// AccessibleFilter 当前用户可访问租户查询条件，UserID 预留给后续权限过滤。
+type AccessibleFilter struct {
+	UserID string
+}
+
+// TenantWithOrgProjects 租户及其组织、项目树。
+type TenantWithOrgProjects struct {
+	ID      uuid.UUID
+	Name    string
+	Manager string
+	OrgList []*orgdomain.OrganizationWithProjects
+}
+
 // Repository 租户仓储接口（领域层定义，基础设施层实现）
 type Repository interface {
 	// Create 创建租户
@@ -45,4 +61,6 @@ type Repository interface {
 	GetByCode(ctx context.Context, code string) (*Tenant, error)
 	// List 分页查询租户列表（不含已删除），返回列表与总数
 	List(ctx context.Context, filter ListFilter) ([]*Tenant, int64, error)
+	// ListAccessible 查询当前用户可访问的租户；当前返回全部，后续扩展权限 SQL
+	ListAccessible(ctx context.Context, filter AccessibleFilter) ([]*Tenant, error)
 }

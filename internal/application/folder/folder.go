@@ -7,6 +7,7 @@ package folder
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,6 +35,7 @@ type CreateTopInput struct {
 	Name      string
 	Remark    string
 	Type      string
+	Manager   string
 }
 
 // CreateSubInput 创建二级文件夹入参（在 groups 目录下创建，全环境展开）
@@ -43,6 +45,7 @@ type CreateSubInput struct {
 	Name           string
 	Remark         string
 	Type           string
+	Manager        string
 }
 
 // UpdateInput 批量更新文件夹入参（仅 name/remark，按 group_id 全环境同步）
@@ -118,6 +121,10 @@ func (s *Service) CreateTop(ctx context.Context, in CreateTopInput, operator str
 	// 业务组 ID：一次性生成，全环境共享（标识"业务上是同一个 folder"）
 	groupID := uuid.New()
 	now := time.Now()
+	manager := strings.TrimSpace(in.Manager)
+	if manager == "" {
+		manager = operator
+	}
 	folders := make([]*folderdomain.Folder, 0, len(envs))
 	for _, e := range envs {
 		folders = append(folders, &folderdomain.Folder{
@@ -128,6 +135,7 @@ func (s *Service) CreateTop(ctx context.Context, in CreateTopInput, operator str
 			EnvID:    e.ID,
 			Remark:   in.Remark,
 			Type:     in.Type,
+			Manager:  manager,
 			CreateBy: operator,
 			UpdateBy: operator,
 			CreateAt: now,
@@ -192,6 +200,10 @@ func (s *Service) CreateSub(ctx context.Context, in CreateSubInput, operator str
 	// 子 folder 的业务组 ID：一次性生成，全环境共享
 	groupID := uuid.New()
 	now := time.Now()
+	manager := strings.TrimSpace(in.Manager)
+	if manager == "" {
+		manager = operator
+	}
 	folders := make([]*folderdomain.Folder, 0, len(envs))
 	for i, e := range envs {
 		parentID := groupsIDs[i]
@@ -204,6 +216,7 @@ func (s *Service) CreateSub(ctx context.Context, in CreateSubInput, operator str
 			ParentFolderID: &parentID,
 			Remark:         in.Remark,
 			Type:           in.Type,
+			Manager:        manager,
 			CreateBy:       operator,
 			UpdateBy:       operator,
 			CreateAt:       now,

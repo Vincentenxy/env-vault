@@ -3,6 +3,7 @@ package organization
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"time"
 
@@ -19,6 +20,7 @@ type orgPO struct {
 	Name      string     `gorm:"column:name"`
 	Remark    string     `gorm:"column:remark"`
 	TenantID  uuid.UUID  `gorm:"column:tenant_id"`
+	Manager   string     `gorm:"column:manager"`
 	IsDeleted bool       `gorm:"column:is_deleted"`
 	DeleteAt  *time.Time `gorm:"column:delete_at"`
 	DeleteBy  string     `gorm:"column:delete_by"`
@@ -26,6 +28,16 @@ type orgPO struct {
 	UpdateBy  string     `gorm:"column:update_by"`
 	CreateAt  time.Time  `gorm:"column:create_at"`
 	UpdateAt  time.Time  `gorm:"column:update_at"`
+}
+
+type orgProjectRow struct {
+	OrgID          uuid.UUID      `gorm:"column:org_id"`
+	OrgName        string         `gorm:"column:org_name"`
+	OrgManager     string         `gorm:"column:org_manager"`
+	TenantID       uuid.UUID      `gorm:"column:tenant_id"`
+	ProjectID      uuid.NullUUID  `gorm:"column:project_id"`
+	ProjectName    sql.NullString `gorm:"column:project_name"`
+	ProjectManager sql.NullString `gorm:"column:project_manager"`
 }
 
 // TableName 指定表名
@@ -143,6 +155,59 @@ func (r *Repository) List(ctx context.Context, filter orgdomain.ListFilter) ([]*
 	return orgs, total, nil
 }
 
+// ListWithProjects 查询全部未删除组织及其全部未删除项目。
+func (r *Repository) ListWithProjects(ctx context.Context, filter orgdomain.WithProjectsFilter) ([]*orgdomain.OrganizationWithProjects, error) {
+	query := r.db.WithContext(ctx).
+		Table("organization_info AS o").
+		Select("o.id AS org_id, o.name AS org_name, o.manager AS org_manager, o.tenant_id, p.id AS project_id, p.name AS project_name, p.manager AS project_manager").
+		Joins("LEFT JOIN project_info AS p ON p.org_id = o.id AND p.is_deleted = false").
+		Where("o.is_deleted = false")
+	if len(filter.TenantIDs) > 0 {
+		query = query.Where("o.tenant_id IN ?", filter.TenantIDs)
+	}
+	query = applyWithProjectsPermissionFilter(query, filter)
+
+	var rows []orgProjectRow
+	if err := query.
+		Order("o.create_at DESC").
+		Order("p.create_at DESC").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	result := make([]*orgdomain.OrganizationWithProjects, 0)
+	orgIndexes := make(map[uuid.UUID]int)
+	for _, row := range rows {
+		index, exists := orgIndexes[row.OrgID]
+		if !exists {
+			index = len(result)
+			orgIndexes[row.OrgID] = index
+			result = append(result, &orgdomain.OrganizationWithProjects{
+				ID:          row.OrgID,
+				Name:        row.OrgName,
+				TenantID:    row.TenantID,
+				Manager:     row.OrgManager,
+				ProjectList: make([]orgdomain.ProjectSummary, 0),
+			})
+		}
+		if row.ProjectID.Valid {
+			result[index].ProjectList = append(result[index].ProjectList, orgdomain.ProjectSummary{
+				ID:      row.ProjectID.UUID,
+				Name:    row.ProjectName.String,
+				Manager: row.ProjectManager.String,
+			})
+		}
+	}
+	return result, nil
+}
+
+func applyWithProjectsPermissionFilter(query *gorm.DB, filter orgdomain.WithProjectsFilter) *gorm.DB {
+	// TODO(permission): 权限表确定后，在这里按 filter.UserID 追加 JOIN/WHERE 条件。
+	// 当前阶段明确返回所有组织及项目，不启用用户权限过滤。
+	_ = filter.UserID
+	return query
+}
+
 // toPO 领域模型转持久化对象
 func toPO(o *orgdomain.Organization) *orgPO {
 	return &orgPO{
@@ -151,6 +216,7 @@ func toPO(o *orgdomain.Organization) *orgPO {
 		Name:      o.Name,
 		Remark:    o.Remark,
 		TenantID:  o.TenantID,
+		Manager:   o.Manager,
 		IsDeleted: o.IsDeleted,
 		DeleteAt:  o.DeleteAt,
 		DeleteBy:  o.DeleteBy,
@@ -169,6 +235,7 @@ func toDomain(po *orgPO) *orgdomain.Organization {
 		Name:      po.Name,
 		Remark:    po.Remark,
 		TenantID:  po.TenantID,
+		Manager:   po.Manager,
 		IsDeleted: po.IsDeleted,
 		DeleteAt:  po.DeleteAt,
 		DeleteBy:  po.DeleteBy,

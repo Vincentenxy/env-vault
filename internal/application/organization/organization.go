@@ -4,6 +4,7 @@ package organization
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,6 +25,7 @@ type CreateInput struct {
 	Name     string
 	Remark   string
 	TenantID uuid.UUID
+	Manager  string
 }
 
 // UpdateInput 更新组织入参
@@ -42,6 +44,11 @@ type ListInput struct {
 	PageSize int
 }
 
+// WithProjectsInput 组织项目树查询入参。
+type WithProjectsInput struct {
+	UserID string
+}
+
 // IService 组织应用服务接口（handler 仅依赖接口，便于单测替换实现）
 type IService interface {
 	Create(ctx context.Context, in CreateInput, operator string) (*orgdomain.Organization, error)
@@ -49,6 +56,7 @@ type IService interface {
 	Delete(ctx context.Context, id uuid.UUID, operator string) error
 	GetByID(ctx context.Context, id uuid.UUID) (*orgdomain.Organization, error)
 	List(ctx context.Context, in ListInput) ([]*orgdomain.Organization, int64, error)
+	ListWithProjects(ctx context.Context, in WithProjectsInput) ([]*orgdomain.OrganizationWithProjects, error)
 }
 
 // Service 组织应用服务实现
@@ -76,12 +84,17 @@ func (s *Service) Create(ctx context.Context, in CreateInput, operator string) (
 	}
 
 	now := time.Now()
+	manager := strings.TrimSpace(in.Manager)
+	if manager == "" {
+		manager = operator
+	}
 	o := &orgdomain.Organization{
 		ID:       uuid.New(),
 		Code:     in.Code,
 		Name:     in.Name,
 		Remark:   in.Remark,
 		TenantID: in.TenantID,
+		Manager:  manager,
 		CreateBy: operator,
 		UpdateBy: operator,
 		CreateAt: now,
@@ -158,4 +171,10 @@ func (s *Service) List(ctx context.Context, in ListInput) ([]*orgdomain.Organiza
 		PageNum:  in.PageNum,
 		PageSize: in.PageSize,
 	})
+}
+
+// ListWithProjects 查询全部组织及其项目。
+// 当前不执行权限过滤，但透传 UserID，后续可直接在仓储 SQL 层增加权限关联条件。
+func (s *Service) ListWithProjects(ctx context.Context, in WithProjectsInput) ([]*orgdomain.OrganizationWithProjects, error) {
+	return s.repo.ListWithProjects(ctx, orgdomain.WithProjectsFilter{UserID: in.UserID})
 }

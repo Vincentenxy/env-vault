@@ -43,9 +43,8 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 
 	// 依赖组装（DDD 各层）
 	tenantRepo := tenantrepo.NewRepository(db)
-	tenantSvc := tenantapp.NewService(tenantRepo)
-
 	orgRepo := orgrepo.NewRepository(db)
+	tenantSvc := tenantapp.NewService(tenantRepo, orgRepo)
 	orgSvc := orgapp.NewService(orgRepo)
 
 	projRepo := projrepo.NewRepository(db)
@@ -105,6 +104,7 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 			tenantGroup.POST("/delete", tenantHandler.Delete)
 			tenantGroup.POST("/info", tenantHandler.Detail)
 			tenantGroup.POST("/list", tenantHandler.List)
+			tenantGroup.GET("/withOrgProject", tenantHandler.WithOrgProject)
 		}
 
 		// 组织管理（带参数统一 POST）
@@ -115,6 +115,7 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 			orgGroup.POST("/delete", orgHandler.Delete)
 			orgGroup.POST("/info", orgHandler.Detail)
 			orgGroup.POST("/list", orgHandler.List)
+			orgGroup.GET("/withProject", orgHandler.WithProject)
 		}
 
 		// 项目管理（带参数统一 POST）
@@ -128,7 +129,7 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 		}
 
 		// 环境管理（带参数统一 POST）
-		environmentGroup := auth.Group("/environment")
+		environmentGroup := auth.Group("/env")
 		{
 			environmentGroup.POST("/create", environmentHandler.Create)
 			environmentGroup.POST("/update", environmentHandler.Update)

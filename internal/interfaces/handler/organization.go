@@ -30,6 +30,7 @@ type OrganizationDTO struct {
 	Name     string    `json:"name"`
 	Remark   string    `json:"remark"`
 	TenantID uuid.UUID `json:"tenantId"`
+	Manager  string    `json:"manager"`
 	CreateBy string    `json:"createBy"`
 	UpdateBy string    `json:"updateBy"`
 	CreateAt time.Time `json:"createAt"`
@@ -42,6 +43,7 @@ type CreateOrgRequest struct {
 	Name     string    `json:"name"`
 	Remark   string    `json:"remark"`
 	TenantID uuid.UUID `json:"tenantId"`
+	Manager  string    `json:"manager,omitempty"`
 }
 
 // UpdateRequest 更新组织请求
@@ -69,6 +71,26 @@ type ListOrgRequest struct {
 	page.Request
 }
 
+// WithProjectResponse 组织项目树响应。
+type WithProjectResponse struct {
+	OrgList []OrganizationWithProjectsDTO `json:"orgList"`
+}
+
+// OrganizationWithProjectsDTO 组织及其项目摘要。
+type OrganizationWithProjectsDTO struct {
+	ID          uuid.UUID           `json:"id"`
+	Name        string              `json:"name"`
+	Manager     string              `json:"manager"`
+	ProjectList []ProjectSummaryDTO `json:"projectList"`
+}
+
+// ProjectSummaryDTO 项目摘要。
+type ProjectSummaryDTO struct {
+	ID      uuid.UUID `json:"id"`
+	Name    string    `json:"name"`
+	Manager string    `json:"manager"`
+}
+
 // Create 创建组织
 func (h *OrganizationHandler) Create(c *gin.Context) {
 	var req CreateOrgRequest
@@ -87,6 +109,7 @@ func (h *OrganizationHandler) Create(c *gin.Context) {
 		Name:     req.Name,
 		Remark:   req.Remark,
 		TenantID: req.TenantID,
+		Manager:  req.Manager,
 	}, operator(c))
 	h.respondError(c, err)
 	if err != nil {
@@ -193,6 +216,30 @@ func (h *OrganizationHandler) List(c *gin.Context) {
 	})
 }
 
+// WithProject 返回全部组织及组织下的项目。
+func (h *OrganizationHandler) WithProject(c *gin.Context) {
+	orgs, err := h.svc.ListWithProjects(c, orgapp.WithProjectsInput{UserID: operator(c)})
+	h.respondError(c, err)
+	if err != nil {
+		return
+	}
+
+	orgList := make([]OrganizationWithProjectsDTO, 0, len(orgs))
+	for _, org := range orgs {
+		projects := make([]ProjectSummaryDTO, 0, len(org.ProjectList))
+		for _, project := range org.ProjectList {
+			projects = append(projects, ProjectSummaryDTO{ID: project.ID, Name: project.Name, Manager: project.Manager})
+		}
+		orgList = append(orgList, OrganizationWithProjectsDTO{
+			ID:          org.ID,
+			Name:        org.Name,
+			Manager:     org.Manager,
+			ProjectList: projects,
+		})
+	}
+	response.Success(c, WithProjectResponse{OrgList: orgList})
+}
+
 // respondError 应用层错误统一映射为业务错误码
 func (h *OrganizationHandler) respondError(c *gin.Context, err error) {
 	if err == nil {
@@ -217,6 +264,7 @@ func toOrgDTO(o *orgdomain.Organization) *OrganizationDTO {
 		Name:     o.Name,
 		Remark:   o.Remark,
 		TenantID: o.TenantID,
+		Manager:  o.Manager,
 		CreateBy: o.CreateBy,
 		UpdateBy: o.UpdateBy,
 		CreateAt: o.CreateAt,

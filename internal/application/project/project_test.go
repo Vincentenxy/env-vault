@@ -133,6 +133,9 @@ func TestService_Create_Success(t *testing.T) {
 	if got.CreateBy != "operator-1" || got.UpdateBy != "operator-1" {
 		t.Fatalf("operator not propagated: %+v", got)
 	}
+	if got.Manager != "operator-1" {
+		t.Fatalf("manager should default to operator, got %q", got.Manager)
+	}
 }
 
 func TestService_Create_CodeExists(t *testing.T) {

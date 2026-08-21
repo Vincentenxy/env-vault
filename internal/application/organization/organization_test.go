@@ -13,12 +13,13 @@ import (
 
 // stubRepo 内存实现的 Repository，便于 application 层单测
 type stubRepo struct {
-	getByTenantCode func(ctx context.Context, tenantID uuid.UUID, code string) (*orgdomain.Organization, error)
-	getByID         func(ctx context.Context, id uuid.UUID) (*orgdomain.Organization, error)
-	create          func(ctx context.Context, org *orgdomain.Organization) error
-	update          func(ctx context.Context, org *orgdomain.Organization) error
-	delete          func(ctx context.Context, id uuid.UUID, deleteBy string) error
-	list            func(ctx context.Context, filter orgdomain.ListFilter) ([]*orgdomain.Organization, int64, error)
+	getByTenantCode  func(ctx context.Context, tenantID uuid.UUID, code string) (*orgdomain.Organization, error)
+	getByID          func(ctx context.Context, id uuid.UUID) (*orgdomain.Organization, error)
+	create           func(ctx context.Context, org *orgdomain.Organization) error
+	update           func(ctx context.Context, org *orgdomain.Organization) error
+	delete           func(ctx context.Context, id uuid.UUID, deleteBy string) error
+	list             func(ctx context.Context, filter orgdomain.ListFilter) ([]*orgdomain.Organization, int64, error)
+	listWithProjects func(ctx context.Context, filter orgdomain.WithProjectsFilter) ([]*orgdomain.OrganizationWithProjects, error)
 }
 
 func (s *stubRepo) Create(ctx context.Context, o *orgdomain.Organization) error {
@@ -56,6 +57,12 @@ func (s *stubRepo) List(ctx context.Context, filter orgdomain.ListFilter) ([]*or
 		return s.list(ctx, filter)
 	}
 	return nil, 0, nil
+}
+func (s *stubRepo) ListWithProjects(ctx context.Context, filter orgdomain.WithProjectsFilter) ([]*orgdomain.OrganizationWithProjects, error) {
+	if s.listWithProjects != nil {
+		return s.listWithProjects(ctx, filter)
+	}
+	return nil, nil
 }
 
 func newTestOrg(tenantID uuid.UUID, code string) *orgdomain.Organization {
@@ -99,6 +106,9 @@ func TestService_Create_Success(t *testing.T) {
 	}
 	if got.CreateBy != "operator-1" || got.UpdateBy != "operator-1" {
 		t.Fatalf("operator not propagated: %+v", got)
+	}
+	if got.Manager != "operator-1" {
+		t.Fatalf("manager should default to operator, got %q", got.Manager)
 	}
 }
 
@@ -261,5 +271,29 @@ func TestService_List_PassesFilters(t *testing.T) {
 	}
 	if captured.PageNum != 2 || captured.PageSize != 50 {
 		t.Fatalf("pagination lost: %+v", captured)
+	}
+}
+
+func TestService_ListWithProjects_PassesPermissionSubject(t *testing.T) {
+	var captured orgdomain.WithProjectsFilter
+	want := []*orgdomain.OrganizationWithProjects{{
+		ID: uuid.New(), Name: "研发组", ProjectList: []orgdomain.ProjectSummary{{ID: uuid.New(), Name: "效能平台"}},
+	}}
+	repo := &stubRepo{
+		listWithProjects: func(ctx context.Context, filter orgdomain.WithProjectsFilter) ([]*orgdomain.OrganizationWithProjects, error) {
+			captured = filter
+			return want, nil
+		},
+	}
+
+	got, err := NewService(repo).ListWithProjects(context.Background(), WithProjectsInput{UserID: "u-1"})
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if captured.UserID != "u-1" {
+		t.Fatalf("expected user ID u-1, got %q", captured.UserID)
+	}
+	if len(got) != 1 || len(got[0].ProjectList) != 1 {
+		t.Fatalf("unexpected result: %+v", got)
 	}
 }

@@ -22,6 +22,29 @@
 >
 > **硬性规则**：不使用外键；除 NOT NULL / 默认值 / 必要索引外不加数据库侧约束，业务校验在代码层面显式实现。
 
+## 已有表字段变更：`manager`
+
+`manager` 保存资源管理员的外部用户 ID，与当前 JWT 的 `staffuserid` 使用同一标识。历史数据可使用原记录的 `create_by` 回填；后续新建资源由应用层处理：请求未传 `manager` 时使用当前登录人的用户 ID。
+
+```sql
+ALTER TABLE tenant_info
+    ADD COLUMN IF NOT EXISTS manager text NOT NULL DEFAULT '';
+
+ALTER TABLE organization_info
+    ADD COLUMN IF NOT EXISTS manager text NOT NULL DEFAULT '';
+
+ALTER TABLE project_info
+    ADD COLUMN IF NOT EXISTS manager text NOT NULL DEFAULT '';
+
+ALTER TABLE folder_info
+    ADD COLUMN IF NOT EXISTS manager text NOT NULL DEFAULT '';
+
+-- 可选：为已有数据回填管理员，不覆盖已经存在的 manager。
+UPDATE tenant_info SET manager = create_by WHERE manager = '' AND create_by <> '';
+UPDATE organization_info SET manager = create_by WHERE manager = '' AND create_by <> '';
+UPDATE project_info SET manager = create_by WHERE manager = '' AND create_by <> '';
+UPDATE folder_info SET manager = create_by WHERE manager = '' AND create_by <> '';
+
 ---
 
 ## 表名：`tenant_info`
@@ -34,6 +57,7 @@ CREATE TABLE IF NOT EXISTS tenant_info (
     code        text        NOT NULL,                 -- 租户编码
     name        text        NOT NULL,                 -- 租户名称
     remark      text        NOT NULL DEFAULT '',      -- 备注
+    manager     text        NOT NULL DEFAULT '',      -- 管理员用户 ID
     is_deleted  boolean     NOT NULL DEFAULT false,
     delete_at   timestamptz,
     delete_by   text        NOT NULL DEFAULT '',
@@ -66,6 +90,7 @@ CREATE TABLE IF NOT EXISTS organization_info (
     name        text        NOT NULL,                 -- 组织名称
     remark      text        NOT NULL DEFAULT '',      -- 备注（原 comment，PG 保留字已替换）
     tenant_id   uuid        NOT NULL,                 -- 所属租户 ID（代码层面关联，无外键）
+    manager     text        NOT NULL DEFAULT '',      -- 管理员用户 ID
     is_deleted  boolean     NOT NULL DEFAULT false,
     delete_at   timestamptz,
     delete_by   text        NOT NULL DEFAULT '',
@@ -163,6 +188,7 @@ CREATE TABLE IF NOT EXISTS project_info (
     name        text        NOT NULL,                 -- 项目名称
     remark      text        NOT NULL DEFAULT '',      -- 备注
     org_id      uuid        NOT NULL,                 -- 所属组织 ID（代码层面关联，无外键）
+    manager     text        NOT NULL DEFAULT '',      -- 管理员用户 ID
     is_deleted  boolean     NOT NULL DEFAULT false,
     delete_at   timestamptz,
     delete_by   text        NOT NULL DEFAULT '',
@@ -254,6 +280,7 @@ CREATE TABLE IF NOT EXISTS folder_info (
     parent_folder_id uuid,                                 -- 父文件夹 ID（NULL 为顶层，非 NULL 为二级）
     remark           text        NOT NULL DEFAULT '',      -- 备注
     type             text        NOT NULL,                 -- 目录类型：common-通用目录 / customer-用户目录
+    manager          text        NOT NULL DEFAULT '',      -- 管理员用户 ID
     is_deleted       boolean     NOT NULL DEFAULT false,
     delete_at        timestamptz,
     delete_by        text        NOT NULL DEFAULT '',

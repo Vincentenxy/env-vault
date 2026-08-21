@@ -18,11 +18,11 @@ import (
 
 // TenantHandler 租户 HTTP 处理器
 type TenantHandler struct {
-	svc *tenantapp.Service
+	svc tenantapp.IService
 }
 
 // NewTenantHandler 创建租户处理器
-func NewTenantHandler(svc *tenantapp.Service) *TenantHandler {
+func NewTenantHandler(svc tenantapp.IService) *TenantHandler {
 	return &TenantHandler{svc: svc}
 }
 
@@ -32,6 +32,7 @@ type TenantDTO struct {
 	Code     string    `json:"code"`
 	Name     string    `json:"name"`
 	Remark   string    `json:"remark"`
+	Manager  string    `json:"manager"`
 	CreateBy string    `json:"createBy"`
 	UpdateBy string    `json:"updateBy"`
 	CreateAt time.Time `json:"createAt"`
@@ -40,9 +41,10 @@ type TenantDTO struct {
 
 // CreateRequest 创建租户请求
 type CreateRequest struct {
-	Code   string `json:"code"`
-	Name   string `json:"name"`
-	Remark string `json:"remark"`
+	Code    string `json:"code"`
+	Name    string `json:"name"`
+	Remark  string `json:"remark"`
+	Manager string `json:"manager,omitempty"`
 }
 
 // UpdateRequest 更新租户请求
@@ -69,6 +71,19 @@ type ListRequest struct {
 	page.Request
 }
 
+// WithOrgProjectResponse 租户组织项目树响应。
+type WithOrgProjectResponse struct {
+	TenantList []TenantWithOrgProjectsDTO `json:"tenantList"`
+}
+
+// TenantWithOrgProjectsDTO 租户及其组织项目树。
+type TenantWithOrgProjectsDTO struct {
+	Manager string                        `json:"manager"`
+	ID      uuid.UUID                     `json:"id"`
+	Name    string                        `json:"name"`
+	OrgList []OrganizationWithProjectsDTO `json:"orgList"`
+}
+
 // Create 创建租户
 func (h *TenantHandler) Create(c *gin.Context) {
 	var req CreateRequest
@@ -83,9 +98,10 @@ func (h *TenantHandler) Create(c *gin.Context) {
 	}
 
 	t, err := h.svc.Create(c, tenantapp.CreateInput{
-		Code:   req.Code,
-		Name:   req.Name,
-		Remark: req.Remark,
+		Code:    req.Code,
+		Name:    req.Name,
+		Remark:  req.Remark,
+		Manager: req.Manager,
 	}, operator(c))
 	h.respondError(c, err)
 	if err != nil {
@@ -191,6 +207,39 @@ func (h *TenantHandler) List(c *gin.Context) {
 	})
 }
 
+// WithOrgProject 查询租户下的组织和项目；当前返回全部，后续按用户权限过滤。
+func (h *TenantHandler) WithOrgProject(c *gin.Context) {
+	tenants, err := h.svc.ListWithOrgProjects(c, tenantapp.WithOrgProjectsInput{UserID: operator(c)})
+	h.respondError(c, err)
+	if err != nil {
+		return
+	}
+
+	tenantList := make([]TenantWithOrgProjectsDTO, 0, len(tenants))
+	for _, tenant := range tenants {
+		orgList := make([]OrganizationWithProjectsDTO, 0, len(tenant.OrgList))
+		for _, org := range tenant.OrgList {
+			projectList := make([]ProjectSummaryDTO, 0, len(org.ProjectList))
+			for _, project := range org.ProjectList {
+				projectList = append(projectList, ProjectSummaryDTO{ID: project.ID, Name: project.Name, Manager: project.Manager})
+			}
+			orgList = append(orgList, OrganizationWithProjectsDTO{
+				ID:          org.ID,
+				Name:        org.Name,
+				Manager:     org.Manager,
+				ProjectList: projectList,
+			})
+		}
+		tenantList = append(tenantList, TenantWithOrgProjectsDTO{
+			ID:      tenant.ID,
+			Name:    tenant.Name,
+			Manager: tenant.Manager,
+			OrgList: orgList,
+		})
+	}
+	response.Success(c, WithOrgProjectResponse{TenantList: tenantList})
+}
+
 // respondError 应用层错误统一映射为业务错误码
 func (h *TenantHandler) respondError(c *gin.Context, err error) {
 	if err == nil {
@@ -222,6 +271,7 @@ func toDTO(t *tenantdomain.Tenant) *TenantDTO {
 		Code:     t.Code,
 		Name:     t.Name,
 		Remark:   t.Remark,
+		Manager:  t.Manager,
 		CreateBy: t.CreateBy,
 		UpdateBy: t.UpdateBy,
 		CreateAt: t.CreateAt,

@@ -30,6 +30,7 @@ type ProjectDTO struct {
 	Name     string    `json:"name"`
 	Remark   string    `json:"remark"`
 	OrgID    uuid.UUID `json:"orgId"`
+	Manager  string    `json:"manager"`
 	CreateBy string    `json:"createBy"`
 	UpdateBy string    `json:"updateBy"`
 	CreateAt time.Time `json:"createAt"`
@@ -42,6 +43,7 @@ type CreateProjectRequest struct {
 	Name         string                         `json:"name"`
 	Remark       string                         `json:"remark"`
 	OrgID        uuid.UUID                      `json:"orgId"`
+	Manager      string                         `json:"manager,omitempty"`
 	Environments []CreateProjectEnvironmentItem `json:"environments,omitempty"`
 }
 
@@ -96,6 +98,7 @@ func (h *ProjectHandler) Create(c *gin.Context) {
 		Name:         req.Name,
 		Remark:       req.Remark,
 		OrgID:        req.OrgID,
+		Manager:      req.Manager,
 		Environments: toCreateEnvironmentInputs(req.Environments),
 	}, operator(c))
 	h.respondError(c, err)
@@ -242,6 +245,7 @@ func toProjectDTO(p *projdomain.Project) *ProjectDTO {
 		Name:     p.Name,
 		Remark:   p.Remark,
 		OrgID:    p.OrgID,
+		Manager:  p.Manager,
 		CreateBy: p.CreateBy,
 		UpdateBy: p.UpdateBy,
 		CreateAt: p.CreateAt,

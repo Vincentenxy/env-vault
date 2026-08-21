@@ -4,6 +4,7 @@ package project
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -30,10 +31,11 @@ type CreateEnvironmentInput struct {
 
 // CreateInput 创建项目入参
 type CreateInput struct {
-	Code   string
-	Name   string
-	Remark string
-	OrgID  uuid.UUID
+	Code    string
+	Name    string
+	Remark  string
+	OrgID   uuid.UUID
+	Manager string
 	// Environments 可选；缺省或为空时只创建项目，非空时与项目一并创建。
 	Environments []CreateEnvironmentInput
 }
@@ -100,12 +102,17 @@ func (s *Service) Create(ctx context.Context, in CreateInput, operator string) (
 	}
 
 	now := time.Now()
+	manager := strings.TrimSpace(in.Manager)
+	if manager == "" {
+		manager = operator
+	}
 	p := &projdomain.Project{
 		ID:       uuid.New(),
 		Code:     in.Code,
 		Name:     in.Name,
 		Remark:   in.Remark,
 		OrgID:    in.OrgID,
+		Manager:  manager,
 		CreateBy: operator,
 		UpdateBy: operator,
 		CreateAt: now,

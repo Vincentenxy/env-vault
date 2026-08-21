@@ -18,6 +18,7 @@ type tenantPO struct {
 	Code      string     `gorm:"column:code"`
 	Name      string     `gorm:"column:name"`
 	Remark    string     `gorm:"column:remark"`
+	Manager   string     `gorm:"column:manager"`
 	IsDeleted bool       `gorm:"column:is_deleted"`
 	DeleteAt  *time.Time `gorm:"column:delete_at"`
 	DeleteBy  string     `gorm:"column:delete_by"`
@@ -140,6 +141,33 @@ func (r *Repository) List(ctx context.Context, filter tenantdomain.ListFilter) (
 	return tenants, total, nil
 }
 
+// ListAccessible 查询当前用户可访问的未删除租户；权限未启用时返回全部租户。
+func (r *Repository) ListAccessible(ctx context.Context, filter tenantdomain.AccessibleFilter) ([]*tenantdomain.Tenant, error) {
+	query := r.db.WithContext(ctx).
+		Table("tenant_info AS t").
+		Select("DISTINCT t.*").
+		Where("t.is_deleted = false")
+	query = applyAccessiblePermissionFilter(query, filter)
+
+	var pos []tenantPO
+	if err := query.Order("t.create_at DESC").Scan(&pos).Error; err != nil {
+		return nil, err
+	}
+
+	tenants := make([]*tenantdomain.Tenant, 0, len(pos))
+	for i := range pos {
+		tenants = append(tenants, toDomain(&pos[i]))
+	}
+	return tenants, nil
+}
+
+func applyAccessiblePermissionFilter(query *gorm.DB, filter tenantdomain.AccessibleFilter) *gorm.DB {
+	// TODO(permission): 权限表落地后，在这里替换为用户可访问租户的权限 JOIN。
+	// 当前阶段明确返回全部租户，不使用 user_info 提前限制查询范围。
+	_ = filter.UserID
+	return query
+}
+
 // toPO 领域模型转持久化对象
 func toPO(t *tenantdomain.Tenant) *tenantPO {
 	return &tenantPO{
@@ -147,6 +175,7 @@ func toPO(t *tenantdomain.Tenant) *tenantPO {
 		Code:      t.Code,
 		Name:      t.Name,
 		Remark:    t.Remark,
+		Manager:   t.Manager,
 		IsDeleted: t.IsDeleted,
 		DeleteAt:  t.DeleteAt,
 		DeleteBy:  t.DeleteBy,
@@ -164,6 +193,7 @@ func toDomain(po *tenantPO) *tenantdomain.Tenant {
 		Code:      po.Code,
 		Name:      po.Name,
 		Remark:    po.Remark,
+		Manager:   po.Manager,
 		IsDeleted: po.IsDeleted,
 		DeleteAt:  po.DeleteAt,
 		DeleteBy:  po.DeleteBy,

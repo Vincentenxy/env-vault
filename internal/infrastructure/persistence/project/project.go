@@ -20,6 +20,7 @@ type projectPO struct {
 	Name      string     `gorm:"column:name"`
 	Remark    string     `gorm:"column:remark"`
 	OrgID     uuid.UUID  `gorm:"column:org_id"`
+	Manager   string     `gorm:"column:manager"`
 	IsDeleted bool       `gorm:"column:is_deleted"`
 	DeleteAt  *time.Time `gorm:"column:delete_at"`
 	DeleteBy  string     `gorm:"column:delete_by"`
@@ -159,6 +160,7 @@ func toPO(p *projdomain.Project) *projectPO {
 		Name:      p.Name,
 		Remark:    p.Remark,
 		OrgID:     p.OrgID,
+		Manager:   p.Manager,
 		IsDeleted: p.IsDeleted,
 		DeleteAt:  p.DeleteAt,
 		DeleteBy:  p.DeleteBy,
@@ -177,6 +179,7 @@ func toDomain(po *projectPO) *projdomain.Project {
 		Name:      po.Name,
 		Remark:    po.Remark,
 		OrgID:     po.OrgID,
+		Manager:   po.Manager,
 		IsDeleted: po.IsDeleted,
 		DeleteAt:  po.DeleteAt,
 		DeleteBy:  po.DeleteBy,

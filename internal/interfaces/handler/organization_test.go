@@ -21,11 +21,12 @@ import (
 
 // stubService 内存实现的 orgapp.IService，便于 handler 层单测
 type stubOrgService struct {
-	createFn func(ctx context.Context, in orgapp.CreateInput, operator string) (*orgdomain.Organization, error)
-	updateFn func(ctx context.Context, in orgapp.UpdateInput, operator string) (*orgdomain.Organization, error)
-	deleteFn func(ctx context.Context, id uuid.UUID, operator string) error
-	getByID  func(ctx context.Context, id uuid.UUID) (*orgdomain.Organization, error)
-	listFn   func(ctx context.Context, in orgapp.ListInput) ([]*orgdomain.Organization, int64, error)
+	createFn       func(ctx context.Context, in orgapp.CreateInput, operator string) (*orgdomain.Organization, error)
+	updateFn       func(ctx context.Context, in orgapp.UpdateInput, operator string) (*orgdomain.Organization, error)
+	deleteFn       func(ctx context.Context, id uuid.UUID, operator string) error
+	getByID        func(ctx context.Context, id uuid.UUID) (*orgdomain.Organization, error)
+	listFn         func(ctx context.Context, in orgapp.ListInput) ([]*orgdomain.Organization, int64, error)
+	withProjectsFn func(ctx context.Context, in orgapp.WithProjectsInput) ([]*orgdomain.OrganizationWithProjects, error)
 }
 
 func (s *stubOrgService) Create(ctx context.Context, in orgapp.CreateInput, operator string) (*orgdomain.Organization, error) {
@@ -58,6 +59,12 @@ func (s *stubOrgService) List(ctx context.Context, in orgapp.ListInput) ([]*orgd
 	}
 	return nil, 0, nil
 }
+func (s *stubOrgService) ListWithProjects(ctx context.Context, in orgapp.WithProjectsInput) ([]*orgdomain.OrganizationWithProjects, error) {
+	if s.withProjectsFn != nil {
+		return s.withProjectsFn(ctx, in)
+	}
+	return nil, nil
+}
 
 func newOrgTestEngine(svc orgapp.IService, u *userctx.User) *gin.Engine {
 	gin.SetMode(gin.TestMode)
@@ -76,6 +83,7 @@ func newOrgTestEngine(svc orgapp.IService, u *userctx.User) *gin.Engine {
 	g.POST("/delete", h.Delete)
 	g.POST("/detail", h.Detail)
 	g.POST("/list", h.List)
+	g.GET("/withProject", h.WithProject)
 	return r
 }
 
@@ -400,6 +408,73 @@ func TestOrgHandler_List_InvalidBody(t *testing.T) {
 	body := decodeBody(t, w)
 	if body["code"].(float64) != -1 {
 		t.Fatalf("expected generic code -1 for bind failure, got %v", body["code"])
+	}
+}
+
+// ---------- WithProject ----------
+
+func TestOrgHandler_WithProject_Success(t *testing.T) {
+	orgID := uuid.New()
+	projectID := uuid.New()
+	emptyOrgID := uuid.New()
+	svc := &stubOrgService{
+		withProjectsFn: func(ctx context.Context, in orgapp.WithProjectsInput) ([]*orgdomain.OrganizationWithProjects, error) {
+			if in.UserID != "u-1" {
+				t.Fatalf("expected JWT user ID u-1, got %q", in.UserID)
+			}
+			return []*orgdomain.OrganizationWithProjects{
+				{
+					ID: orgID, Name: "研发组",
+					ProjectList: []orgdomain.ProjectSummary{{ID: projectID, Name: "效能平台"}},
+				},
+				{ID: emptyOrgID, Name: "空组织", ProjectList: []orgdomain.ProjectSummary{}},
+			}, nil
+		},
+	}
+
+	r := newOrgTestEngine(svc, testUser())
+	w := doJSON(t, r, http.MethodGet, "/api/v1/org/withProject", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	body := decodeBody(t, w)
+	if body["code"].(float64) != 0 {
+		t.Fatalf("expected business code 0, got %v", body["code"])
+	}
+	data := body["data"].(map[string]any)
+	orgList := data["orgList"].([]any)
+	if len(orgList) != 2 {
+		t.Fatalf("expected 2 organizations, got %d", len(orgList))
+	}
+	first := orgList[0].(map[string]any)
+	if first["id"] != orgID.String() || first["name"] != "研发组" {
+		t.Fatalf("unexpected organization: %+v", first)
+	}
+	projects := first["projectList"].([]any)
+	if len(projects) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(projects))
+	}
+	project := projects[0].(map[string]any)
+	if project["id"] != projectID.String() || project["name"] != "效能平台" {
+		t.Fatalf("unexpected project: %+v", project)
+	}
+	second := orgList[1].(map[string]any)
+	if projects, ok := second["projectList"].([]any); !ok || len(projects) != 0 {
+		t.Fatalf("expected empty projectList array, got %+v", second["projectList"])
+	}
+}
+
+func TestOrgHandler_WithProject_InternalError(t *testing.T) {
+	svc := &stubOrgService{
+		withProjectsFn: func(context.Context, orgapp.WithProjectsInput) ([]*orgdomain.OrganizationWithProjects, error) {
+			return nil, errors.New("db unavailable")
+		},
+	}
+	r := newOrgTestEngine(svc, testUser())
+	w := doJSON(t, r, http.MethodGet, "/api/v1/org/withProject", nil)
+	body := decodeBody(t, w)
+	if body["code"].(float64) != -1 || body["msg"] != "internal error" {
+		t.Fatalf("unexpected error response: %+v", body)
 	}
 }
 

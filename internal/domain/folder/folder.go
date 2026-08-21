@@ -26,6 +26,7 @@ type Folder struct {
 	ParentFolderID *uuid.UUID // nil 为顶层，非 nil 为二级
 	Remark         string
 	Type           string
+	Manager        string
 	IsDeleted      bool
 	DeleteAt       *time.Time
 	DeleteBy       string

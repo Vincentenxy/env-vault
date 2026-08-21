@@ -15,6 +15,7 @@ type Project struct {
 	Name      string
 	Remark    string
 	OrgID     uuid.UUID
+	Manager   string
 	IsDeleted bool
 	DeleteAt  *time.Time
 	DeleteBy  string

@@ -22,6 +22,7 @@ type folderPO struct {
 	ParentFolderID *uuid.UUID `gorm:"column:parent_folder_id"`
 	Remark         string     `gorm:"column:remark"`
 	Type           string     `gorm:"column:type"`
+	Manager        string     `gorm:"column:manager"`
 	IsDeleted      bool       `gorm:"column:is_deleted"`
 	DeleteAt       *time.Time `gorm:"column:delete_at"`
 	DeleteBy       string     `gorm:"column:delete_by"`
@@ -328,6 +329,7 @@ func toPO(f *folderdomain.Folder) *folderPO {
 		ParentFolderID: f.ParentFolderID,
 		Remark:         f.Remark,
 		Type:           f.Type,
+		Manager:        f.Manager,
 		IsDeleted:      f.IsDeleted,
 		DeleteAt:       f.DeleteAt,
 		DeleteBy:       f.DeleteBy,
@@ -349,6 +351,7 @@ func toDomain(po *folderPO) *folderdomain.Folder {
 		ParentFolderID: po.ParentFolderID,
 		Remark:         po.Remark,
 		Type:           po.Type,
+		Manager:        po.Manager,
 		IsDeleted:      po.IsDeleted,
 		DeleteAt:       po.DeleteAt,
 		DeleteBy:       po.DeleteBy,

@@ -15,6 +15,7 @@ type Organization struct {
 	Name      string
 	Remark    string
 	TenantID  uuid.UUID
+	Manager   string
 	IsDeleted bool
 	DeleteAt  *time.Time
 	DeleteBy  string
@@ -33,6 +34,29 @@ type ListFilter struct {
 	PageSize int
 }
 
+// WithProjectsFilter 组织项目树查询过滤条件。
+// UserID 当前仅作为权限查询预留，待权限模型落地后用于仓储 SQL 过滤。
+type WithProjectsFilter struct {
+	UserID    string
+	TenantIDs []uuid.UUID
+}
+
+// ProjectSummary 组织项目树中的项目摘要。
+type ProjectSummary struct {
+	ID      uuid.UUID
+	Name    string
+	Manager string
+}
+
+// OrganizationWithProjects 组织及其全部项目。
+type OrganizationWithProjects struct {
+	ID          uuid.UUID
+	Name        string
+	TenantID    uuid.UUID
+	Manager     string
+	ProjectList []ProjectSummary
+}
+
 // Repository 组织仓储接口（领域层定义，基础设施层实现）
 type Repository interface {
 	// Create 创建组织
@@ -47,4 +71,6 @@ type Repository interface {
 	GetByTenantCode(ctx context.Context, tenantID uuid.UUID, code string) (*Organization, error)
 	// List 分页查询组织列表（不含已删除），返回列表与总数
 	List(ctx context.Context, filter ListFilter) ([]*Organization, int64, error)
+	// ListWithProjects 查询全部组织及其项目；filter 为后续用户权限过滤预留
+	ListWithProjects(ctx context.Context, filter WithProjectsFilter) ([]*OrganizationWithProjects, error)
 }
