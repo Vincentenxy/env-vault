@@ -93,15 +93,16 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 
 		// 需认证接口分组
 		auth := v1.Group("", authMiddleware)
-		authGroup := auth.Group("/auth")
-		{
-			authGroup.GET("/me", userHandler.Me)
-		}
+		//authGroup := auth.Group("/auth")
+		//{
+		//
+		//}
 
 		userGroup := auth.Group("/user")
 		{
 			userGroup.POST("/update", userHandler.Update)
 			userGroup.POST("/list", userHandler.List)
+			userGroup.GET("/me", userHandler.Me)
 		}
 
 		// 租户管理（带参数统一 POST）
