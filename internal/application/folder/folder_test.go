@@ -669,3 +669,47 @@ func TestService_List_ByParentFolderID(t *testing.T) {
 		t.Fatalf("filters lost: %+v", captured)
 	}
 }
+
+type nicknameResolverFunc func(context.Context, string) (string, error)
+
+func (f nicknameResolverFunc) GetNickname(ctx context.Context, userID string) (string, error) {
+	return f(ctx, userID)
+}
+
+func TestService_List_EnrichesSummary(t *testing.T) {
+	parentID := uuid.New()
+	childCount := int64(2)
+	folderRepo := &stubFolderRepo{
+		listSubGroupIDsByParentFolderID: func(context.Context, uuid.UUID) ([]uuid.UUID, error) {
+			return []uuid.UUID{uuid.New(), uuid.New()}, nil
+		},
+		listByGroupIDs: func(context.Context, []uuid.UUID, folderdomain.ListFilter) ([]*folderdomain.Folder, int64, error) {
+			return []*folderdomain.Folder{
+				{ID: uuid.New(), Type: folderdomain.TypeCommon, Manager: "manager-1", SecretCount: 3, FolderCount: &childCount},
+				{ID: uuid.New(), Type: folderdomain.TypeCustomer, Manager: "missing", SecretCount: 1, FolderCount: &childCount},
+			}, 2, nil
+		},
+	}
+	resolver := nicknameResolverFunc(func(_ context.Context, userID string) (string, error) {
+		if userID == "manager-1" {
+			return "管理员一", nil
+		}
+		return "", errors.New("user not found")
+	})
+
+	got, total, err := NewService(folderRepo, &stubEnvRepo{}, resolver).List(context.Background(), ListInput{
+		ParentFolderID: &parentID, PageNum: 1, PageSize: 20,
+	})
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if total != 2 || len(got) != 2 {
+		t.Fatalf("unexpected result: total=%d folders=%+v", total, got)
+	}
+	if got[0].ManagerName != "管理员一" || got[0].SecretCount != 3 || got[0].FolderCount == nil || *got[0].FolderCount != 2 {
+		t.Fatalf("unexpected common folder summary: %+v", got[0])
+	}
+	if got[1].ManagerName != "" || got[1].SecretCount != 1 || got[1].FolderCount != nil {
+		t.Fatalf("unexpected customer folder summary: %+v", got[1])
+	}
+}

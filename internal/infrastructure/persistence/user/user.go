@@ -92,6 +92,48 @@ func (r *Repository) GetByTenantUsername(ctx context.Context, tenantID uuid.UUID
 	return toDomain(&po), nil
 }
 
+// List 查询未删除用户，只投影接口需要的非敏感字段。
+func (r *Repository) List(ctx context.Context, filter userdomain.ListFilter) ([]*userdomain.User, error) {
+	var pos []userPO
+	query := r.db.WithContext(ctx).
+		Model(&userPO{}).
+		Select("user_info.id, user_info.user_id, user_info.nickname").
+		Where("user_info.is_deleted = false")
+
+	switch {
+	case filter.ProjectID != uuid.Nil:
+		query = query.
+			Joins("JOIN project_user_relation AS pur ON pur.user_id = user_info.id").
+			Where("pur.project_id = ?", filter.ProjectID)
+	case filter.OrgID != uuid.Nil:
+		query = query.Where("user_info.org_id = ?", filter.OrgID)
+	case filter.TenantID != uuid.Nil:
+		query = query.Where("user_info.tenant_id = ?", filter.TenantID)
+	case filter.Undistributed:
+		query = query.Where(
+			"(user_info.tenant_id IS NULL OR user_info.tenant_id = ?) AND (user_info.org_id IS NULL OR user_info.org_id = ?)",
+			uuid.Nil,
+			uuid.Nil,
+		)
+	}
+
+	if err := query.
+		Order("user_info.nickname ASC, user_info.user_id ASC, user_info.id ASC").
+		Find(&pos).Error; err != nil {
+		return nil, err
+	}
+
+	users := make([]*userdomain.User, 0, len(pos))
+	for i := range pos {
+		users = append(users, &userdomain.User{
+			ID:       pos[i].ID,
+			UserID:   pos[i].UserID,
+			Nickname: pos[i].Nickname,
+		})
+	}
+	return users, nil
+}
+
 // ListAll 查询全部未删除用户。
 func (r *Repository) ListAll(ctx context.Context) ([]*userdomain.User, error) {
 	var pos []userPO

@@ -274,6 +274,36 @@ func TestService_List_PassesFilters(t *testing.T) {
 	}
 }
 
+type nicknameResolverFunc func(context.Context, string) (string, error)
+
+func (f nicknameResolverFunc) GetNickname(ctx context.Context, userID string) (string, error) {
+	return f(ctx, userID)
+}
+
+func TestService_List_EnrichesSummary(t *testing.T) {
+	repo := &stubRepo{
+		list: func(context.Context, orgdomain.ListFilter) ([]*orgdomain.Organization, int64, error) {
+			return []*orgdomain.Organization{{
+				ID: uuid.New(), Manager: "manager-1", ProjectCount: 4, MemberCount: 9,
+			}}, 1, nil
+		},
+	}
+	resolver := nicknameResolverFunc(func(context.Context, string) (string, error) {
+		return "管理员一", nil
+	})
+
+	got, total, err := NewService(repo, resolver).List(context.Background(), ListInput{PageNum: 1, PageSize: 20})
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if total != 1 || len(got) != 1 {
+		t.Fatalf("unexpected result: total=%d organizations=%+v", total, got)
+	}
+	if got[0].ProjectCount != 4 || got[0].MemberCount != 9 || got[0].ManagerName != "管理员一" {
+		t.Fatalf("unexpected organization summary: %+v", got[0])
+	}
+}
+
 func TestService_ListWithProjects_PassesPermissionSubject(t *testing.T) {
 	var captured orgdomain.WithProjectsFilter
 	want := []*orgdomain.OrganizationWithProjects{{

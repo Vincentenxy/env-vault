@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -15,12 +17,28 @@ import (
 )
 
 type stubUserService struct {
-	updateFn func(ctx context.Context, in userapp.UpdateInput) (*userdomain.User, error)
+	updateFn     func(ctx context.Context, in userapp.UpdateInput) (*userdomain.User, error)
+	listFn       func(ctx context.Context, in userapp.ListInput) ([]*userdomain.User, error)
+	getProfileFn func(ctx context.Context, userID string) (*userdomain.User, error)
 }
 
 func (s *stubUserService) Update(ctx context.Context, in userapp.UpdateInput) (*userdomain.User, error) {
 	if s.updateFn != nil {
 		return s.updateFn(ctx, in)
+	}
+	return nil, nil
+}
+
+func (s *stubUserService) List(ctx context.Context, in userapp.ListInput) ([]*userdomain.User, error) {
+	if s.listFn != nil {
+		return s.listFn(ctx, in)
+	}
+	return nil, nil
+}
+
+func (s *stubUserService) GetProfile(ctx context.Context, userID string) (*userdomain.User, error) {
+	if s.getProfileFn != nil {
+		return s.getProfileFn(ctx, userID)
 	}
 	return nil, nil
 }
@@ -43,8 +61,125 @@ func newUserTestEngine(svc userapp.IService, authUser *userctx.User) *gin.Engine
 		c.Next()
 	})
 	h := NewUserHandler(svc)
+	r.GET("/api/v1/auth/me", h.Me)
 	r.POST("/api/v1/user/update", h.Update)
+	r.POST("/api/v1/user/list", h.List)
 	return r
+}
+
+func TestUserHandler_Me_UsesJWTUserIDAndOmitsSensitiveFields(t *testing.T) {
+	internalID, tenantID, orgID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC().Truncate(time.Second)
+	svc := &stubUserService{getProfileFn: func(_ context.Context, userID string) (*userdomain.User, error) {
+		if userID != "jwt-user-id" {
+			t.Fatalf("expected JWT user id, got %q", userID)
+		}
+		return &userdomain.User{
+			ID: internalID, UserID: userID, Nickname: "Tester", Username: "tester",
+			PasswordHash: "secret-hash", Email: "tester@example.com", Phone: "13800000000",
+			TenantID: tenantID, OrgID: orgID, CreateBy: "system", UpdateBy: userID,
+			CreateAt: now, UpdateAt: now,
+		}, nil
+	}}
+
+	r := newUserTestEngine(svc, &userctx.User{UserID: "jwt-user-id", Name: "JWT Name", Jwt: "secret-token"})
+	w := doJSON(t, r, http.MethodGet, "/api/v1/auth/me", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected HTTP status: %d body=%s", w.Code, w.Body.String())
+	}
+	body := decodeBody(t, w)
+	if body["code"].(float64) != 0 {
+		t.Fatalf("unexpected response: %s", w.Body.String())
+	}
+	data := body["data"].(map[string]any)
+	if data["id"] != internalID.String() || data["userId"] != "jwt-user-id" || data["nickname"] != "Tester" {
+		t.Fatalf("unexpected user data: %+v", data)
+	}
+	for _, sensitive := range []string{"passwordHash", "isDeleted", "deleteAt", "deleteBy", "jwt"} {
+		if _, exists := data[sensitive]; exists {
+			t.Fatalf("sensitive field %q leaked: %+v", sensitive, data)
+		}
+	}
+}
+
+func TestUserHandler_Me_RequiresAuthentication(t *testing.T) {
+	svc := &stubUserService{getProfileFn: func(context.Context, string) (*userdomain.User, error) {
+		t.Fatal("service must not be called without an authenticated user")
+		return nil, nil
+	}}
+	r := newUserTestEngine(svc, nil)
+	w := doJSON(t, r, http.MethodGet, "/api/v1/auth/me", nil)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	body := decodeBody(t, w)
+	if body["code"].(float64) != http.StatusUnauthorized || body["msg"] != http.StatusText(http.StatusUnauthorized) {
+		t.Fatalf("unexpected response: %s", w.Body.String())
+	}
+}
+
+func TestUserHandler_Me_UserNotFound(t *testing.T) {
+	svc := &stubUserService{getProfileFn: func(context.Context, string) (*userdomain.User, error) {
+		return nil, userapp.ErrNotFound
+	}}
+	r := newUserTestEngine(svc, &userctx.User{UserID: "missing-user"})
+	w := doJSON(t, r, http.MethodGet, "/api/v1/auth/me", nil)
+	body := decodeBody(t, w)
+	if body["code"].(float64) != -1 || body["msg"] != "user not found" {
+		t.Fatalf("unexpected response: %s", w.Body.String())
+	}
+}
+
+func TestUserHandler_List_ReturnsOnlyPublicFields(t *testing.T) {
+	tenantID, orgID, projectID := uuid.New(), uuid.New(), uuid.New()
+	internalID := uuid.New()
+	svc := &stubUserService{listFn: func(_ context.Context, in userapp.ListInput) ([]*userdomain.User, error) {
+		if in.TenantID != tenantID || in.OrgID != orgID || in.ProjectID != projectID || !in.Undistributed {
+			t.Fatalf("list input not passed: %+v", in)
+		}
+		return []*userdomain.User{{
+			ID: internalID, UserID: "external-1", Nickname: "User One",
+			Username: "login-name", PasswordHash: "password-hash", Email: "private@example.com", Phone: "13800000000",
+		}}, nil
+	}}
+
+	r := newUserTestEngine(svc, &userctx.User{UserID: "operator"})
+	w := doJSON(t, r, http.MethodPost, "/api/v1/user/list", map[string]any{
+		"tenantId": tenantID, "orgId": orgID, "projectId": projectID, "undistributed": true,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected HTTP status: %d body=%s", w.Code, w.Body.String())
+	}
+	body := decodeBody(t, w)
+	if body["code"].(float64) != 0 {
+		t.Fatalf("unexpected response: %s", w.Body.String())
+	}
+	list := body["data"].([]any)
+	if len(list) != 1 {
+		t.Fatalf("expected one user, got %+v", list)
+	}
+	item := list[0].(map[string]any)
+	if len(item) != 3 || item["id"] != internalID.String() || item["userId"] != "external-1" || item["nickname"] != "User One" {
+		t.Fatalf("unexpected public user data: %+v", item)
+	}
+	for _, sensitive := range []string{"username", "passwordHash", "email", "phone", "tenantId", "orgId"} {
+		if _, exists := item[sensitive]; exists {
+			t.Fatalf("sensitive field %q leaked: %+v", sensitive, item)
+		}
+	}
+}
+
+func TestUserHandler_List_InvalidBody(t *testing.T) {
+	svc := &stubUserService{listFn: func(context.Context, userapp.ListInput) ([]*userdomain.User, error) {
+		t.Fatal("service must not be called on bind failure")
+		return nil, nil
+	}}
+	r := newUserTestEngine(svc, &userctx.User{UserID: "operator"})
+	w := doJSON(t, r, http.MethodPost, "/api/v1/user/list", strings.NewReader("{not json"))
+	body := decodeBody(t, w)
+	if body["code"].(float64) != -1 {
+		t.Fatalf("unexpected response: %s", w.Body.String())
+	}
 }
 
 func TestUserHandler_Update_UsesJWTUserID(t *testing.T) {

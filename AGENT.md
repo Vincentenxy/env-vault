@@ -83,19 +83,19 @@ HTTP body：
 
 所有分页接口统一使用 `pkg/page` 包定义的结构：
 
-- **请求**：`PageRequest { pageNum, pageSize }`
-  - `pageNum`：页码，从 1 开始；缺省 / ≤0 时取 1
-  - `pageSize`：页内条数；缺省 / ≤0 时取 20，上限 200
-  - 业务 request 通过**匿名嵌入** `page.Request` 继承两字段，handler 内统一调用 `req.Normalize()` 归一化
-- **响应**：`PageResp { total, list }`
-  - **只暴露 `total`（总条数） 与 `list`（数据列表）**；禁止在响应中回显 `pageNum` / `pageSize`
-  - 使用泛型版本：`page.Response[T any]{ Total int64, List []T }`
+1. 所有 HTTP 分页请求 DTO 必须匿名嵌入 `page.Request`，禁止重复声明 `PageNum` / `PageSize` 或 `json:"pageNum"` / `json:"pageSize"`。
+2. Handler 完成参数绑定后调用一次 `req.Normalize()`。分页默认值和上限处理只能在 Handler 层执行；特殊情况可不使用默认值，但必须在代码中说明。
+3. `pageNum <= 0` 时取 `page.DefaultPageNum`，`pageSize <= 0` 时取 `page.DefaultPageSize`；`pageSize > page.MaxPageSize` 时取 `page.MaxPageSize`。
+4. Application Service、Domain 和 Repository 禁止再次设置分页默认值、限制最大值或执行分页归一化，只接收并使用 Handler 已处理的分页参数；特殊情况必须在代码中说明。
+5. 内部 Application Input 和 Domain Filter 可以保留 `PageNum` / `PageSize` 作为层间传递字段，但不得包含默认值处理；`page.Request` 只用于 HTTP 请求 DTO，避免 Domain 层依赖带 JSON 语义的结构。
+6. 分页响应统一使用 `page.Response[T]`，只返回 `total` / `list`。特殊响应结构必须由项目 Owner 明确确认并在接口代码中注明例外。
+7. 分页接口测试至少覆盖：缺省参数、负数页码、零值 `pageSize`、超过最大 `pageSize`，以及 Service 收到归一化参数。
 
 ```go
 // 请求示例
 type ListRequest struct {
     Code string `json:"code"`
-    page.Request // 内嵌分页字段
+    page.Request
 }
 
 // 响应示例
@@ -162,6 +162,7 @@ response.Success(c, page.Response[TenantDTO]{ Total: total, List: items })
 
 - **Go 结构体字段 / JSON 字段**：小驼峰（如 `createAt`、`userName`）
 - **数据库列名**：下划线（如 `create_at`、`user_name`）
+- **人员名称响应字段**：接口返回人员标识及其名称时，名称字段统一使用对应标识字段加 `Name` 后缀，不得另造名称；例如 `createBy` 对应 `createByName`、`updateBy` 对应 `updateByName`、`manager` 对应 `managerName`
 - 其余命名遵循 Go 官方规范（包名小写、导出标识符大驼峰等）
 
 ---

@@ -118,12 +118,12 @@ func (r *Repository) GetByFolderIDsKey(ctx context.Context, folderIDs []uuid.UUI
 	return toDomain(&po), nil
 }
 
-// ListByFolderIDs 查询文件夹集合下的全部密钥（不含已删除，按创建时间倒序）
+// ListByFolderIDs 查询文件夹集合下的全部密钥（不含已删除，按 key 升序）
 func (r *Repository) ListByFolderIDs(ctx context.Context, folderIDs []uuid.UUID) ([]*secretdomain.Secret, error) {
 	var pos []secretPO
 	err := r.withTxDB(ctx).WithContext(ctx).
 		Where("folder_id IN ? AND is_deleted = false", folderIDs).
-		Order("create_at DESC").
+		Order("key ASC, group_id ASC, env_code ASC, id ASC").
 		Find(&pos).Error
 	if err != nil {
 		return nil, err
@@ -169,7 +169,7 @@ func (r *Repository) ListByProjectFolder(ctx context.Context, filter secretdomai
 	if len(filter.Keys) > 0 {
 		query = query.Where("secret_info.key IN ?", filter.Keys)
 	}
-	if err := query.Order("secret_info.create_at DESC").Find(&pos).Error; err != nil {
+	if err := query.Order("secret_info.key ASC, secret_info.group_id ASC, secret_info.env_code ASC, secret_info.id ASC").Find(&pos).Error; err != nil {
 		return nil, err
 	}
 

@@ -27,6 +27,9 @@ type Folder struct {
 	Remark         string
 	Type           string
 	Manager        string
+	ManagerName    string
+	SecretCount    int64
+	FolderCount    *int64
 	IsDeleted      bool
 	DeleteAt       *time.Time
 	DeleteBy       string
@@ -36,7 +39,7 @@ type Folder struct {
 	UpdateAt       time.Time
 }
 
-// ListFilter 文件夹列表查询过滤条件（仅顶级目录）
+// ListFilter 文件夹列表查询过滤条件
 type ListFilter struct {
 	Code     string // 编码模糊匹配（可选）
 	Name     string // 名称模糊匹配（可选）
@@ -66,7 +69,7 @@ type Repository interface {
 	GetByParentCode(ctx context.Context, parentID uuid.UUID, code string) (*Folder, error)
 	// ListTopGroupIDsByEnvIDs 列出指定环境集合下的顶级 folder 的全部 group_id（去重），用于顶级 List 接口的中间步骤
 	ListTopGroupIDsByEnvIDs(ctx context.Context, envIDs []uuid.UUID) ([]uuid.UUID, error)
-	// ListSubGroupIDsByParentFolderID 列出指定 parent folder 下的所有子 folder 的 group_id（去重），用于子级 List 接口的中间步骤
+	// ListSubGroupIDsByParentFolderID 按 parent_folder_id 列出所有子 folder 的 group_id（去重），用于子级 List 接口的中间步骤
 	ListSubGroupIDsByParentFolderID(ctx context.Context, parentFolderID uuid.UUID) ([]uuid.UUID, error)
 	// ListByGroupIDs 按 group_id 集合分页查询每 group_id 一条代表记录（屏蔽环境层级），用于顶级与子级 List 接口的最终步骤
 	ListByGroupIDs(ctx context.Context, groupIDs []uuid.UUID, filter ListFilter) ([]*Folder, int64, error)

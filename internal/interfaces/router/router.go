@@ -44,16 +44,23 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 	// 依赖组装（DDD 各层）
 	tenantRepo := tenantrepo.NewRepository(db)
 	orgRepo := orgrepo.NewRepository(db)
-	tenantSvc := tenantapp.NewService(tenantRepo, orgRepo)
-	orgSvc := orgapp.NewService(orgRepo)
-
 	projRepo := projrepo.NewRepository(db)
 	envRepo := envrepo.NewRepository(db)
-	projSvc := projapp.NewService(projRepo, envRepo)
-	envSvc := envapp.NewService(envRepo)
-
 	folderRepo := folderrepo.NewRepository(db)
-	folderSvc := folderapp.NewService(folderRepo, envRepo)
+	userRepo := userrepo.NewRepository(db)
+	userProfileCache := usercache.NewRedisProfileCache(redisClient, cfg.Redis.KeyPrefix)
+	userNameCache := usercache.NewMemoryNameCache()
+	userSvc := userapp.NewService(userRepo, userProfileCache, userNameCache)
+
+	tenantSvc := tenantapp.NewService(tenantRepo, orgRepo, userSvc)
+	orgSvc := orgapp.NewService(orgRepo, userSvc)
+	projSvc := projapp.NewService(
+		projRepo,
+		projapp.WithEnvironmentRepository(envRepo),
+		projapp.WithNicknameResolver(userSvc),
+	)
+	envSvc := envapp.NewService(envRepo)
+	folderSvc := folderapp.NewService(folderRepo, envRepo, userSvc)
 
 	// secret value 加解密器（私钥来自配置 security.encryption_key）
 	cipher, err := crypto.New(cfg.Security.EncryptionKey)
@@ -61,12 +68,7 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 		return nil, err
 	}
 	secretRepo := secretrepo.NewRepository(db)
-	secretSvc := secretapp.NewService(secretRepo, folderRepo, envRepo, cipher)
-
-	userRepo := userrepo.NewRepository(db)
-	userProfileCache := usercache.NewRedisProfileCache(redisClient, cfg.Redis.KeyPrefix)
-	userNameCache := usercache.NewMemoryNameCache()
-	userSvc := userapp.NewService(userRepo, userProfileCache, userNameCache)
+	secretSvc := secretapp.NewService(secretRepo, folderRepo, envRepo, cipher, userSvc)
 
 	healthHandler := handler.NewHealthHandler()
 	userHandler := handler.NewUserHandler(userSvc)
@@ -91,9 +93,15 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 
 		// 需认证接口分组
 		auth := v1.Group("", authMiddleware)
+		authGroup := auth.Group("/auth")
+		{
+			authGroup.GET("/me", userHandler.Me)
+		}
+
 		userGroup := auth.Group("/user")
 		{
 			userGroup.POST("/update", userHandler.Update)
+			userGroup.POST("/list", userHandler.List)
 		}
 
 		// 租户管理（带参数统一 POST）

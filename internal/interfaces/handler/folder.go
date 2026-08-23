@@ -29,11 +29,14 @@ type FolderDTO struct {
 	GroupID        uuid.UUID  `json:"groupId"`
 	Code           string     `json:"code"`
 	Name           string     `json:"name"`
-	EnvID          uuid.UUID  `json:"envId"`
+	EnvID          string     `json:"envId"`
 	ParentFolderID *uuid.UUID `json:"parentFolderId"`
 	Remark         string     `json:"remark"`
 	Type           string     `json:"type"`
 	Manager        string     `json:"manager"`
+	ManagerName    string     `json:"managerName"`
+	SecretCount    int64      `json:"secretCount"`
+	FolderCount    *int64     `json:"folderCount"`
 	CreateBy       string     `json:"createBy"`
 	UpdateBy       string     `json:"updateBy"`
 	CreateAt       time.Time  `json:"createAt"`
@@ -252,7 +255,11 @@ func (h *FolderHandler) List(c *gin.Context) {
 
 	list := make([]FolderDTO, 0, len(folders))
 	for _, f := range folders {
-		list = append(list, *toFolderDTO(f))
+		// List 按 groupId 聚合后只返回一条代表记录，环境 ID 没有确定的业务含义。
+		// 保留字段以兼容前端结构，但不暴露代表记录所属的任意环境。
+		dto := toFolderDTO(f)
+		dto.EnvID = ""
+		list = append(list, *dto)
 	}
 	response.Success(c, page.Response[FolderDTO]{
 		Total: total,
@@ -303,11 +310,14 @@ func toFolderDTO(f *folderdomain.Folder) *FolderDTO {
 		GroupID:        f.GroupID,
 		Code:           f.Code,
 		Name:           f.Name,
-		EnvID:          f.EnvID,
+		EnvID:          f.EnvID.String(),
 		ParentFolderID: f.ParentFolderID,
 		Remark:         f.Remark,
 		Type:           f.Type,
 		Manager:        f.Manager,
+		ManagerName:    f.ManagerName,
+		SecretCount:    f.SecretCount,
+		FolderCount:    f.FolderCount,
 		CreateBy:       f.CreateBy,
 		UpdateBy:       f.UpdateBy,
 		CreateAt:       f.CreateAt,

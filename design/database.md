@@ -213,6 +213,44 @@ CREATE INDEX IF NOT EXISTS idx_project_info_org_code ON project_info (org_id, co
 
 ---
 
+## 表名：`project_user_relation`
+
+**说明**：项目与用户的多对多绑定关系表。`project_id` 关联 `project_info.id`；`user_id` 关联 `user_info.id`（系统内部 UUID），不是 `user_info.user_id` 中保存的外部用户标识。关联关系由代码层维护，不使用外键。
+
+```sql
+CREATE TABLE IF NOT EXISTS project_user_relation (
+    id         uuid PRIMARY KEY, -- 应用层生成
+    project_id uuid NOT NULL, -- project_info.id
+    user_id    uuid NOT NULL  -- user_info.id（系统内部 UUID）
+);
+
+-- 防止同一用户重复绑定同一项目，同时支持按项目查询用户
+CREATE UNIQUE INDEX IF NOT EXISTS uk_project_user_relation_project_user
+    ON project_user_relation (project_id, user_id);
+
+-- 支持按用户查询其绑定的全部项目
+CREATE INDEX IF NOT EXISTS idx_project_user_relation_user_project
+    ON project_user_relation (user_id, project_id);
+```
+
+**索引说明**：
+
+| 索引名 | 字段 | 说明 |
+|--------|------|------|
+| `project_user_relation_pkey` | `id` | 主键索引，根据关系 ID 定位记录，由 PostgreSQL 自动创建 |
+| `uk_project_user_relation_project_user` | `project_id, user_id` | 防止重复绑定；其最左列同时支持按项目查询用户，无需额外创建 `project_id` 索引 |
+| `idx_project_user_relation_user_project` | `user_id, project_id` | 按用户查询其绑定项目，以及校验用户是否绑定指定项目 |
+
+**业务规则**（代码层校验）：
+
+- 新增绑定时由应用层生成 `id`。
+- 绑定前必须确认项目和用户存在且未删除。
+- 同一个 `project_id + user_id` 只能存在一条绑定记录，重复绑定按幂等成功处理。
+- 本表不保存软删除及审计字段，解除绑定时直接物理删除对应记录。
+- 删除项目或用户时，由应用层同步删除相关绑定记录。
+
+---
+
 ## 表名：`environment_info`
 
 **说明**：环境表。环境归属项目之下（一个项目包含多个部署环境，如开发/测试/仿真/生产），`project_id` 关联项目（代码层面维护，无外键）。项目内编码唯一。

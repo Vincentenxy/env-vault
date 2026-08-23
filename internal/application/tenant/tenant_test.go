@@ -14,6 +14,7 @@ import (
 type stubTenantRepo struct {
 	getByCode      func(context.Context, string) (*tenantdomain.Tenant, error)
 	create         func(context.Context, *tenantdomain.Tenant) error
+	list           func(context.Context, tenantdomain.ListFilter) ([]*tenantdomain.Tenant, int64, error)
 	listAccessible func(context.Context, tenantdomain.AccessibleFilter) ([]*tenantdomain.Tenant, error)
 }
 
@@ -35,7 +36,11 @@ func (s *stubTenantRepo) GetByCode(ctx context.Context, code string) (*tenantdom
 	}
 	return nil, nil
 }
-func (s *stubTenantRepo) List(context.Context, tenantdomain.ListFilter) ([]*tenantdomain.Tenant, int64, error) {
+
+func (s *stubTenantRepo) List(ctx context.Context, filter tenantdomain.ListFilter) ([]*tenantdomain.Tenant, int64, error) {
+	if s.list != nil {
+		return s.list(ctx, filter)
+	}
 	return nil, 0, nil
 }
 func (s *stubTenantRepo) ListAccessible(ctx context.Context, filter tenantdomain.AccessibleFilter) ([]*tenantdomain.Tenant, error) {
@@ -47,6 +52,16 @@ func (s *stubTenantRepo) ListAccessible(ctx context.Context, filter tenantdomain
 
 type stubOrgRepo struct {
 	listWithProjects func(context.Context, orgdomain.WithProjectsFilter) ([]*orgdomain.OrganizationWithProjects, error)
+}
+
+type stubNameCache map[string]string
+
+func (s stubNameCache) GetNickname(_ context.Context, userID string) (string, error) {
+	name, ok := s[userID]
+	if !ok {
+		return "", errors.New("user not found")
+	}
+	return name, nil
 }
 
 func (s *stubOrgRepo) Create(context.Context, *orgdomain.Organization) error { return nil }
@@ -77,7 +92,7 @@ func TestService_Create_ManagerDefaultsToOperator(t *testing.T) {
 		},
 	}
 
-	got, err := NewService(repo, &stubOrgRepo{}).Create(context.Background(), CreateInput{
+	got, err := NewService(repo, &stubOrgRepo{}, stubNameCache{"operator-1": "管理员一"}).Create(context.Background(), CreateInput{
 		Code: "tenant-1", Name: "租户一",
 	}, "operator-1")
 	if err != nil {
@@ -85,6 +100,36 @@ func TestService_Create_ManagerDefaultsToOperator(t *testing.T) {
 	}
 	if created == nil || got.Manager != "operator-1" || created.Manager != "operator-1" {
 		t.Fatalf("manager should default to operator, got created=%+v result=%+v", created, got)
+	}
+	if got.ManagerName != "管理员一" {
+		t.Fatalf("expected manager name from cache, got %q", got.ManagerName)
+	}
+}
+
+func TestService_List_EnrichesTenantSummary(t *testing.T) {
+	repo := &stubTenantRepo{
+		list: func(context.Context, tenantdomain.ListFilter) ([]*tenantdomain.Tenant, int64, error) {
+			return []*tenantdomain.Tenant{
+				{ID: uuid.New(), Manager: "manager-1", OrgCount: 3, MemberCount: 12},
+				{ID: uuid.New(), Manager: "missing", ManagerName: "stale", OrgCount: 1, MemberCount: 2},
+			}, 2, nil
+		},
+	}
+
+	got, total, err := NewService(repo, &stubOrgRepo{}, stubNameCache{"manager-1": "管理员一"}).List(
+		context.Background(), ListInput{PageNum: 1, PageSize: 20},
+	)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if total != 2 || len(got) != 2 {
+		t.Fatalf("unexpected list result: total=%d tenants=%+v", total, got)
+	}
+	if got[0].OrgCount != 3 || got[0].MemberCount != 12 || got[0].ManagerName != "管理员一" {
+		t.Fatalf("unexpected first tenant summary: %+v", got[0])
+	}
+	if got[1].ManagerName != "" {
+		t.Fatalf("cache miss must return empty manager name, got %q", got[1].ManagerName)
 	}
 }
 
@@ -100,7 +145,7 @@ func TestService_ListWithOrgProjects(t *testing.T) {
 				t.Fatalf("expected user ID u-1, got %q", filter.UserID)
 			}
 			return []*tenantdomain.Tenant{
-				{ID: tenantOneID, Name: "租户一"},
+				{ID: tenantOneID, Name: "租户一", Manager: "manager-1"},
 				{ID: tenantTwoID, Name: "租户二"},
 			}, nil
 		},
@@ -120,7 +165,7 @@ func TestService_ListWithOrgProjects(t *testing.T) {
 		},
 	}
 
-	got, err := NewService(tenantRepo, orgRepo).ListWithOrgProjects(context.Background(), WithOrgProjectsInput{UserID: " u-1 "})
+	got, err := NewService(tenantRepo, orgRepo, nil).ListWithOrgProjects(context.Background(), WithOrgProjectsInput{UserID: " u-1 "})
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
@@ -152,7 +197,7 @@ func TestService_ListWithOrgProjects_NoTenant(t *testing.T) {
 		},
 	}
 
-	got, err := NewService(tenantRepo, orgRepo).ListWithOrgProjects(context.Background(), WithOrgProjectsInput{UserID: "u-1"})
+	got, err := NewService(tenantRepo, orgRepo, nil).ListWithOrgProjects(context.Background(), WithOrgProjectsInput{UserID: "u-1"})
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
@@ -165,7 +210,7 @@ func TestService_ListWithOrgProjects_NoTenant(t *testing.T) {
 }
 
 func TestService_ListWithOrgProjects_InvalidUserID(t *testing.T) {
-	_, err := NewService(&stubTenantRepo{}, &stubOrgRepo{}).ListWithOrgProjects(
+	_, err := NewService(&stubTenantRepo{}, &stubOrgRepo{}, nil).ListWithOrgProjects(
 		context.Background(), WithOrgProjectsInput{UserID: " "},
 	)
 	if !errors.Is(err, ErrInvalidParam) {

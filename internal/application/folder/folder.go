@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	app "env-vault/internal/application"
 	envdomain "env-vault/internal/domain/environment"
 	folderdomain "env-vault/internal/domain/folder"
 )
@@ -84,13 +85,18 @@ type IService interface {
 
 // Service 文件夹应用服务实现（依赖文件夹仓储与环境仓储做跨环境编排）
 type Service struct {
-	repo    folderdomain.Repository
-	envRepo envdomain.Repository
+	repo         folderdomain.Repository
+	envRepo      envdomain.Repository
+	nameResolver app.NicknameResolver
 }
 
 // NewService 创建文件夹应用服务
-func NewService(repo folderdomain.Repository, envRepo envdomain.Repository) *Service {
-	return &Service{repo: repo, envRepo: envRepo}
+func NewService(repo folderdomain.Repository, envRepo envdomain.Repository, resolvers ...app.NicknameResolver) *Service {
+	var resolver app.NicknameResolver
+	if len(resolvers) > 0 {
+		resolver = resolvers[0]
+	}
+	return &Service{repo: repo, envRepo: envRepo, nameResolver: resolver}
 }
 
 // 确保 Service 满足 IService 编译期断言
@@ -145,6 +151,7 @@ func (s *Service) CreateTop(ctx context.Context, in CreateTopInput, operator str
 	if err := s.repo.CreateBatch(ctx, folders); err != nil {
 		return nil, err
 	}
+	s.enrichFolders(ctx, folders)
 	return folders, nil
 }
 
@@ -226,6 +233,7 @@ func (s *Service) CreateSub(ctx context.Context, in CreateSubInput, operator str
 	if err := s.repo.CreateBatch(ctx, folders); err != nil {
 		return nil, err
 	}
+	s.enrichFolders(ctx, folders)
 	return folders, nil
 }
 
@@ -265,6 +273,7 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*folderdomain.Fold
 	if f == nil {
 		return nil, ErrNotFound
 	}
+	s.enrichFolders(ctx, []*folderdomain.Folder{f})
 	return f, nil
 }
 
@@ -305,12 +314,43 @@ func (s *Service) List(ctx context.Context, in ListInput) ([]*folderdomain.Folde
 	}
 
 	// 按 group_id 集合分页查询（每 group_id 一条代表记录）
-	return s.repo.ListByGroupIDs(ctx, groupIDs, folderdomain.ListFilter{
+	folders, total, err := s.repo.ListByGroupIDs(ctx, groupIDs, folderdomain.ListFilter{
 		Code:     in.Code,
 		Name:     in.Name,
 		PageNum:  in.PageNum,
 		PageSize: in.PageSize,
 	})
+	if err != nil {
+		return nil, 0, err
+	}
+	s.enrichFolders(ctx, folders)
+	return folders, total, nil
+}
+
+func (s *Service) enrichFolders(ctx context.Context, folders []*folderdomain.Folder) {
+	names := make(map[string]string)
+	for _, folder := range folders {
+		if folder == nil {
+			continue
+		}
+		if folder.Type == folderdomain.TypeCommon {
+			if folder.FolderCount == nil {
+				count := int64(0)
+				folder.FolderCount = &count
+			}
+		} else {
+			folder.FolderCount = nil
+		}
+
+		manager := strings.TrimSpace(folder.Manager)
+		if name, ok := names[manager]; ok {
+			folder.ManagerName = name
+			continue
+		}
+		name := app.ResolveNickname(ctx, s.nameResolver, manager)
+		names[manager] = name
+		folder.ManagerName = name
+	}
 }
 
 // projectEnvs 查询项目下全部环境，为空时返回 ErrNoEnvironment

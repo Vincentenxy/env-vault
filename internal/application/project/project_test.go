@@ -202,7 +202,7 @@ func TestService_Create_WithEnvironments(t *testing.T) {
 		},
 	}
 
-	svc := NewService(repo, envRepo)
+	svc := NewService(repo, WithEnvironmentRepository(envRepo))
 	got, err := svc.Create(context.Background(), CreateInput{
 		Code: "p-001", Name: "电商平台", OrgID: orgID,
 		Environments: []CreateEnvironmentInput{
@@ -364,5 +364,37 @@ func TestService_List_PassesFilters(t *testing.T) {
 	}
 	if captured.PageNum != 2 || captured.PageSize != 50 {
 		t.Fatalf("pagination lost: %+v", captured)
+	}
+}
+
+type nicknameResolverFunc func(context.Context, string) (string, error)
+
+func (f nicknameResolverFunc) GetNickname(ctx context.Context, userID string) (string, error) {
+	return f(ctx, userID)
+}
+
+func TestService_List_EnrichesSummary(t *testing.T) {
+	repo := &stubRepo{
+		list: func(context.Context, projdomain.ListFilter) ([]*projdomain.Project, int64, error) {
+			return []*projdomain.Project{{
+				ID: uuid.New(), Manager: "manager-1", FolderCount: 6, MemberCount: 3,
+			}}, 1, nil
+		},
+	}
+	resolver := nicknameResolverFunc(func(context.Context, string) (string, error) {
+		return "管理员一", nil
+	})
+
+	got, total, err := NewService(repo, WithNicknameResolver(resolver)).List(
+		context.Background(), ListInput{PageNum: 1, PageSize: 20},
+	)
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if total != 1 || len(got) != 1 {
+		t.Fatalf("unexpected result: total=%d projects=%+v", total, got)
+	}
+	if got[0].FolderCount != 6 || got[0].MemberCount != 3 || got[0].ManagerName != "管理员一" {
+		t.Fatalf("unexpected project summary: %+v", got[0])
 	}
 }

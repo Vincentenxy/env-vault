@@ -12,18 +12,21 @@ import (
 
 // Tenant 租户领域模型。租户是系统内最顶级实体（类比公司）。
 type Tenant struct {
-	ID        uuid.UUID
-	Code      string
-	Name      string
-	Remark    string
-	Manager   string
-	IsDeleted bool
-	DeleteAt  *time.Time
-	DeleteBy  string
-	CreateBy  string
-	UpdateBy  string
-	CreateAt  time.Time
-	UpdateAt  time.Time
+	ID          uuid.UUID
+	Code        string
+	Name        string
+	Remark      string
+	Manager     string
+	ManagerName string
+	OrgCount    int64
+	MemberCount int64
+	IsDeleted   bool
+	DeleteAt    *time.Time
+	DeleteBy    string
+	CreateBy    string
+	UpdateBy    string
+	CreateAt    time.Time
+	UpdateAt    time.Time
 }
 
 // ListFilter 租户列表查询过滤条件

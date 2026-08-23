@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	app "env-vault/internal/application"
 	orgdomain "env-vault/internal/domain/organization"
 	tenantdomain "env-vault/internal/domain/tenant"
 )
@@ -60,13 +61,18 @@ type IService interface {
 
 // Service 租户应用服务
 type Service struct {
-	repo    tenantdomain.Repository
-	orgRepo orgdomain.Repository
+	repo         tenantdomain.Repository
+	orgRepo      orgdomain.Repository
+	nameResolver app.NicknameResolver
 }
 
 // NewService 创建租户应用服务
-func NewService(repo tenantdomain.Repository, orgRepo orgdomain.Repository) *Service {
-	return &Service{repo: repo, orgRepo: orgRepo}
+func NewService(repo tenantdomain.Repository, orgRepo orgdomain.Repository, resolvers ...app.NicknameResolver) *Service {
+	var resolver app.NicknameResolver
+	if len(resolvers) > 0 {
+		resolver = resolvers[0]
+	}
+	return &Service{repo: repo, orgRepo: orgRepo, nameResolver: resolver}
 }
 
 var _ IService = (*Service)(nil)
@@ -101,6 +107,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput, operator string) (
 	if err := s.repo.Create(ctx, t); err != nil {
 		return nil, err
 	}
+	s.setManagerName(ctx, t)
 	return t, nil
 }
 
@@ -122,6 +129,7 @@ func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) (
 	if err := s.repo.Update(ctx, t); err != nil {
 		return nil, err
 	}
+	s.setManagerName(ctx, t)
 	return t, nil
 }
 
@@ -147,24 +155,31 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*tenantdomain.Tena
 	if t == nil {
 		return nil, ErrNotFound
 	}
+	s.setManagerName(ctx, t)
 	return t, nil
 }
 
-// List 分页查询租户列表
+// List 分页查询租户列表；分页参数已由 Handler 归一化，Service 仅透传。
 func (s *Service) List(ctx context.Context, in ListInput) ([]*tenantdomain.Tenant, int64, error) {
-	if in.PageNum <= 0 {
-		in.PageNum = 1
-	}
-	if in.PageSize <= 0 || in.PageSize > 200 {
-		in.PageSize = 20
-	}
-
-	return s.repo.List(ctx, tenantdomain.ListFilter{
+	tenants, total, err := s.repo.List(ctx, tenantdomain.ListFilter{
 		Code:     in.Code,
 		Name:     in.Name,
 		PageNum:  in.PageNum,
 		PageSize: in.PageSize,
 	})
+	if err != nil {
+		return nil, 0, err
+	}
+	for _, tenant := range tenants {
+		s.setManagerName(ctx, tenant)
+	}
+	return tenants, total, nil
+}
+
+func (s *Service) setManagerName(ctx context.Context, tenant *tenantdomain.Tenant) {
+	if tenant != nil {
+		tenant.ManagerName = app.ResolveNickname(ctx, s.nameResolver, tenant.Manager)
+	}
 }
 
 // ListWithOrgProjects 查询租户及其组织和项目；当前返回全部，后续按用户权限过滤。

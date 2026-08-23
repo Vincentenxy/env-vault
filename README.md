@@ -259,3 +259,8 @@ auth.POST("/user/update", userHandler.Update)   // 需认证
 ## 开发规范
 
 所有开发必须遵循 [AGENT.md](AGENT.md) 中的完整规范。
+
+
+## 相关连接
+
+- hashicorp/vault/shamir 算法 

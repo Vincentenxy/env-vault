@@ -18,6 +18,7 @@ import (
 
 type stubTenantService struct {
 	listWithOrgProjects func(context.Context, tenantapp.WithOrgProjectsInput) ([]*tenantdomain.TenantWithOrgProjects, error)
+	list                func(context.Context, tenantapp.ListInput) ([]*tenantdomain.Tenant, int64, error)
 }
 
 func (s *stubTenantService) Create(context.Context, tenantapp.CreateInput, string) (*tenantdomain.Tenant, error) {
@@ -30,7 +31,11 @@ func (s *stubTenantService) Delete(context.Context, uuid.UUID, string) error { r
 func (s *stubTenantService) GetByID(context.Context, uuid.UUID) (*tenantdomain.Tenant, error) {
 	return nil, nil
 }
-func (s *stubTenantService) List(context.Context, tenantapp.ListInput) ([]*tenantdomain.Tenant, int64, error) {
+
+func (s *stubTenantService) List(ctx context.Context, in tenantapp.ListInput) ([]*tenantdomain.Tenant, int64, error) {
+	if s.list != nil {
+		return s.list(ctx, in)
+	}
 	return nil, 0, nil
 }
 func (s *stubTenantService) ListWithOrgProjects(ctx context.Context, in tenantapp.WithOrgProjectsInput) ([]*tenantdomain.TenantWithOrgProjects, error) {
@@ -50,8 +55,59 @@ func newTenantTestEngine(svc tenantapp.IService, user *userctx.User) *gin.Engine
 		c.Next()
 	})
 	h := NewTenantHandler(svc)
+	r.POST("/api/v1/tenant/list", h.List)
 	r.GET("/api/v1/tenant/withOrgProject", h.WithOrgProject)
 	return r
+}
+
+func TestTenantHandler_List_SummaryFields(t *testing.T) {
+	tenantID := uuid.New()
+	svc := &stubTenantService{
+		list: func(context.Context, tenantapp.ListInput) ([]*tenantdomain.Tenant, int64, error) {
+			return []*tenantdomain.Tenant{{
+				ID: tenantID, Code: "tenant-1", Name: "租户一", Manager: "manager-1",
+				ManagerName: "管理员一", OrgCount: 3, MemberCount: 12,
+			}}, 1, nil
+		},
+	}
+	r := newTenantTestEngine(svc, &userctx.User{UserID: "u-1"})
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/tenant/list", map[string]any{})
+	body := decodeBody(t, w)
+	data := body["data"].(map[string]any)
+	item := data["list"].([]any)[0].(map[string]any)
+	if item["orgCount"] != float64(3) || item["memberCount"] != float64(12) || item["managerName"] != "管理员一" {
+		t.Fatalf("unexpected tenant summary fields: %+v", item)
+	}
+}
+
+func TestTenantHandler_List_NormalizesPagination(t *testing.T) {
+	tests := []struct {
+		name         string
+		body         map[string]any
+		wantPageNum  int
+		wantPageSize int
+	}{
+		{name: "defaults", body: map[string]any{}, wantPageNum: 1, wantPageSize: 20},
+		{name: "negative page and zero size", body: map[string]any{"pageNum": -3, "pageSize": 0}, wantPageNum: 1, wantPageSize: 20},
+		{name: "clamp max size", body: map[string]any{"pageNum": 2, "pageSize": 9999}, wantPageNum: 2, wantPageSize: 200},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &stubTenantService{list: func(_ context.Context, in tenantapp.ListInput) ([]*tenantdomain.Tenant, int64, error) {
+				if in.PageNum != tt.wantPageNum || in.PageSize != tt.wantPageSize {
+					t.Fatalf("unexpected normalized pagination: %+v", in)
+				}
+				return []*tenantdomain.Tenant{}, 0, nil
+			}}
+			r := newTenantTestEngine(svc, &userctx.User{UserID: "u-1"})
+			w := doJSONP(t, r, http.MethodPost, "/api/v1/tenant/list", tt.body)
+			body := decodeBody(t, w)
+			if body["code"].(float64) != 0 {
+				t.Fatalf("expected success, got %+v", body)
+			}
+		})
+	}
 }
 
 func TestTenantHandler_WithOrgProject_Success(t *testing.T) {

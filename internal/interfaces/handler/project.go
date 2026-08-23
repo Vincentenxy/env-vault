@@ -25,16 +25,19 @@ func NewProjectHandler(svc projapp.IService) *ProjectHandler {
 
 // ProjectDTO 项目响应数据（JSON 小驼峰）
 type ProjectDTO struct {
-	ID       uuid.UUID `json:"id"`
-	Code     string    `json:"code"`
-	Name     string    `json:"name"`
-	Remark   string    `json:"remark"`
-	OrgID    uuid.UUID `json:"orgId"`
-	Manager  string    `json:"manager"`
-	CreateBy string    `json:"createBy"`
-	UpdateBy string    `json:"updateBy"`
-	CreateAt time.Time `json:"createAt"`
-	UpdateAt time.Time `json:"updateAt"`
+	ID          uuid.UUID `json:"id"`
+	Code        string    `json:"code"`
+	Name        string    `json:"name"`
+	Remark      string    `json:"remark"`
+	OrgID       uuid.UUID `json:"orgId"`
+	Manager     string    `json:"manager"`
+	ManagerName string    `json:"managerName"`
+	FolderCount int64     `json:"folderCount"`
+	MemberCount int64     `json:"memberCount"`
+	CreateBy    string    `json:"createBy"`
+	UpdateBy    string    `json:"updateBy"`
+	CreateAt    time.Time `json:"createAt"`
+	UpdateAt    time.Time `json:"updateAt"`
 }
 
 // CreateRequest 创建项目请求
@@ -240,15 +243,18 @@ func (h *ProjectHandler) respondError(c *gin.Context, err error) {
 // toProjectDTO 领域模型转响应 DTO
 func toProjectDTO(p *projdomain.Project) *ProjectDTO {
 	return &ProjectDTO{
-		ID:       p.ID,
-		Code:     p.Code,
-		Name:     p.Name,
-		Remark:   p.Remark,
-		OrgID:    p.OrgID,
-		Manager:  p.Manager,
-		CreateBy: p.CreateBy,
-		UpdateBy: p.UpdateBy,
-		CreateAt: p.CreateAt,
-		UpdateAt: p.UpdateAt,
+		ID:          p.ID,
+		Code:        p.Code,
+		Name:        p.Name,
+		Remark:      p.Remark,
+		OrgID:       p.OrgID,
+		Manager:     p.Manager,
+		ManagerName: p.ManagerName,
+		FolderCount: p.FolderCount,
+		MemberCount: p.MemberCount,
+		CreateBy:    p.CreateBy,
+		UpdateBy:    p.UpdateBy,
+		CreateAt:    p.CreateAt,
+		UpdateAt:    p.UpdateAt,
 	}
 }

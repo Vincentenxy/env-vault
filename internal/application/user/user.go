@@ -32,9 +32,19 @@ type UpdateInput struct {
 	OrgID    uuid.UUID
 }
 
+// ListInput 用户列表查询入参，筛选优先级为 projectId > orgId > tenantId > undistributed。
+type ListInput struct {
+	TenantID      uuid.UUID
+	OrgID         uuid.UUID
+	ProjectID     uuid.UUID
+	Undistributed bool
+}
+
 // IService 用户应用服务接口。
 type IService interface {
 	Update(ctx context.Context, in UpdateInput) (*userdomain.User, error)
+	List(ctx context.Context, in ListInput) ([]*userdomain.User, error)
+	GetProfile(ctx context.Context, userID string) (*userdomain.User, error)
 	GetNickname(ctx context.Context, userID string) (string, error)
 	WarmUp(ctx context.Context) (int, error)
 }
@@ -53,6 +63,62 @@ func NewService(repo userdomain.Repository, profileCache userdomain.ProfileCache
 }
 
 var _ IService = (*Service)(nil)
+
+// List 查询用户列表。查询只读取 id/user_id/nickname，避免敏感资料进入接口链路。
+// TODO(user-list-cache): 用户新增/删除及项目绑定/解绑接口落地后，增加按筛选维度的 Redis 缓存，
+// 并由这些写接口统一调用缓存失效方法，避免返回过期的用户归属或项目成员数据。
+func (s *Service) List(ctx context.Context, in ListInput) ([]*userdomain.User, error) {
+	filter := userdomain.ListFilter{}
+	switch {
+	case in.ProjectID != uuid.Nil:
+		filter.ProjectID = in.ProjectID
+	case in.OrgID != uuid.Nil:
+		filter.OrgID = in.OrgID
+	case in.TenantID != uuid.Nil:
+		filter.TenantID = in.TenantID
+	case in.Undistributed:
+		filter.Undistributed = true
+	}
+	return s.repo.List(ctx, filter)
+}
+
+// GetProfile 按 JWT 中的外部用户 ID 查询用户资料，使用 Redis 缓存并在未命中时回源数据库。
+func (s *Service) GetProfile(ctx context.Context, userID string) (*userdomain.User, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, ErrInvalidParam
+	}
+
+	if s.profileCache != nil {
+		cached, err := s.profileCache.Get(ctx, userID)
+		if err != nil {
+			logger.Warn(ctx, "query user redis cache failed", zap.String("userId", userID), zap.Error(err))
+		} else if cached != nil {
+			if s.nameCache != nil {
+				s.nameCache.Set(cached.UserID, cached.Nickname)
+			}
+			return cached, nil
+		}
+	}
+
+	user, err := s.repo.GetByUserID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if user == nil {
+		return nil, ErrNotFound
+	}
+
+	if s.nameCache != nil {
+		s.nameCache.Set(user.UserID, user.Nickname)
+	}
+	if s.profileCache != nil {
+		if err := s.profileCache.Set(ctx, user); err != nil {
+			logger.Warn(ctx, "backfill user redis cache failed", zap.String("userId", userID), zap.Error(err))
+		}
+	}
+	return user, nil
+}
 
 // Update 按 JWT 中的外部用户 ID 更新已存在用户，并同步刷新本实例缓存和 Redis。
 func (s *Service) Update(ctx context.Context, in UpdateInput) (*userdomain.User, error) {
@@ -120,33 +186,9 @@ func (s *Service) GetNickname(ctx context.Context, userID string) (string, error
 		}
 	}
 
-	if s.profileCache != nil {
-		cached, err := s.profileCache.Get(ctx, userID)
-		if err != nil {
-			logger.Warn(ctx, "query user redis cache failed", zap.String("userId", userID), zap.Error(err))
-		} else if cached != nil {
-			if s.nameCache != nil {
-				s.nameCache.Set(userID, cached.Nickname)
-			}
-			return cached.Nickname, nil
-		}
-	}
-
-	user, err := s.repo.GetByUserID(ctx, userID)
+	user, err := s.GetProfile(ctx, userID)
 	if err != nil {
 		return "", err
-	}
-	if user == nil {
-		return "", ErrNotFound
-	}
-
-	if s.nameCache != nil {
-		s.nameCache.Set(userID, user.Nickname)
-	}
-	if s.profileCache != nil {
-		if err := s.profileCache.Set(ctx, user); err != nil {
-			logger.Warn(ctx, "backfill user redis cache failed", zap.String("userId", userID), zap.Error(err))
-		}
 	}
 	return user.Nickname, nil
 }

@@ -15,6 +15,7 @@ type stubUserRepo struct {
 	updateByUserID      func(ctx context.Context, user *userdomain.User) error
 	getByUserID         func(ctx context.Context, userID string) (*userdomain.User, error)
 	getByTenantUsername func(ctx context.Context, tenantID uuid.UUID, username string) (*userdomain.User, error)
+	list                func(ctx context.Context, filter userdomain.ListFilter) ([]*userdomain.User, error)
 	listAll             func(ctx context.Context) ([]*userdomain.User, error)
 }
 
@@ -35,6 +36,13 @@ func (s *stubUserRepo) GetByUserID(ctx context.Context, userID string) (*userdom
 func (s *stubUserRepo) GetByTenantUsername(ctx context.Context, tenantID uuid.UUID, username string) (*userdomain.User, error) {
 	if s.getByTenantUsername != nil {
 		return s.getByTenantUsername(ctx, tenantID, username)
+	}
+	return nil, nil
+}
+
+func (s *stubUserRepo) List(ctx context.Context, filter userdomain.ListFilter) ([]*userdomain.User, error) {
+	if s.list != nil {
+		return s.list(ctx, filter)
 	}
 	return nil, nil
 }
@@ -104,6 +112,118 @@ func testDomainUser(userID string) *userdomain.User {
 	return &userdomain.User{
 		ID: uuid.New(), UserID: userID, Nickname: "old name", Username: "old-login",
 		TenantID: uuid.New(), OrgID: uuid.New(), CreateAt: now, UpdateAt: now,
+	}
+}
+
+func TestService_List_AppliesFilterPriority(t *testing.T) {
+	tenantID, orgID, projectID := uuid.New(), uuid.New(), uuid.New()
+	tests := []struct {
+		name string
+		in   ListInput
+		want userdomain.ListFilter
+	}{
+		{
+			name: "project over all filters",
+			in:   ListInput{TenantID: tenantID, OrgID: orgID, ProjectID: projectID, Undistributed: true},
+			want: userdomain.ListFilter{ProjectID: projectID},
+		},
+		{
+			name: "organization over tenant and undistributed",
+			in:   ListInput{TenantID: tenantID, OrgID: orgID, Undistributed: true},
+			want: userdomain.ListFilter{OrgID: orgID},
+		},
+		{
+			name: "tenant over undistributed",
+			in:   ListInput{TenantID: tenantID, Undistributed: true},
+			want: userdomain.ListFilter{TenantID: tenantID},
+		},
+		{
+			name: "undistributed",
+			in:   ListInput{Undistributed: true},
+			want: userdomain.ListFilter{Undistributed: true},
+		},
+		{
+			name: "no filter returns all",
+			in:   ListInput{},
+			want: userdomain.ListFilter{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			user := &userdomain.User{ID: uuid.New(), UserID: "u-1", Nickname: "User One"}
+			repo := &stubUserRepo{list: func(_ context.Context, filter userdomain.ListFilter) ([]*userdomain.User, error) {
+				if filter != tt.want {
+					t.Fatalf("unexpected filter: got=%+v want=%+v", filter, tt.want)
+				}
+				return []*userdomain.User{user}, nil
+			}}
+
+			got, err := NewService(repo, nil, nil).List(context.Background(), tt.in)
+			if err != nil || len(got) != 1 || got[0] != user {
+				t.Fatalf("unexpected result users=%+v err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestService_GetProfile_UsesCacheAndFallsBackToDatabase(t *testing.T) {
+	t.Run("redis hit", func(t *testing.T) {
+		cached := testDomainUser("u-1")
+		profileCache := &stubProfileCache{getFn: func(_ context.Context, userID string) (*userdomain.User, error) {
+			if userID != "u-1" {
+				t.Fatalf("unexpected user id: %q", userID)
+			}
+			return cached, nil
+		}}
+		repo := &stubUserRepo{getByUserID: func(context.Context, string) (*userdomain.User, error) {
+			t.Fatal("database must not be queried on cache hit")
+			return nil, nil
+		}}
+		nameCache := newStubNameCache()
+
+		got, err := NewService(repo, profileCache, nameCache).GetProfile(context.Background(), " u-1 ")
+		if err != nil || got != cached {
+			t.Fatalf("unexpected profile=%+v err=%v", got, err)
+		}
+		if name, ok := nameCache.Get("u-1"); !ok || name != cached.Nickname {
+			t.Fatalf("name cache not backfilled: name=%q ok=%v", name, ok)
+		}
+	})
+
+	t.Run("redis failure falls back to database", func(t *testing.T) {
+		databaseUser := testDomainUser("u-2")
+		cacheSet := false
+		profileCache := &stubProfileCache{
+			getFn: func(context.Context, string) (*userdomain.User, error) {
+				return nil, errors.New("redis unavailable")
+			},
+			setFn: func(_ context.Context, user *userdomain.User) error {
+				cacheSet = user == databaseUser
+				return nil
+			},
+		}
+		repo := &stubUserRepo{getByUserID: func(_ context.Context, userID string) (*userdomain.User, error) {
+			if userID != "u-2" {
+				t.Fatalf("unexpected user id: %q", userID)
+			}
+			return databaseUser, nil
+		}}
+
+		got, err := NewService(repo, profileCache, newStubNameCache()).GetProfile(context.Background(), "u-2")
+		if err != nil || got != databaseUser || !cacheSet {
+			t.Fatalf("unexpected profile=%+v cacheSet=%v err=%v", got, cacheSet, err)
+		}
+	})
+}
+
+func TestService_GetProfile_ValidatesAndHandlesMissingUser(t *testing.T) {
+	svc := NewService(&stubUserRepo{}, nil, nil)
+	if _, err := svc.GetProfile(context.Background(), "  "); !errors.Is(err, ErrInvalidParam) {
+		t.Fatalf("expected ErrInvalidParam, got %v", err)
+	}
+	if _, err := svc.GetProfile(context.Background(), "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
 

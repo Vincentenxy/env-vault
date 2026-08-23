@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"sort"
 	"strings"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	secretapp "env-vault/internal/application/secret"
+	"env-vault/pkg/page"
 	"env-vault/pkg/response"
 )
 
@@ -85,13 +87,12 @@ type DeleteSecretRequest struct {
 	GroupID uuid.UUID `json:"groupId"`
 }
 
-// SecretHistoryRequest 历史查询请求，优先级 secretId > batchId > groupId
+// SecretHistoryRequest 历史查询请求，优先级 groupId > secretId > batchId
 type SecretHistoryRequest struct {
 	SecretID uuid.UUID `json:"secretId"`
 	BatchID  uuid.UUID `json:"batchId"`
 	GroupID  uuid.UUID `json:"groupId"`
-	PageNum  int       `json:"pageNum"`
-	PageSize int       `json:"pageSize"`
+	page.Request
 }
 
 // SecretValueDTO 单个环境下的值（解密后，values 的 key 即 env code）
@@ -105,23 +106,29 @@ type SecretValueDTO struct {
 
 // SecretHistoryDTO 单条解密后的 value 历史版本
 type SecretHistoryDTO struct {
-	ID        uuid.UUID `json:"id"`
-	SecretID  uuid.UUID `json:"secretId"`
-	BatchID   uuid.UUID `json:"batchId"`
-	GroupID   uuid.UUID `json:"groupId"`
-	FolderID  uuid.UUID `json:"folderId"`
-	EnvCode   string    `json:"envCode"`
-	Value     string    `json:"value"`
-	ValueType string    `json:"valueType"`
-	Version   int       `json:"version"`
-	CommitMsg string    `json:"commitMsg"`
-	CreateBy  string    `json:"createBy"`
-	CreateAt  time.Time `json:"createAt"`
+	ID           uuid.UUID `json:"id"`
+	SecretID     uuid.UUID `json:"secretId"`
+	BatchID      uuid.UUID `json:"batchId"`
+	GroupID      uuid.UUID `json:"groupId"`
+	FolderID     uuid.UUID `json:"folderId"`
+	EnvCode      string    `json:"envCode"`
+	Value        string    `json:"value"`
+	ValueType    string    `json:"valueType"`
+	Version      int       `json:"version"`
+	CommitMsg    string    `json:"commitMsg"`
+	CreateBy     string    `json:"createBy"`
+	CreateByName string    `json:"createByName"`
+	CreateAt     time.Time `json:"createAt"`
 }
 
-type SecretHistoryResponse struct {
-	Total       int64              `json:"total"`
-	HistoryList []SecretHistoryDTO `json:"historyList"`
+type SecretGroupHistoryResponse map[string]page.Response[SecretHistoryDTO]
+
+// SecretBatchHistoryDTO 一次批次中一个逻辑 Secret 的修改结果。
+type SecretBatchHistoryDTO struct {
+	GroupID  uuid.UUID                   `json:"groupId"`
+	Key      string                      `json:"key"`
+	Remark   string                      `json:"remark"`
+	Versions map[string]SecretHistoryDTO `json:"versions"`
 }
 
 // SecretViewDTO 一个 secret 的聚合视图（values 的 key 为 env code）
@@ -172,6 +179,12 @@ func (h *SecretHandler) Create(c *gin.Context) {
 			Remark:  s.Remark,
 		})
 	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].Key != list[j].Key {
+			return list[i].Key < list[j].Key
+		}
+		return list[i].GroupID.String() < list[j].GroupID.String()
+	})
 	response.Success(c, list)
 }
 
@@ -245,8 +258,9 @@ func (h *SecretHandler) History(c *gin.Context) {
 		response.BadRequest(c, err)
 		return
 	}
+	req.Normalize()
 
-	views, total, err := h.svc.History(c, secretapp.HistoryInput{
+	result, err := h.svc.History(c, secretapp.HistoryInput{
 		SecretID: req.SecretID,
 		BatchID:  req.BatchID,
 		GroupID:  req.GroupID,
@@ -258,24 +272,71 @@ func (h *SecretHandler) History(c *gin.Context) {
 		return
 	}
 
-	list := make([]SecretHistoryDTO, 0, len(views))
-	for _, view := range views {
-		list = append(list, SecretHistoryDTO{
-			ID:        view.ID,
-			SecretID:  view.SecretID,
-			BatchID:   view.BatchID,
-			GroupID:   view.GroupID,
-			FolderID:  view.FolderID,
-			EnvCode:   view.EnvCode,
-			Value:     view.Value,
-			ValueType: view.ValueType,
-			Version:   view.Version,
-			CommitMsg: view.CommitMsg,
-			CreateBy:  view.CreateBy,
-			CreateAt:  view.CreateAt,
+	if result.BatchHistories != nil {
+		// Owner 已确认：batchId 模式返回完整批次聚合数组，不使用分页响应。
+		response.Success(c, toSecretBatchHistoryDTOs(result.BatchHistories))
+		return
+	}
+
+	if result.EnvironmentHistories != nil {
+		grouped := make(SecretGroupHistoryResponse, len(result.EnvironmentHistories))
+		for envID, historyPage := range result.EnvironmentHistories {
+			grouped[envID.String()] = page.Response[SecretHistoryDTO]{
+				Total: historyPage.Total,
+				List:  toSecretHistoryDTOs(historyPage.HistoryList),
+			}
+		}
+		response.Success(c, grouped)
+		return
+	}
+
+	response.Success(c, page.Response[SecretHistoryDTO]{
+		Total: result.Total,
+		List:  toSecretHistoryDTOs(result.HistoryList),
+	})
+}
+
+func toSecretBatchHistoryDTOs(items []secretapp.BatchHistoryView) []SecretBatchHistoryDTO {
+	list := make([]SecretBatchHistoryDTO, 0, len(items))
+	for _, item := range items {
+		versions := make(map[string]SecretHistoryDTO, len(item.Versions))
+		for envID, version := range item.Versions {
+			versions[envID.String()] = toSecretHistoryDTO(version)
+		}
+		list = append(list, SecretBatchHistoryDTO{
+			GroupID:  item.GroupID,
+			Key:      item.Key,
+			Remark:   item.Remark,
+			Versions: versions,
 		})
 	}
-	response.Success(c, SecretHistoryResponse{Total: total, HistoryList: list})
+	return list
+}
+
+func toSecretHistoryDTOs(views []secretapp.HistoryView) []SecretHistoryDTO {
+	list := make([]SecretHistoryDTO, 0, len(views))
+	for _, view := range views {
+		list = append(list, toSecretHistoryDTO(view))
+	}
+	return list
+}
+
+func toSecretHistoryDTO(view secretapp.HistoryView) SecretHistoryDTO {
+	return SecretHistoryDTO{
+		ID:           view.ID,
+		SecretID:     view.SecretID,
+		BatchID:      view.BatchID,
+		GroupID:      view.GroupID,
+		FolderID:     view.FolderID,
+		EnvCode:      view.EnvCode,
+		Value:        view.Value,
+		ValueType:    view.ValueType,
+		Version:      view.Version,
+		CommitMsg:    view.CommitMsg,
+		CreateBy:     view.CreateBy,
+		CreateByName: view.CreateByName,
+		CreateAt:     view.CreateAt,
+	}
 }
 
 // List 查询 secrets 列表。请求传 folderGroupId 时走旧模式，否则走 projectId + folderCode + envList + keyList 新模式。
@@ -350,7 +411,6 @@ func (h *SecretHandler) respondError(c *gin.Context, err error) {
 		errors.Is(err, secretapp.ErrKeyExists),
 		errors.Is(err, secretapp.ErrDecrypt),
 		errors.Is(err, secretapp.ErrSecretNotUnderGroup),
-		errors.Is(err, secretapp.ErrHistoryGroupNotSupported),
 		errors.Is(err, secretapp.ErrVersionConflict):
 		// 通用业务错误：统一 code=-1，msg 由 service 给出
 		response.Error(c, err.Error())

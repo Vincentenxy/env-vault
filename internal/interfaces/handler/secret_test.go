@@ -23,7 +23,7 @@ type stubSecretService struct {
 	listByFolder func(ctx context.Context, folderGroupID uuid.UUID) ([]secretapp.SecretView, error)
 	listFn       func(ctx context.Context, in secretapp.ListInput) ([]secretapp.SecretView, error)
 	getByGroup   func(ctx context.Context, groupID uuid.UUID) (*secretapp.SecretView, error)
-	historyFn    func(ctx context.Context, in secretapp.HistoryInput) ([]secretapp.HistoryView, int64, error)
+	historyFn    func(ctx context.Context, in secretapp.HistoryInput) (*secretapp.HistoryResult, error)
 	deleteFn     func(ctx context.Context, groupID uuid.UUID, operator string) error
 }
 
@@ -60,11 +60,11 @@ func (s *stubSecretService) GetByGroup(ctx context.Context, groupID uuid.UUID) (
 	}
 	return nil, nil
 }
-func (s *stubSecretService) History(ctx context.Context, in secretapp.HistoryInput) ([]secretapp.HistoryView, int64, error) {
+func (s *stubSecretService) History(ctx context.Context, in secretapp.HistoryInput) (*secretapp.HistoryResult, error) {
 	if s.historyFn != nil {
 		return s.historyFn(ctx, in)
 	}
-	return nil, 0, nil
+	return &secretapp.HistoryResult{}, nil
 }
 func (s *stubSecretService) Delete(ctx context.Context, groupID uuid.UUID, operator string) error {
 	if s.deleteFn != nil {
@@ -265,13 +265,13 @@ func TestSecretHandler_Create_BatchMultiple(t *testing.T) {
 	if len(list) != 2 {
 		t.Fatalf("expected 2 created, got %d", len(list))
 	}
-	// 响应按 svc 返回顺序映射 groupId / key / remark
+	// Secret 展示列表统一按 key 升序。
 	got0 := list[0].(map[string]any)
 	got1 := list[1].(map[string]any)
-	if got0["groupId"].(string) != gA.String() || got0["key"].(string) != "DB_PASSWORD" || got0["remark"].(string) != "r1" {
+	if got0["groupId"].(string) != gB.String() || got0["key"].(string) != "API_TOKEN" || got0["remark"].(string) != "r2" {
 		t.Fatalf("response[0] wrong: %+v", got0)
 	}
-	if got1["groupId"].(string) != gB.String() || got1["key"].(string) != "API_TOKEN" || got1["remark"].(string) != "r2" {
+	if got1["groupId"].(string) != gA.String() || got1["key"].(string) != "DB_PASSWORD" || got1["remark"].(string) != "r1" {
 		t.Fatalf("response[1] wrong: %+v", got1)
 	}
 }
@@ -432,22 +432,24 @@ func TestSecretHandler_History_Success(t *testing.T) {
 	groupID := uuid.New()
 	createdAt := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
 	svc := &stubSecretService{
-		historyFn: func(ctx context.Context, in secretapp.HistoryInput) ([]secretapp.HistoryView, int64, error) {
-			if in.SecretID != secretID || in.BatchID != batchID || in.GroupID != groupID || in.PageNum != 2 || in.PageSize != 5 {
+		historyFn: func(ctx context.Context, in secretapp.HistoryInput) (*secretapp.HistoryResult, error) {
+			if in.SecretID != secretID || in.BatchID != batchID || in.GroupID != uuid.Nil || in.PageNum != 2 || in.PageSize != 5 {
 				t.Fatalf("history input not passed: %+v", in)
 			}
-			return []secretapp.HistoryView{{
-				ID: uuid.New(), SecretID: secretID, BatchID: batchID, GroupID: groupID,
-				FolderID: uuid.New(), EnvCode: "prod", Value: "secret-v2", ValueType: "string",
-				Version: 2, CommitMsg: "rotate", CreateBy: "u-1", CreateAt: createdAt,
-			}}, 6, nil
+			return &secretapp.HistoryResult{
+				Total: 6,
+				HistoryList: []secretapp.HistoryView{{
+					ID: uuid.New(), SecretID: secretID, BatchID: batchID, GroupID: groupID,
+					FolderID: uuid.New(), EnvCode: "prod", Value: "secret-v2", ValueType: "string",
+					Version: 2, CommitMsg: "rotate", CreateBy: "u-1", CreateByName: "创建人一", CreateAt: createdAt,
+				}},
+			}, nil
 		},
 	}
 	r := newSecretTestEngine(svc, testUser())
 	w := doJSONP(t, r, http.MethodPost, "/api/v1/secret/history", map[string]any{
 		"secretId": secretID,
 		"batchId":  batchID,
-		"groupId":  groupID,
 		"pageNum":  2,
 		"pageSize": 5,
 	})
@@ -459,26 +461,152 @@ func TestSecretHandler_History_Success(t *testing.T) {
 	if data["total"].(float64) != 6 {
 		t.Fatalf("unexpected total: %+v", data)
 	}
-	history := data["historyList"].([]any)[0].(map[string]any)
+	if _, exists := data["historyList"]; exists {
+		t.Fatalf("paginated response must use list: %+v", data)
+	}
+	history := data["list"].([]any)[0].(map[string]any)
 	if history["secretId"].(string) != secretID.String() || history["batchId"].(string) != batchID.String() {
 		t.Fatalf("history identity fields missing: %+v", history)
 	}
 	if history["value"].(string) != "secret-v2" || history["version"].(float64) != 2 || history["commitMsg"].(string) != "rotate" {
 		t.Fatalf("unexpected history data: %+v", history)
 	}
+	if history["createBy"].(string) != "u-1" || history["createByName"].(string) != "创建人一" {
+		t.Fatalf("creator fields missing: %+v", history)
+	}
 }
 
-func TestSecretHandler_History_GroupNotSupported(t *testing.T) {
+func TestSecretHandler_History_BatchGroupedResponse(t *testing.T) {
+	batchID := uuid.New()
+	groupID := uuid.New()
+	envID := uuid.New()
+	secretID := uuid.New()
+	historyID := uuid.New()
+	folderID := uuid.New()
+	createdAt := time.Date(2026, 8, 23, 11, 40, 49, 0, time.FixedZone("CST", 8*60*60))
 	svc := &stubSecretService{
-		historyFn: func(ctx context.Context, in secretapp.HistoryInput) ([]secretapp.HistoryView, int64, error) {
-			return nil, 0, secretapp.ErrHistoryGroupNotSupported
+		historyFn: func(_ context.Context, in secretapp.HistoryInput) (*secretapp.HistoryResult, error) {
+			if in.BatchID != batchID || in.GroupID != uuid.Nil || in.SecretID != uuid.Nil {
+				t.Fatalf("history input not passed: %+v", in)
+			}
+			return &secretapp.HistoryResult{BatchHistories: []secretapp.BatchHistoryView{
+				{
+					GroupID: groupID,
+					Key:     "OB_PROXY_HOST",
+					Remark:  "ob proxy address",
+					Versions: map[uuid.UUID]secretapp.HistoryView{
+						envID: {
+							ID: historyID, SecretID: secretID, BatchID: batchID, GroupID: groupID,
+							FolderID: folderID, EnvCode: "prod", Value: "192.168.5.5333", Version: 5,
+							CommitMsg: "rotate", CreateBy: "10121993", CreateByName: "creator", CreateAt: createdAt,
+						},
+					},
+				},
+			}}, nil
+		},
+	}
+
+	r := newSecretTestEngine(svc, testUser())
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/secret/history", map[string]any{"batchId": batchID})
+	body := decodeBody(t, w)
+	if body["code"].(float64) != 0 {
+		t.Fatalf("expected success, got %+v", body)
+	}
+	data, ok := body["data"].([]any)
+	if !ok || len(data) != 1 {
+		t.Fatalf("batch response data must be an array: %+v", body["data"])
+	}
+	item := data[0].(map[string]any)
+	if item["groupId"].(string) != groupID.String() || item["key"].(string) != "OB_PROXY_HOST" || item["remark"].(string) != "ob proxy address" {
+		t.Fatalf("unexpected batch item: %+v", item)
+	}
+	version := item["versions"].(map[string]any)[envID.String()].(map[string]any)
+	if version["id"].(string) != historyID.String() || version["secretId"].(string) != secretID.String() || version["folderId"].(string) != folderID.String() {
+		t.Fatalf("history identity fields missing: %+v", version)
+	}
+	if version["value"].(string) != "192.168.5.5333" || version["version"].(float64) != 5 || version["createByName"].(string) != "creator" {
+		t.Fatalf("unexpected environment version: %+v", version)
+	}
+}
+
+func TestSecretHandler_History_GroupedByEnvironmentID(t *testing.T) {
+	groupID := uuid.New()
+	ignoredSecretID, ignoredBatchID := uuid.New(), uuid.New()
+	devEnvID, prodEnvID := uuid.New(), uuid.New()
+	devSecretID, prodSecretID := uuid.New(), uuid.New()
+	svc := &stubSecretService{
+		historyFn: func(_ context.Context, in secretapp.HistoryInput) (*secretapp.HistoryResult, error) {
+			if in.GroupID != groupID || in.SecretID != ignoredSecretID || in.BatchID != ignoredBatchID || in.PageNum != 2 || in.PageSize != 5 {
+				t.Fatalf("history input not passed: %+v", in)
+			}
+			return &secretapp.HistoryResult{EnvironmentHistories: map[uuid.UUID]secretapp.HistoryPage{
+				devEnvID: {
+					Total:       3,
+					HistoryList: []secretapp.HistoryView{{SecretID: devSecretID, GroupID: groupID, EnvCode: "dev", Value: "dev-v2", Version: 2, CreateBy: "u-1", CreateByName: "创建人一"}},
+				},
+				prodEnvID: {
+					Total:       2,
+					HistoryList: []secretapp.HistoryView{{SecretID: prodSecretID, GroupID: groupID, EnvCode: "prod", Value: "prod-v1", Version: 1}},
+				},
+			}}, nil
 		},
 	}
 	r := newSecretTestEngine(svc, testUser())
-	w := doJSONP(t, r, http.MethodPost, "/api/v1/secret/history", map[string]any{"groupId": uuid.New()})
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/secret/history", map[string]any{
+		"groupId": groupID, "secretId": ignoredSecretID, "batchId": ignoredBatchID, "pageNum": 2, "pageSize": 5,
+	})
 	body := decodeBody(t, w)
-	if body["code"].(float64) != -1 || body["msg"].(string) != secretapp.ErrHistoryGroupNotSupported.Error() {
-		t.Fatalf("unexpected group history error: %+v", body)
+	if body["code"].(float64) != 0 {
+		t.Fatalf("expected success, got %+v", body)
+	}
+	data := body["data"].(map[string]any)
+	dev := data[devEnvID.String()].(map[string]any)
+	prod := data[prodEnvID.String()].(map[string]any)
+	if dev["total"].(float64) != 3 || prod["total"].(float64) != 2 {
+		t.Fatalf("unexpected environment totals: %+v", data)
+	}
+	devHistory := dev["list"].([]any)[0].(map[string]any)
+	prodHistory := prod["list"].([]any)[0].(map[string]any)
+	if devHistory["secretId"].(string) != devSecretID.String() || prodHistory["secretId"].(string) != prodSecretID.String() {
+		t.Fatalf("histories not grouped by environment: %+v", data)
+	}
+	if devHistory["createByName"].(string) != "创建人一" {
+		t.Fatalf("creator name missing from grouped history: %+v", devHistory)
+	}
+}
+
+func TestSecretHandler_History_NormalizesPagination(t *testing.T) {
+	secretID := uuid.New()
+	tests := []struct {
+		name         string
+		body         map[string]any
+		wantPageNum  int
+		wantPageSize int
+	}{
+		{name: "defaults", body: map[string]any{"secretId": secretID}, wantPageNum: 1, wantPageSize: 20},
+		{name: "negative page and zero size", body: map[string]any{"secretId": secretID, "pageNum": -3, "pageSize": 0}, wantPageNum: 1, wantPageSize: 20},
+		{name: "clamp max size", body: map[string]any{"secretId": secretID, "pageNum": 2, "pageSize": 9999}, wantPageNum: 2, wantPageSize: 200},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &stubSecretService{historyFn: func(_ context.Context, in secretapp.HistoryInput) (*secretapp.HistoryResult, error) {
+				if in.PageNum != tt.wantPageNum || in.PageSize != tt.wantPageSize {
+					t.Fatalf("unexpected normalized pagination: %+v", in)
+				}
+				return &secretapp.HistoryResult{HistoryList: []secretapp.HistoryView{}}, nil
+			}}
+			r := newSecretTestEngine(svc, testUser())
+			w := doJSONP(t, r, http.MethodPost, "/api/v1/secret/history", tt.body)
+			body := decodeBody(t, w)
+			if body["code"].(float64) != 0 {
+				t.Fatalf("expected success, got %+v", body)
+			}
+			data := body["data"].(map[string]any)
+			if _, ok := data["list"].([]any); !ok {
+				t.Fatalf("response must contain list array: %+v", data)
+			}
+		})
 	}
 }
 

@@ -129,6 +129,7 @@ func TestOrgHandler_Create_Success(t *testing.T) {
 	tenantID := uuid.New()
 	want := &orgdomain.Organization{
 		ID: uuid.New(), Code: "org-001", Name: "研发组", TenantID: tenantID,
+		ManagerName: "管理员一", ProjectCount: 4, MemberCount: 9,
 		CreateBy: "u-1", UpdateBy: "u-1",
 	}
 	svc := &stubOrgService{
@@ -156,6 +157,9 @@ func TestOrgHandler_Create_Success(t *testing.T) {
 	data := body["data"].(map[string]any)
 	if data["code"].(string) != "org-001" || data["tenantId"].(string) != tenantID.String() {
 		t.Fatalf("unexpected response data: %+v", data)
+	}
+	if data["managerName"] != "管理员一" || data["projectCount"] != float64(4) || data["memberCount"] != float64(9) {
+		t.Fatalf("unexpected organization summary fields: %+v", data)
 	}
 }
 

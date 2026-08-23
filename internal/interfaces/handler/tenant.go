@@ -28,15 +28,18 @@ func NewTenantHandler(svc tenantapp.IService) *TenantHandler {
 
 // TenantDTO 租户响应数据（JSON 小驼峰）
 type TenantDTO struct {
-	ID       uuid.UUID `json:"id"`
-	Code     string    `json:"code"`
-	Name     string    `json:"name"`
-	Remark   string    `json:"remark"`
-	Manager  string    `json:"manager"`
-	CreateBy string    `json:"createBy"`
-	UpdateBy string    `json:"updateBy"`
-	CreateAt time.Time `json:"createAt"`
-	UpdateAt time.Time `json:"updateAt"`
+	ID          uuid.UUID `json:"id"`
+	Code        string    `json:"code"`
+	Name        string    `json:"name"`
+	Remark      string    `json:"remark"`
+	Manager     string    `json:"manager"`
+	ManagerName string    `json:"managerName"`
+	OrgCount    int64     `json:"orgCount"`
+	MemberCount int64     `json:"memberCount"`
+	CreateBy    string    `json:"createBy"`
+	UpdateBy    string    `json:"updateBy"`
+	CreateAt    time.Time `json:"createAt"`
+	UpdateAt    time.Time `json:"updateAt"`
 }
 
 // CreateRequest 创建租户请求
@@ -267,14 +270,17 @@ func operator(c *gin.Context) string {
 // toDTO 领域模型转响应 DTO
 func toDTO(t *tenantdomain.Tenant) *TenantDTO {
 	return &TenantDTO{
-		ID:       t.ID,
-		Code:     t.Code,
-		Name:     t.Name,
-		Remark:   t.Remark,
-		Manager:  t.Manager,
-		CreateBy: t.CreateBy,
-		UpdateBy: t.UpdateBy,
-		CreateAt: t.CreateAt,
-		UpdateAt: t.UpdateAt,
+		ID:          t.ID,
+		Code:        t.Code,
+		Name:        t.Name,
+		Remark:      t.Remark,
+		Manager:     t.Manager,
+		ManagerName: t.ManagerName,
+		OrgCount:    t.OrgCount,
+		MemberCount: t.MemberCount,
+		CreateBy:    t.CreateBy,
+		UpdateBy:    t.UpdateBy,
+		CreateAt:    t.CreateAt,
+		UpdateAt:    t.UpdateAt,
 	}
 }

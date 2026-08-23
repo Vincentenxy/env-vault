@@ -107,6 +107,7 @@ func TestProjectHandler_Create_Success(t *testing.T) {
 	orgID := uuid.New()
 	want := &projdomain.Project{
 		ID: uuid.New(), Code: "p-001", Name: "电商平台", OrgID: orgID,
+		ManagerName: "管理员一", FolderCount: 6, MemberCount: 3,
 		CreateBy: "u-1", UpdateBy: "u-1",
 	}
 	svc := &stubProjectService{
@@ -141,6 +142,9 @@ func TestProjectHandler_Create_Success(t *testing.T) {
 	data := body["data"].(map[string]any)
 	if data["code"].(string) != "p-001" || data["orgId"].(string) != orgID.String() {
 		t.Fatalf("unexpected response data: %+v", data)
+	}
+	if data["managerName"] != "管理员一" || data["folderCount"] != float64(6) || data["memberCount"] != float64(3) {
+		t.Fatalf("unexpected project summary fields: %+v", data)
 	}
 }
 

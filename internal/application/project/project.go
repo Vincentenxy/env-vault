@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	app "env-vault/internal/application"
 	envdomain "env-vault/internal/domain/environment"
 	projdomain "env-vault/internal/domain/project"
 )
@@ -67,17 +68,31 @@ type IService interface {
 
 // Service 项目应用服务实现
 type Service struct {
-	repo    projdomain.Repository
-	envRepo envdomain.Repository
+	repo         projdomain.Repository
+	envRepo      envdomain.Repository
+	nameResolver app.NicknameResolver
+}
+
+// Option 配置项目应用服务的可选依赖。
+type Option func(*Service)
+
+// WithEnvironmentRepository 配置环境仓储。
+func WithEnvironmentRepository(repo envdomain.Repository) Option {
+	return func(service *Service) { service.envRepo = repo }
+}
+
+// WithNicknameResolver 配置用户姓名查询服务。
+func WithNicknameResolver(resolver app.NicknameResolver) Option {
+	return func(service *Service) { service.nameResolver = resolver }
 }
 
 // NewService 创建项目应用服务
-func NewService(repo projdomain.Repository, envRepos ...envdomain.Repository) *Service {
-	var envRepo envdomain.Repository
-	if len(envRepos) > 0 {
-		envRepo = envRepos[0]
+func NewService(repo projdomain.Repository, options ...Option) *Service {
+	service := &Service{repo: repo}
+	for _, option := range options {
+		option(service)
 	}
-	return &Service{repo: repo, envRepo: envRepo}
+	return service
 }
 
 // 确保 Service 满足 IService 编译期断言
@@ -153,6 +168,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput, operator string) (
 		if err := create(ctx); err != nil {
 			return nil, err
 		}
+		s.setManagerName(ctx, p)
 		return p, nil
 	}
 
@@ -165,6 +181,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput, operator string) (
 	if err := txRepo.WithTx(ctx, create); err != nil {
 		return nil, err
 	}
+	s.setManagerName(ctx, p)
 	return p, nil
 }
 
@@ -200,6 +217,7 @@ func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) (
 	if err := s.repo.Update(ctx, p); err != nil {
 		return nil, err
 	}
+	s.setManagerName(ctx, p)
 	return p, nil
 }
 
@@ -225,26 +243,30 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*projdomain.Projec
 	if p == nil {
 		return nil, ErrNotFound
 	}
+	s.setManagerName(ctx, p)
 	return p, nil
 }
 
-// List 分页查询项目列表
+// List 分页查询项目列表；分页参数已由 Handler 归一化，Service 仅透传。
 func (s *Service) List(ctx context.Context, in ListInput) ([]*projdomain.Project, int64, error) {
-	if in.PageNum <= 0 {
-		in.PageNum = 1
-	}
-	if in.PageSize <= 0 {
-		in.PageSize = 20
-	}
-	if in.PageSize > 200 {
-		in.PageSize = 200
-	}
-
-	return s.repo.List(ctx, projdomain.ListFilter{
+	projects, total, err := s.repo.List(ctx, projdomain.ListFilter{
 		Code:     in.Code,
 		Name:     in.Name,
 		OrgID:    in.OrgID,
 		PageNum:  in.PageNum,
 		PageSize: in.PageSize,
 	})
+	if err != nil {
+		return nil, 0, err
+	}
+	for _, project := range projects {
+		s.setManagerName(ctx, project)
+	}
+	return projects, total, nil
+}
+
+func (s *Service) setManagerName(ctx context.Context, project *projdomain.Project) {
+	if project != nil {
+		project.ManagerName = app.ResolveNickname(ctx, s.nameResolver, project.Manager)
+	}
 }

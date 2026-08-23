@@ -16,13 +16,21 @@ type secretHistoryPO struct {
 	BatchID         uuid.UUID `gorm:"column:batch_id"`
 	GroupID         uuid.UUID `gorm:"column:group_id"`
 	FolderID        uuid.UUID `gorm:"column:folder_id"`
+	EnvID           uuid.UUID `gorm:"column:env_id;->"`
 	EnvCode         string    `gorm:"column:env_code"`
+	Key             string    `gorm:"column:secret_key;->"`
+	Remark          string    `gorm:"column:secret_remark;->"`
 	ValueCiphertext string    `gorm:"column:value_ciphertext"`
 	ValueType       string    `gorm:"column:value_type"`
 	Version         int       `gorm:"column:version"`
 	CommitMsg       string    `gorm:"column:commit_msg"`
 	CreateBy        string    `gorm:"column:create_by"`
 	CreateAt        time.Time `gorm:"column:create_at"`
+}
+
+type historyTargetRow struct {
+	EnvID    uuid.UUID `gorm:"column:env_id"`
+	SecretID uuid.UUID `gorm:"column:secret_id"`
 }
 
 func (secretHistoryPO) TableName() string {
@@ -56,13 +64,42 @@ func (r *Repository) ListHistoryBySecretID(ctx context.Context, secretID uuid.UU
 	return historiesToDomain(pos), total, nil
 }
 
-// ListHistoryByBatchID 查询一次 create/update 批次产生的全部历史
+// ListHistoryTargetsByGroupID 查询逻辑 Secret 下各环境对应的物理 Secret。
+func (r *Repository) ListHistoryTargetsByGroupID(ctx context.Context, groupID uuid.UUID) ([]secretdomain.HistoryTarget, error) {
+	var rows []historyTargetRow
+	err := r.withTxDB(ctx).WithContext(ctx).
+		Table("secret_info AS s").
+		Select("f.env_id AS env_id, s.id AS secret_id").
+		Joins("JOIN folder_info AS f ON f.id = s.folder_id AND f.is_deleted = false").
+		Where("s.group_id = ? AND s.is_deleted = false", groupID).
+		Order("s.env_code ASC, s.id ASC").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+
+	targets := make([]secretdomain.HistoryTarget, 0, len(rows))
+	for _, row := range rows {
+		targets = append(targets, secretdomain.HistoryTarget{
+			EnvID:    row.EnvID,
+			SecretID: row.SecretID,
+		})
+	}
+	return targets, nil
+}
+
+// ListHistoryByBatchID 查询一次 create/update 批次产生的全部历史，并补齐聚合展示所需的环境和 Secret 信息。
+// 历史查询不限制当前 Secret/Folder 的软删除状态，确保资源删除后仍能查看既有批次。
 func (r *Repository) ListHistoryByBatchID(ctx context.Context, batchID uuid.UUID) ([]*secretdomain.History, error) {
 	var pos []secretHistoryPO
 	err := r.withTxDB(ctx).WithContext(ctx).
-		Where("batch_id = ?", batchID).
-		Order("create_at ASC, id ASC").
-		Find(&pos).Error
+		Table("secret_info_history AS h").
+		Select("h.*, s.key AS secret_key, s.remark AS secret_remark, f.env_id AS env_id").
+		Joins("JOIN secret_info AS s ON s.id = h.secret_id").
+		Joins("JOIN folder_info AS f ON f.id = h.folder_id").
+		Where("h.batch_id = ?", batchID).
+		Order("s.key ASC, h.group_id ASC, h.env_code ASC, h.id ASC").
+		Scan(&pos).Error
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +133,10 @@ func historiesToDomain(pos []secretHistoryPO) []*secretdomain.History {
 			BatchID:         history.BatchID,
 			GroupID:         history.GroupID,
 			FolderID:        history.FolderID,
+			EnvID:           history.EnvID,
 			EnvCode:         history.EnvCode,
+			Key:             history.Key,
+			Remark:          history.Remark,
 			ValueCiphertext: history.ValueCiphertext,
 			ValueType:       history.ValueType,
 			Version:         history.Version,

@@ -334,13 +334,15 @@ func TestFolderHandler_Detail_NotFound(t *testing.T) {
 
 func TestFolderHandler_List_Success(t *testing.T) {
 	projectID := uuid.New()
+	envID := uuid.New()
+	childCount := int64(2)
 	var captured folderapp.ListInput
 	svc := &stubFolderService{
 		listFn: func(ctx context.Context, in folderapp.ListInput) ([]*folderdomain.Folder, int64, error) {
 			captured = in
 			return []*folderdomain.Folder{
-				{ID: uuid.New(), Code: "global", Name: "全局目录"},
-				{ID: uuid.New(), Code: "groups", Name: "分组目录"},
+				{ID: uuid.New(), Code: "global", Name: "全局目录", EnvID: envID, Type: "common", ManagerName: "管理员一", SecretCount: 3, FolderCount: &childCount},
+				{ID: uuid.New(), Code: "groups", Name: "分组目录", Type: "customer", SecretCount: 1},
 			}, 2, nil
 		},
 	}
@@ -359,6 +361,16 @@ func TestFolderHandler_List_Success(t *testing.T) {
 	list := data["list"].([]any)
 	if len(list) != 2 {
 		t.Fatalf("expected list len 2, got %d", len(list))
+	}
+	if list[0].(map[string]any)["envId"] != "" {
+		t.Fatalf("list envId must be empty, got %v", list[0].(map[string]any)["envId"])
+	}
+	first := list[0].(map[string]any)
+	if first["managerName"] != "管理员一" || first["secretCount"] != float64(3) || first["folderCount"] != float64(2) {
+		t.Fatalf("unexpected common folder summary fields: %+v", first)
+	}
+	if list[1].(map[string]any)["folderCount"] != nil {
+		t.Fatalf("customer folderCount must be null: %+v", list[1])
 	}
 	if captured.ProjectID != projectID || captured.Code != "g" || captured.Name != "目录" {
 		t.Fatalf("filters lost: %+v", captured)
@@ -379,6 +391,36 @@ func TestFolderHandler_List_InvalidParam(t *testing.T) {
 	body := decodeBody(t, w)
 	if body["code"].(float64) != -1 {
 		t.Fatalf("expected generic code -1 for missing projectId, got %v", body["code"])
+	}
+}
+
+func TestFolderHandler_List_NormalizesPagination(t *testing.T) {
+	projectID := uuid.New()
+	tests := []struct {
+		name         string
+		body         map[string]any
+		wantPageNum  int
+		wantPageSize int
+	}{
+		{name: "negative page and zero size", body: map[string]any{"projectId": projectID, "pageNum": -3, "pageSize": 0}, wantPageNum: 1, wantPageSize: 20},
+		{name: "clamp max size", body: map[string]any{"projectId": projectID, "pageNum": 2, "pageSize": 9999}, wantPageNum: 2, wantPageSize: 200},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &stubFolderService{listFn: func(_ context.Context, in folderapp.ListInput) ([]*folderdomain.Folder, int64, error) {
+				if in.PageNum != tt.wantPageNum || in.PageSize != tt.wantPageSize {
+					t.Fatalf("unexpected normalized pagination: %+v", in)
+				}
+				return []*folderdomain.Folder{}, 0, nil
+			}}
+			r := newFolderTestEngine(svc, testUser())
+			w := doJSONP(t, r, http.MethodPost, "/api/v1/folder/list", tt.body)
+			body := decodeBody(t, w)
+			if body["code"].(float64) != 0 {
+				t.Fatalf("expected success, got %+v", body)
+			}
+		})
 	}
 }
 

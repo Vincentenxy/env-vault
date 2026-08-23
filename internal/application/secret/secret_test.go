@@ -25,6 +25,12 @@ func testCipher(t *testing.T) *crypto.Cipher {
 	return c
 }
 
+type nicknameResolverFunc func(context.Context, string) (string, error)
+
+func (f nicknameResolverFunc) GetNickname(ctx context.Context, userID string) (string, error) {
+	return f(ctx, userID)
+}
+
 // stubSecretRepo 内存实现的密钥 Repository
 type stubSecretRepo struct {
 	createBatch         func(ctx context.Context, secrets []*secretdomain.Secret) error
@@ -38,6 +44,7 @@ type stubSecretRepo struct {
 	updateRemarkByGroup func(ctx context.Context, groupID uuid.UUID, remark, updateBy string, updateAt time.Time) (int64, error)
 	createHistoryBatch  func(ctx context.Context, histories []*secretdomain.History) error
 	listHistoryBySecret func(ctx context.Context, secretID uuid.UUID, offset, limit int) ([]*secretdomain.History, int64, error)
+	listHistoryTargets  func(ctx context.Context, groupID uuid.UUID) ([]secretdomain.HistoryTarget, error)
 	listHistoryByBatch  func(ctx context.Context, batchID uuid.UUID) ([]*secretdomain.History, error)
 	withTx              func(ctx context.Context, fn func(ctx context.Context) error) error
 }
@@ -107,6 +114,12 @@ func (s *stubSecretRepo) ListHistoryBySecretID(ctx context.Context, secretID uui
 		return s.listHistoryBySecret(ctx, secretID, offset, limit)
 	}
 	return nil, 0, nil
+}
+func (s *stubSecretRepo) ListHistoryTargetsByGroupID(ctx context.Context, groupID uuid.UUID) ([]secretdomain.HistoryTarget, error) {
+	if s.listHistoryTargets != nil {
+		return s.listHistoryTargets(ctx, groupID)
+	}
+	return nil, nil
 }
 func (s *stubSecretRepo) ListHistoryByBatchID(ctx context.Context, batchID uuid.UUID) ([]*secretdomain.History, error) {
 	if s.listHistoryByBatch != nil {
@@ -795,7 +808,7 @@ func TestService_GetByGroup_NotFound(t *testing.T) {
 	}
 }
 
-func TestService_History_SecretIDPriorityAndPagination(t *testing.T) {
+func TestService_History_SecretIDPriorityOverBatchAndPagination(t *testing.T) {
 	secretID := uuid.New()
 	batchID := uuid.New()
 	groupID := uuid.New()
@@ -817,45 +830,233 @@ func TestService_History_SecretIDPriorityAndPagination(t *testing.T) {
 			return nil, nil
 		},
 	}
-	svc := NewService(repo, &stubFolderRepo{}, &stubEnvRepo{}, cipher)
-	views, total, err := svc.History(context.Background(), HistoryInput{
-		SecretID: secretID, BatchID: batchID, GroupID: groupID, PageNum: 3, PageSize: 10,
+	resolver := nicknameResolverFunc(func(_ context.Context, userID string) (string, error) {
+		if userID != "u" {
+			t.Fatalf("unexpected creator id %q", userID)
+		}
+		return "创建人一", nil
+	})
+	svc := NewService(repo, &stubFolderRepo{}, &stubEnvRepo{}, cipher, resolver)
+	result, err := svc.History(context.Background(), HistoryInput{
+		SecretID: secretID, BatchID: batchID, PageNum: 3, PageSize: 10,
 	})
 	if err != nil {
 		t.Fatalf("expected nil err, got %v", err)
 	}
-	if total != 21 || len(views) != 1 {
-		t.Fatalf("unexpected history result total=%d views=%+v", total, views)
+	if result.Total != 21 || len(result.HistoryList) != 1 {
+		t.Fatalf("unexpected history result: %+v", result)
 	}
-	if views[0].Value != "version-value" || views[0].Version != 3 || views[0].CommitMsg != "rotate" {
-		t.Fatalf("history not decrypted/mapped: %+v", views[0])
+	if result.HistoryList[0].Value != "version-value" || result.HistoryList[0].Version != 3 || result.HistoryList[0].CommitMsg != "rotate" || result.HistoryList[0].CreateByName != "创建人一" {
+		t.Fatalf("history not decrypted/mapped: %+v", result.HistoryList[0])
 	}
 }
 
 func TestService_History_BatchWithoutPagination(t *testing.T) {
 	batchID := uuid.New()
+	firstGroupID, secondGroupID := uuid.New(), uuid.New()
+	devEnvID, prodEnvID, testEnvID := uuid.New(), uuid.New(), uuid.New()
+	devSecretID, prodSecretID, testSecretID := uuid.New(), uuid.New(), uuid.New()
 	cipher := testCipher(t)
-	ciphertext, _ := cipher.Encrypt("batch-value")
+	devCiphertext, _ := cipher.Encrypt("dev-value")
+	prodCiphertext, _ := cipher.Encrypt("prod-value")
+	testCiphertext, _ := cipher.Encrypt("test-value")
 	repo := &stubSecretRepo{
 		listHistoryByBatch: func(ctx context.Context, gotBatchID uuid.UUID) ([]*secretdomain.History, error) {
 			if gotBatchID != batchID {
 				t.Fatalf("unexpected batch id %s", gotBatchID)
 			}
-			return []*secretdomain.History{{BatchID: batchID, ValueCiphertext: ciphertext}}, nil
+			return []*secretdomain.History{
+				{
+					SecretID: testSecretID, BatchID: batchID, GroupID: secondGroupID, EnvID: testEnvID,
+					EnvCode: "test", Key: "DB_USER", Remark: "database user", ValueCiphertext: testCiphertext,
+					Version: 1, CreateBy: "missing",
+				},
+				{
+					SecretID: devSecretID, BatchID: batchID, GroupID: firstGroupID, EnvID: devEnvID,
+					EnvCode: "dev", Key: "DB_HOST", Remark: "database host", ValueCiphertext: devCiphertext,
+					Version: 2, CreateBy: "missing",
+				},
+				{
+					SecretID: prodSecretID, BatchID: batchID, GroupID: firstGroupID, EnvID: prodEnvID,
+					EnvCode: "prod", Key: "DB_HOST", Remark: "database host", ValueCiphertext: prodCiphertext,
+					Version: 3, CreateBy: "missing",
+				},
+			}, nil
 		},
 	}
-	svc := NewService(repo, &stubFolderRepo{}, &stubEnvRepo{}, cipher)
-	views, total, err := svc.History(context.Background(), HistoryInput{BatchID: batchID, PageNum: 99, PageSize: 1})
-	if err != nil || total != 1 || len(views) != 1 || views[0].Value != "batch-value" {
-		t.Fatalf("unexpected batch history result total=%d views=%+v err=%v", total, views, err)
+	resolver := nicknameResolverFunc(func(context.Context, string) (string, error) {
+		return "", errors.New("user not found")
+	})
+	svc := NewService(repo, &stubFolderRepo{}, &stubEnvRepo{}, cipher, resolver)
+	result, err := svc.History(context.Background(), HistoryInput{BatchID: batchID, PageNum: 99, PageSize: 1})
+	if err != nil {
+		t.Fatalf("unexpected batch history result result=%+v err=%v", result, err)
+	}
+	if result.Total != 0 || result.HistoryList != nil || len(result.BatchHistories) != 2 {
+		t.Fatalf("batch history must use grouped result: %+v", result)
+	}
+	first := result.BatchHistories[0]
+	if first.GroupID != firstGroupID || first.Key != "DB_HOST" || first.Remark != "database host" || len(first.Versions) != 2 {
+		t.Fatalf("unexpected first group: %+v", first)
+	}
+	if version := first.Versions[devEnvID]; version.SecretID != devSecretID || version.Value != "dev-value" || version.Version != 2 || version.CreateByName != "" {
+		t.Fatalf("unexpected dev version: %+v", version)
+	}
+	if version := first.Versions[prodEnvID]; version.SecretID != prodSecretID || version.Value != "prod-value" || version.Version != 3 {
+		t.Fatalf("unexpected prod version: %+v", version)
+	}
+	second := result.BatchHistories[1]
+	if second.GroupID != secondGroupID || second.Key != "DB_USER" || second.Remark != "database user" || len(second.Versions) != 1 {
+		t.Fatalf("unexpected second group: %+v", second)
+	}
+	if version := second.Versions[testEnvID]; version.SecretID != testSecretID || version.Value != "test-value" {
+		t.Fatalf("unexpected test version: %+v", version)
 	}
 }
 
-func TestService_History_GroupNotSupported(t *testing.T) {
-	svc := NewService(&stubSecretRepo{}, &stubFolderRepo{}, &stubEnvRepo{}, testCipher(t))
-	_, _, err := svc.History(context.Background(), HistoryInput{GroupID: uuid.New()})
-	if !errors.Is(err, ErrHistoryGroupNotSupported) {
-		t.Fatalf("expected ErrHistoryGroupNotSupported, got %v", err)
+func TestService_ListByFolder_SortsByKey(t *testing.T) {
+	folderGroupID := uuid.New()
+	folderID := uuid.New()
+	cipher := testCipher(t)
+	ciphertext, _ := cipher.Encrypt("value")
+	repo := &stubSecretRepo{
+		listByFolders: func(context.Context, []uuid.UUID) ([]*secretdomain.Secret, error) {
+			return []*secretdomain.Secret{
+				{ID: uuid.New(), GroupID: uuid.New(), FolderID: folderID, EnvCode: "dev", Key: "REDIS_HOST", ValueCiphertext: ciphertext},
+				{ID: uuid.New(), GroupID: uuid.New(), FolderID: folderID, EnvCode: "dev", Key: "DB_USER", ValueCiphertext: ciphertext},
+				{ID: uuid.New(), GroupID: uuid.New(), FolderID: folderID, EnvCode: "dev", Key: "DB_HOST", ValueCiphertext: ciphertext},
+			}, nil
+		},
+	}
+	folderRepo := &stubFolderRepo{
+		listByGroupID: func(context.Context, uuid.UUID) ([]*folderdomain.Folder, error) {
+			return []*folderdomain.Folder{{ID: folderID}}, nil
+		},
+	}
+
+	views, err := NewService(repo, folderRepo, &stubEnvRepo{}, cipher).ListByFolder(context.Background(), folderGroupID)
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if len(views) != 3 || views[0].Key != "DB_HOST" || views[1].Key != "DB_USER" || views[2].Key != "REDIS_HOST" {
+		t.Fatalf("secret views not sorted by key: %+v", views)
+	}
+}
+
+func TestService_History_GroupIDPriorityAndPaginatesEachEnvironment(t *testing.T) {
+	groupID := uuid.New()
+	ignoredSecretID, ignoredBatchID := uuid.New(), uuid.New()
+	devEnvID, prodEnvID := uuid.New(), uuid.New()
+	devSecretID, prodSecretID := uuid.New(), uuid.New()
+	cipher := testCipher(t)
+	devCiphertext, _ := cipher.Encrypt("dev-v3")
+	prodCiphertext, _ := cipher.Encrypt("prod-v2")
+
+	repo := &stubSecretRepo{
+		listHistoryTargets: func(_ context.Context, gotGroupID uuid.UUID) ([]secretdomain.HistoryTarget, error) {
+			if gotGroupID != groupID {
+				t.Fatalf("unexpected group id %s", gotGroupID)
+			}
+			return []secretdomain.HistoryTarget{
+				{EnvID: devEnvID, SecretID: devSecretID},
+				{EnvID: prodEnvID, SecretID: prodSecretID},
+			}, nil
+		},
+		listHistoryBySecret: func(_ context.Context, secretID uuid.UUID, offset, limit int) ([]*secretdomain.History, int64, error) {
+			if offset != 5 || limit != 5 {
+				t.Fatalf("unexpected pagination offset=%d limit=%d", offset, limit)
+			}
+			switch secretID {
+			case devSecretID:
+				return []*secretdomain.History{{SecretID: secretID, GroupID: groupID, EnvCode: "dev", ValueCiphertext: devCiphertext, Version: 3}}, 8, nil
+			case prodSecretID:
+				return []*secretdomain.History{{SecretID: secretID, GroupID: groupID, EnvCode: "prod", ValueCiphertext: prodCiphertext, Version: 2}}, 6, nil
+			default:
+				t.Fatalf("unexpected secret id %s", secretID)
+				return nil, 0, nil
+			}
+		},
+		listHistoryByBatch: func(context.Context, uuid.UUID) ([]*secretdomain.History, error) {
+			t.Fatal("batch query must not run when groupId is present")
+			return nil, nil
+		},
+	}
+
+	result, err := NewService(repo, &stubFolderRepo{}, &stubEnvRepo{}, cipher).History(
+		context.Background(), HistoryInput{
+			GroupID: groupID, SecretID: ignoredSecretID, BatchID: ignoredBatchID, PageNum: 2, PageSize: 5,
+		},
+	)
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if result.Total != 0 || result.HistoryList != nil || len(result.EnvironmentHistories) != 2 {
+		t.Fatalf("unexpected grouped result: %+v", result)
+	}
+	if page := result.EnvironmentHistories[devEnvID]; page.Total != 8 || len(page.HistoryList) != 1 || page.HistoryList[0].Value != "dev-v3" {
+		t.Fatalf("unexpected dev history: %+v", page)
+	}
+	if page := result.EnvironmentHistories[prodEnvID]; page.Total != 6 || len(page.HistoryList) != 1 || page.HistoryList[0].Value != "prod-v2" {
+		t.Fatalf("unexpected prod history: %+v", page)
+	}
+}
+
+func TestService_History_GroupQueriesEnvironmentsConcurrently(t *testing.T) {
+	groupID := uuid.New()
+	targets := []secretdomain.HistoryTarget{
+		{EnvID: uuid.New(), SecretID: uuid.New()},
+		{EnvID: uuid.New(), SecretID: uuid.New()},
+	}
+	started := make(chan struct{}, len(targets))
+	release := make(chan struct{})
+	repo := &stubSecretRepo{
+		listHistoryTargets: func(context.Context, uuid.UUID) ([]secretdomain.HistoryTarget, error) {
+			return targets, nil
+		},
+		listHistoryBySecret: func(context.Context, uuid.UUID, int, int) ([]*secretdomain.History, int64, error) {
+			started <- struct{}{}
+			<-release
+			return []*secretdomain.History{}, 0, nil
+		},
+	}
+
+	type historyCallResult struct {
+		result *HistoryResult
+		err    error
+	}
+	cipher := testCipher(t)
+	done := make(chan historyCallResult, 1)
+	go func() {
+		result, err := NewService(repo, &stubFolderRepo{}, &stubEnvRepo{}, cipher).History(
+			context.Background(), HistoryInput{GroupID: groupID, PageNum: 1, PageSize: 20},
+		)
+		done <- historyCallResult{result: result, err: err}
+	}()
+
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	for range targets {
+		select {
+		case <-started:
+		case <-timer.C:
+			close(release)
+			<-done
+			t.Fatal("environment history queries did not run concurrently")
+		}
+	}
+	close(release)
+	call := <-done
+	if call.err != nil || len(call.result.EnvironmentHistories) != len(targets) {
+		t.Fatalf("unexpected concurrent history result=%+v err=%v", call.result, call.err)
+	}
+}
+
+func TestService_History_RequiresOneQueryID(t *testing.T) {
+	result, err := NewService(&stubSecretRepo{}, &stubFolderRepo{}, &stubEnvRepo{}, testCipher(t)).History(
+		context.Background(), HistoryInput{},
+	)
+	if result != nil || !errors.Is(err, ErrInvalidParam) {
+		t.Fatalf("expected ErrInvalidParam, got result=%+v err=%v", result, err)
 	}
 }
 

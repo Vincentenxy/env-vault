@@ -8,11 +8,14 @@ package secret
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 
+	app "env-vault/internal/application"
 	envdomain "env-vault/internal/domain/environment"
 	folderdomain "env-vault/internal/domain/folder"
 	secretdomain "env-vault/internal/domain/secret"
@@ -21,16 +24,15 @@ import (
 
 // 业务错误（应用层显式定义，handler 映射为业务错误码）
 var (
-	ErrInvalidParam             = errors.New("invalid param")
-	ErrNotFound                 = errors.New("secret not found")
-	ErrFolderNotFound           = errors.New("folder not found")
-	ErrEnvNotFound              = errors.New("env not found under folder")
-	ErrKeyExists                = errors.New("secret key already exists under folder")
-	ErrDecrypt                  = errors.New("decrypt secret value failed")
-	ErrSecretNotUnderGroup      = errors.New("secret not under group")
-	ErrSecretNotUnderFolder     = ErrSecretNotUnderGroup
-	ErrHistoryGroupNotSupported = errors.New("group history query not supported")
-	ErrVersionConflict          = secretdomain.ErrVersionConflict
+	ErrInvalidParam         = errors.New("invalid param")
+	ErrNotFound             = errors.New("secret not found")
+	ErrFolderNotFound       = errors.New("folder not found")
+	ErrEnvNotFound          = errors.New("env not found under folder")
+	ErrKeyExists            = errors.New("secret key already exists under folder")
+	ErrDecrypt              = errors.New("decrypt secret value failed")
+	ErrSecretNotUnderGroup  = errors.New("secret not under group")
+	ErrSecretNotUnderFolder = ErrSecretNotUnderGroup
+	ErrVersionConflict      = secretdomain.ErrVersionConflict
 )
 
 const initialCommitMsg = "initial version"
@@ -88,7 +90,7 @@ type SecretValueView struct {
 	ValueType string
 }
 
-// HistoryInput 历史查询入参，查询优先级 secretId > batchId > groupId
+// HistoryInput 历史查询入参，查询优先级 groupId > secretId > batchId
 type HistoryInput struct {
 	SecretID uuid.UUID
 	BatchID  uuid.UUID
@@ -109,18 +111,41 @@ type ListInput struct {
 
 // HistoryView 解密后的 value 历史版本
 type HistoryView struct {
-	ID        uuid.UUID
-	SecretID  uuid.UUID
-	BatchID   uuid.UUID
-	GroupID   uuid.UUID
-	FolderID  uuid.UUID
-	EnvCode   string
-	Value     string
-	ValueType string
-	Version   int
-	CommitMsg string
-	CreateBy  string
-	CreateAt  time.Time
+	ID           uuid.UUID
+	SecretID     uuid.UUID
+	BatchID      uuid.UUID
+	GroupID      uuid.UUID
+	FolderID     uuid.UUID
+	EnvCode      string
+	Value        string
+	ValueType    string
+	Version      int
+	CommitMsg    string
+	CreateBy     string
+	CreateByName string
+	CreateAt     time.Time
+}
+
+// HistoryPage 单个查询维度下的历史分页。
+type HistoryPage struct {
+	Total       int64
+	HistoryList []HistoryView
+}
+
+// BatchHistoryView 一次批次中一个逻辑 Secret 的修改结果。
+type BatchHistoryView struct {
+	GroupID  uuid.UUID
+	Key      string
+	Remark   string
+	Versions map[uuid.UUID]HistoryView
+}
+
+// HistoryResult 历史查询结果。不同查询模式只填充自身对应的字段。
+type HistoryResult struct {
+	Total                int64
+	HistoryList          []HistoryView
+	EnvironmentHistories map[uuid.UUID]HistoryPage
+	BatchHistories       []BatchHistoryView
 }
 
 // SecretView 一个 secret 的聚合视图（跨环境），查询接口统一返回结构
@@ -138,21 +163,26 @@ type IService interface {
 	List(ctx context.Context, in ListInput) ([]SecretView, error)
 	ListByFolder(ctx context.Context, folderGroupID uuid.UUID) ([]SecretView, error)
 	GetByGroup(ctx context.Context, groupID uuid.UUID) (*SecretView, error)
-	History(ctx context.Context, in HistoryInput) ([]HistoryView, int64, error)
+	History(ctx context.Context, in HistoryInput) (*HistoryResult, error)
 	Delete(ctx context.Context, groupID uuid.UUID, operator string) error
 }
 
 // Service 密钥应用服务实现（依赖密钥/文件夹/环境仓储与加解密器）
 type Service struct {
-	repo       secretdomain.Repository
-	folderRepo folderdomain.Repository
-	envRepo    envdomain.Repository
-	cipher     *crypto.Cipher
+	repo         secretdomain.Repository
+	folderRepo   folderdomain.Repository
+	envRepo      envdomain.Repository
+	cipher       *crypto.Cipher
+	nameResolver app.NicknameResolver
 }
 
 // NewService 创建密钥应用服务
-func NewService(repo secretdomain.Repository, folderRepo folderdomain.Repository, envRepo envdomain.Repository, cipher *crypto.Cipher) *Service {
-	return &Service{repo: repo, folderRepo: folderRepo, envRepo: envRepo, cipher: cipher}
+func NewService(repo secretdomain.Repository, folderRepo folderdomain.Repository, envRepo envdomain.Repository, cipher *crypto.Cipher, resolvers ...app.NicknameResolver) *Service {
+	var resolver app.NicknameResolver
+	if len(resolvers) > 0 {
+		resolver = resolvers[0]
+	}
+	return &Service{repo: repo, folderRepo: folderRepo, envRepo: envRepo, cipher: cipher, nameResolver: resolver}
 }
 
 // 确保 Service 满足 IService 编译期断言
@@ -188,6 +218,18 @@ func (s *Service) Create(ctx context.Context, in CreateInput, operator string) (
 	if err != nil {
 		return nil, err
 	}
+	sort.Slice(created, func(i, j int) bool {
+		if created[i].Key != created[j].Key {
+			return created[i].Key < created[j].Key
+		}
+		if created[i].GroupID != created[j].GroupID {
+			return created[i].GroupID.String() < created[j].GroupID.String()
+		}
+		if created[i].EnvCode != created[j].EnvCode {
+			return created[i].EnvCode < created[j].EnvCode
+		}
+		return created[i].ID.String() < created[j].ID.String()
+	})
 	return created, nil
 }
 
@@ -368,58 +410,159 @@ func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) e
 	})
 }
 
-// History 按 secretId 分页或按 batchId 不分页查询历史；groupId 查询暂未实现
-func (s *Service) History(ctx context.Context, in HistoryInput) ([]HistoryView, int64, error) {
+// History 按 secretId 分页、按 batchId 不分页，或按 groupId 对各环境分别分页查询历史。
+func (s *Service) History(ctx context.Context, in HistoryInput) (*HistoryResult, error) {
 	var histories []*secretdomain.History
 	var total int64
 	var err error
 
 	switch {
+	case in.GroupID != uuid.Nil:
+		return s.historyByGroup(ctx, in)
 	case in.SecretID != uuid.Nil:
-		if in.PageNum <= 0 {
-			in.PageNum = 1
-		}
-		if in.PageSize <= 0 {
-			in.PageSize = 20
-		}
-		if in.PageSize > 200 {
-			in.PageSize = 200
-		}
 		histories, total, err = s.repo.ListHistoryBySecretID(ctx, in.SecretID, (in.PageNum-1)*in.PageSize, in.PageSize)
 	case in.BatchID != uuid.Nil:
-		histories, err = s.repo.ListHistoryByBatchID(ctx, in.BatchID)
-		total = int64(len(histories))
-	case in.GroupID != uuid.Nil:
-		return nil, 0, ErrHistoryGroupNotSupported
+		// 特殊情况：batchId 表示一次提交批次，需要完整返回该批次记录，不使用分页参数。
+		return s.historyByBatch(ctx, in.BatchID)
 	default:
-		return nil, 0, ErrInvalidParam
+		return nil, ErrInvalidParam
 	}
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 
+	views, err := s.toHistoryViews(ctx, histories, &sync.Map{})
+	if err != nil {
+		return nil, err
+	}
+	return &HistoryResult{Total: total, HistoryList: views}, nil
+}
+
+func (s *Service) historyByBatch(ctx context.Context, batchID uuid.UUID) (*HistoryResult, error) {
+	histories, err := s.repo.ListHistoryByBatchID(ctx, batchID)
+	if err != nil {
+		return nil, err
+	}
+	views, err := s.toHistoryViews(ctx, histories, &sync.Map{})
+	if err != nil {
+		return nil, err
+	}
+
+	byGroup := make(map[uuid.UUID]*BatchHistoryView)
+	order := make([]uuid.UUID, 0)
+	for i, history := range histories {
+		item, exists := byGroup[history.GroupID]
+		if !exists {
+			item = &BatchHistoryView{
+				GroupID:  history.GroupID,
+				Key:      history.Key,
+				Remark:   history.Remark,
+				Versions: make(map[uuid.UUID]HistoryView),
+			}
+			byGroup[history.GroupID] = item
+			order = append(order, history.GroupID)
+		}
+		item.Versions[history.EnvID] = views[i]
+	}
+
+	items := make([]BatchHistoryView, 0, len(order))
+	for _, groupID := range order {
+		items = append(items, *byGroup[groupID])
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return secretKeyLess(items[i].Key, items[i].GroupID, items[j].Key, items[j].GroupID)
+	})
+	return &HistoryResult{BatchHistories: items}, nil
+}
+
+func (s *Service) historyByGroup(ctx context.Context, in HistoryInput) (*HistoryResult, error) {
+	targets, err := s.repo.ListHistoryTargetsByGroupID(ctx, in.GroupID)
+	if err != nil {
+		return nil, err
+	}
+
+	type environmentHistory struct {
+		envID uuid.UUID
+		page  HistoryPage
+	}
+
+	queryCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make([]environmentHistory, len(targets))
+	var names sync.Map
+	var wg sync.WaitGroup
+	var firstErr error
+	var errorOnce sync.Once
+
+	for i, target := range targets {
+		i, target := i, target
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			histories, total, err := s.repo.ListHistoryBySecretID(queryCtx, target.SecretID, (in.PageNum-1)*in.PageSize, in.PageSize)
+			if err == nil {
+				var views []HistoryView
+				views, err = s.toHistoryViews(queryCtx, histories, &names)
+				if err == nil {
+					results[i] = environmentHistory{
+						envID: target.EnvID,
+						page:  HistoryPage{Total: total, HistoryList: views},
+					}
+					return
+				}
+			}
+			errorOnce.Do(func() {
+				firstErr = err
+				cancel()
+			})
+		}()
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
+	}
+
+	pages := make(map[uuid.UUID]HistoryPage, len(results))
+	for _, result := range results {
+		pages[result.envID] = result.page
+	}
+	return &HistoryResult{EnvironmentHistories: pages}, nil
+}
+
+func (s *Service) toHistoryViews(ctx context.Context, histories []*secretdomain.History, names *sync.Map) ([]HistoryView, error) {
 	views := make([]HistoryView, 0, len(histories))
 	for _, history := range histories {
 		value, err := s.cipher.Decrypt(history.ValueCiphertext)
 		if err != nil {
-			return nil, 0, ErrDecrypt
+			return nil, ErrDecrypt
 		}
 		views = append(views, HistoryView{
-			ID:        history.ID,
-			SecretID:  history.SecretID,
-			BatchID:   history.BatchID,
-			GroupID:   history.GroupID,
-			FolderID:  history.FolderID,
-			EnvCode:   history.EnvCode,
-			Value:     value,
-			ValueType: history.ValueType,
-			Version:   history.Version,
-			CommitMsg: history.CommitMsg,
-			CreateBy:  history.CreateBy,
-			CreateAt:  history.CreateAt,
+			ID:           history.ID,
+			SecretID:     history.SecretID,
+			BatchID:      history.BatchID,
+			GroupID:      history.GroupID,
+			FolderID:     history.FolderID,
+			EnvCode:      history.EnvCode,
+			Value:        value,
+			ValueType:    history.ValueType,
+			Version:      history.Version,
+			CommitMsg:    history.CommitMsg,
+			CreateBy:     history.CreateBy,
+			CreateByName: s.resolveNickname(ctx, names, history.CreateBy),
+			CreateAt:     history.CreateAt,
 		})
 	}
-	return views, total, nil
+	return views, nil
+}
+
+func (s *Service) resolveNickname(ctx context.Context, names *sync.Map, userID string) string {
+	userID = strings.TrimSpace(userID)
+	if name, ok := names.Load(userID); ok {
+		return name.(string)
+	}
+	name := app.ResolveNickname(ctx, s.nameResolver, userID)
+	actual, _ := names.LoadOrStore(userID, name)
+	return actual.(string)
 }
 
 // List 查询 secrets 列表，支持两种查询模式：
@@ -571,7 +714,17 @@ func (s *Service) buildViews(ctx context.Context, secrets []*secretdomain.Secret
 	for _, gid := range order {
 		views = append(views, *byGroup[gid])
 	}
+	sort.Slice(views, func(i, j int) bool {
+		return secretKeyLess(views[i].Key, views[i].GroupID, views[j].Key, views[j].GroupID)
+	})
 	return views, nil
+}
+
+func secretKeyLess(leftKey string, leftGroupID uuid.UUID, rightKey string, rightGroupID uuid.UUID) bool {
+	if leftKey != rightKey {
+		return leftKey < rightKey
+	}
+	return leftGroupID.String() < rightGroupID.String()
 }
 
 func effectiveCommitMsg(itemMsg, requestMsg string) string {

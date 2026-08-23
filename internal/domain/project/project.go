@@ -10,19 +10,22 @@ import (
 
 // Project 项目领域模型。项目归属组织之下（一个组织承接多个具体项目），组织内编码唯一。
 type Project struct {
-	ID        uuid.UUID
-	Code      string
-	Name      string
-	Remark    string
-	OrgID     uuid.UUID
-	Manager   string
-	IsDeleted bool
-	DeleteAt  *time.Time
-	DeleteBy  string
-	CreateBy  string
-	UpdateBy  string
-	CreateAt  time.Time
-	UpdateAt  time.Time
+	ID          uuid.UUID
+	Code        string
+	Name        string
+	Remark      string
+	OrgID       uuid.UUID
+	Manager     string
+	ManagerName string
+	FolderCount int64
+	MemberCount int64
+	IsDeleted   bool
+	DeleteAt    *time.Time
+	DeleteBy    string
+	CreateBy    string
+	UpdateBy    string
+	CreateAt    time.Time
+	UpdateAt    time.Time
 }
 
 // ListFilter 项目列表查询过滤条件

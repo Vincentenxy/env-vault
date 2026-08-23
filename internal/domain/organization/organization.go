@@ -10,19 +10,22 @@ import (
 
 // Organization 组织领域模型。组织归属租户之下（类比公司部门），租户内编码唯一。
 type Organization struct {
-	ID        uuid.UUID
-	Code      string
-	Name      string
-	Remark    string
-	TenantID  uuid.UUID
-	Manager   string
-	IsDeleted bool
-	DeleteAt  *time.Time
-	DeleteBy  string
-	CreateBy  string
-	UpdateBy  string
-	CreateAt  time.Time
-	UpdateAt  time.Time
+	ID           uuid.UUID
+	Code         string
+	Name         string
+	Remark       string
+	TenantID     uuid.UUID
+	Manager      string
+	ManagerName  string
+	ProjectCount int64
+	MemberCount  int64
+	IsDeleted    bool
+	DeleteAt     *time.Time
+	DeleteBy     string
+	CreateBy     string
+	UpdateBy     string
+	CreateAt     time.Time
+	UpdateAt     time.Time
 }
 
 // ListFilter 组织列表查询过滤条件

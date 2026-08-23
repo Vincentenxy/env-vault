@@ -15,19 +15,21 @@ import (
 
 // projectPO project_info 表持久化对象（数据库列名下划线）
 type projectPO struct {
-	ID        uuid.UUID  `gorm:"column:id;primaryKey"`
-	Code      string     `gorm:"column:code"`
-	Name      string     `gorm:"column:name"`
-	Remark    string     `gorm:"column:remark"`
-	OrgID     uuid.UUID  `gorm:"column:org_id"`
-	Manager   string     `gorm:"column:manager"`
-	IsDeleted bool       `gorm:"column:is_deleted"`
-	DeleteAt  *time.Time `gorm:"column:delete_at"`
-	DeleteBy  string     `gorm:"column:delete_by"`
-	CreateBy  string     `gorm:"column:create_by"`
-	UpdateBy  string     `gorm:"column:update_by"`
-	CreateAt  time.Time  `gorm:"column:create_at"`
-	UpdateAt  time.Time  `gorm:"column:update_at"`
+	ID          uuid.UUID  `gorm:"column:id;primaryKey"`
+	Code        string     `gorm:"column:code"`
+	Name        string     `gorm:"column:name"`
+	Remark      string     `gorm:"column:remark"`
+	OrgID       uuid.UUID  `gorm:"column:org_id"`
+	Manager     string     `gorm:"column:manager"`
+	FolderCount int64      `gorm:"column:folder_count;->"`
+	MemberCount int64      `gorm:"column:member_count;->"`
+	IsDeleted   bool       `gorm:"column:is_deleted"`
+	DeleteAt    *time.Time `gorm:"column:delete_at"`
+	DeleteBy    string     `gorm:"column:delete_by"`
+	CreateBy    string     `gorm:"column:create_by"`
+	UpdateBy    string     `gorm:"column:update_by"`
+	CreateAt    time.Time  `gorm:"column:create_at"`
+	UpdateAt    time.Time  `gorm:"column:update_at"`
 }
 
 // TableName 指定表名
@@ -89,9 +91,9 @@ func (r *Repository) Delete(ctx context.Context, id uuid.UUID, deleteBy string) 
 // GetByID 按 ID 查询项目（不含已删除）
 func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*projdomain.Project, error) {
 	var po projectPO
-	err := r.db.WithContext(ctx).
+	err := withCounts(r.db.WithContext(ctx)).
 		Where("id = ? AND is_deleted = false", id).
-		First(&po).Error
+		Take(&po).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
@@ -136,7 +138,7 @@ func (r *Repository) List(ctx context.Context, filter projdomain.ListFilter) ([]
 	}
 
 	var pos []projectPO
-	err := query.
+	err := withCounts(query).
 		Order("create_at DESC").
 		Offset((filter.PageNum - 1) * filter.PageSize).
 		Limit(filter.PageSize).
@@ -150,6 +152,17 @@ func (r *Repository) List(ctx context.Context, filter projdomain.ListFilter) ([]
 		projects = append(projects, toDomain(&pos[i]))
 	}
 	return projects, total, nil
+}
+
+// withCounts 为项目查询附加逻辑文件夹数和项目成员关系数。
+func withCounts(query *gorm.DB) *gorm.DB {
+	return query.Select(`project_info.*,
+        (SELECT COUNT(DISTINCT f.group_id)
+         FROM environment_info AS e
+         JOIN folder_info AS f ON f.env_id = e.id AND f.is_deleted = false
+         WHERE e.project_id = project_info.id AND e.is_deleted = false) AS folder_count,
+        (SELECT COUNT(*) FROM project_user_relation AS pur
+         WHERE pur.project_id = project_info.id) AS member_count`)
 }
 
 // toPO 领域模型转持久化对象
@@ -174,18 +187,20 @@ func toPO(p *projdomain.Project) *projectPO {
 // toDomain 持久化对象转领域模型
 func toDomain(po *projectPO) *projdomain.Project {
 	return &projdomain.Project{
-		ID:        po.ID,
-		Code:      po.Code,
-		Name:      po.Name,
-		Remark:    po.Remark,
-		OrgID:     po.OrgID,
-		Manager:   po.Manager,
-		IsDeleted: po.IsDeleted,
-		DeleteAt:  po.DeleteAt,
-		DeleteBy:  po.DeleteBy,
-		CreateBy:  po.CreateBy,
-		UpdateBy:  po.UpdateBy,
-		CreateAt:  po.CreateAt,
-		UpdateAt:  po.UpdateAt,
+		ID:          po.ID,
+		Code:        po.Code,
+		Name:        po.Name,
+		Remark:      po.Remark,
+		OrgID:       po.OrgID,
+		Manager:     po.Manager,
+		FolderCount: po.FolderCount,
+		MemberCount: po.MemberCount,
+		IsDeleted:   po.IsDeleted,
+		DeleteAt:    po.DeleteAt,
+		DeleteBy:    po.DeleteBy,
+		CreateBy:    po.CreateBy,
+		UpdateBy:    po.UpdateBy,
+		CreateAt:    po.CreateAt,
+		UpdateAt:    po.UpdateAt,
 	}
 }

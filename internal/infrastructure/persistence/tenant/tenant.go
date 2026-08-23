@@ -14,18 +14,20 @@ import (
 
 // tenantPO tenant_info 表持久化对象（数据库列名下划线）
 type tenantPO struct {
-	ID        uuid.UUID  `gorm:"column:id;primaryKey"`
-	Code      string     `gorm:"column:code"`
-	Name      string     `gorm:"column:name"`
-	Remark    string     `gorm:"column:remark"`
-	Manager   string     `gorm:"column:manager"`
-	IsDeleted bool       `gorm:"column:is_deleted"`
-	DeleteAt  *time.Time `gorm:"column:delete_at"`
-	DeleteBy  string     `gorm:"column:delete_by"`
-	CreateBy  string     `gorm:"column:create_by"`
-	UpdateBy  string     `gorm:"column:update_by"`
-	CreateAt  time.Time  `gorm:"column:create_at"`
-	UpdateAt  time.Time  `gorm:"column:update_at"`
+	ID          uuid.UUID  `gorm:"column:id;primaryKey"`
+	Code        string     `gorm:"column:code"`
+	Name        string     `gorm:"column:name"`
+	Remark      string     `gorm:"column:remark"`
+	Manager     string     `gorm:"column:manager"`
+	OrgCount    int64      `gorm:"column:org_count;->"`
+	MemberCount int64      `gorm:"column:member_count;->"`
+	IsDeleted   bool       `gorm:"column:is_deleted"`
+	DeleteAt    *time.Time `gorm:"column:delete_at"`
+	DeleteBy    string     `gorm:"column:delete_by"`
+	CreateBy    string     `gorm:"column:create_by"`
+	UpdateBy    string     `gorm:"column:update_by"`
+	CreateAt    time.Time  `gorm:"column:create_at"`
+	UpdateAt    time.Time  `gorm:"column:update_at"`
 }
 
 // TableName 指定表名
@@ -81,9 +83,9 @@ func (r *Repository) Delete(ctx context.Context, id uuid.UUID, deleteBy string) 
 // GetByID 按 ID 查询租户（不含已删除）
 func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*tenantdomain.Tenant, error) {
 	var po tenantPO
-	err := r.db.WithContext(ctx).
+	err := withCounts(r.db.WithContext(ctx)).
 		Where("id = ? AND is_deleted = false", id).
-		First(&po).Error
+		Take(&po).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
@@ -125,7 +127,7 @@ func (r *Repository) List(ctx context.Context, filter tenantdomain.ListFilter) (
 	}
 
 	var pos []tenantPO
-	err := query.
+	err := withCounts(query).
 		Order("create_at DESC").
 		Offset((filter.PageNum - 1) * filter.PageSize).
 		Limit(filter.PageSize).
@@ -168,6 +170,15 @@ func applyAccessiblePermissionFilter(query *gorm.DB, filter tenantdomain.Accessi
 	return query
 }
 
+// withCounts 为租户查询附加有效组织数和成员数，避免列表逐条统计。
+func withCounts(query *gorm.DB) *gorm.DB {
+	return query.Select(`tenant_info.*,
+        (SELECT COUNT(*) FROM organization_info AS o
+         WHERE o.tenant_id = tenant_info.id AND o.is_deleted = false) AS org_count,
+        (SELECT COUNT(*) FROM user_info AS u
+         WHERE u.tenant_id = tenant_info.id AND u.is_deleted = false) AS member_count`)
+}
+
 // toPO 领域模型转持久化对象
 func toPO(t *tenantdomain.Tenant) *tenantPO {
 	return &tenantPO{
@@ -189,17 +200,19 @@ func toPO(t *tenantdomain.Tenant) *tenantPO {
 // toDomain 持久化对象转领域模型
 func toDomain(po *tenantPO) *tenantdomain.Tenant {
 	return &tenantdomain.Tenant{
-		ID:        po.ID,
-		Code:      po.Code,
-		Name:      po.Name,
-		Remark:    po.Remark,
-		Manager:   po.Manager,
-		IsDeleted: po.IsDeleted,
-		DeleteAt:  po.DeleteAt,
-		DeleteBy:  po.DeleteBy,
-		CreateBy:  po.CreateBy,
-		UpdateBy:  po.UpdateBy,
-		CreateAt:  po.CreateAt,
-		UpdateAt:  po.UpdateAt,
+		ID:          po.ID,
+		Code:        po.Code,
+		Name:        po.Name,
+		Remark:      po.Remark,
+		Manager:     po.Manager,
+		OrgCount:    po.OrgCount,
+		MemberCount: po.MemberCount,
+		IsDeleted:   po.IsDeleted,
+		DeleteAt:    po.DeleteAt,
+		DeleteBy:    po.DeleteBy,
+		CreateBy:    po.CreateBy,
+		UpdateBy:    po.UpdateBy,
+		CreateAt:    po.CreateAt,
+		UpdateAt:    po.UpdateAt,
 	}
 }

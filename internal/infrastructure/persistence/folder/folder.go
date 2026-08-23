@@ -23,6 +23,8 @@ type folderPO struct {
 	Remark         string     `gorm:"column:remark"`
 	Type           string     `gorm:"column:type"`
 	Manager        string     `gorm:"column:manager"`
+	SecretCount    int64      `gorm:"column:secret_count;->"`
+	FolderCount    *int64     `gorm:"column:folder_count;->"`
 	IsDeleted      bool       `gorm:"column:is_deleted"`
 	DeleteAt       *time.Time `gorm:"column:delete_at"`
 	DeleteBy       string     `gorm:"column:delete_by"`
@@ -92,9 +94,9 @@ func (r *Repository) DeleteByGroupID(ctx context.Context, groupID uuid.UUID, del
 // GetByID 按 ID 查询文件夹（不含已删除）
 func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*folderdomain.Folder, error) {
 	var po folderPO
-	err := r.db.WithContext(ctx).
+	err := withStats(r.db.WithContext(ctx)).
 		Where("id = ? AND is_deleted = false", id).
-		First(&po).Error
+		Take(&po).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
@@ -197,39 +199,11 @@ func (r *Repository) ListTopGroupIDsByEnvIDs(ctx context.Context, envIDs []uuid.
 	return groupIDs, nil
 }
 
-// ListSubGroupIDsByParentFolderID 列出指定 parent folder 下的所有子 folder 的 group_id（去重）
-// parentFolderID 是任意一个环境下 parent 的具体 ID；通过其 group_id 找到跨环境的全部 parent
-// 具体 ID，再用 IN 条件拿到全部子 folder 的 group_id。
+// ListSubGroupIDsByParentFolderID 列出指定 parent folder 下的所有子 folder 的 group_id（去重）。
 func (r *Repository) ListSubGroupIDsByParentFolderID(ctx context.Context, parentFolderID uuid.UUID) ([]uuid.UUID, error) {
-	// 1. 拿到 parent 的 group_id（不区分环境）
-	var parentGroupID uuid.UUID
-	err := r.db.WithContext(ctx).Model(&folderPO{}).
-		Select("group_id").
-		Where("id = ? AND is_deleted = false", parentFolderID).
-		Scan(&parentGroupID).Error
-	if err != nil {
-		return nil, err
-	}
-	if parentGroupID == uuid.Nil {
-		return nil, nil
-	}
-
-	// 2. 拿到 parent 在各环境下的全部具体 ID（同一 group_id 下所有未删除记录）
-	var parentIDs []uuid.UUID
-	err = r.db.WithContext(ctx).Model(&folderPO{}).
-		Where("group_id = ? AND is_deleted = false", parentGroupID).
-		Pluck("id", &parentIDs).Error
-	if err != nil {
-		return nil, err
-	}
-	if len(parentIDs) == 0 {
-		return nil, nil
-	}
-
-	// 3. 拿到子 folder 的 group_id 集合（每 code 一个，全环境共享）
 	var subGroupIDs []uuid.UUID
-	err = r.db.WithContext(ctx).Model(&folderPO{}).
-		Where("parent_folder_id IN ? AND is_deleted = false", parentIDs).
+	err := r.db.WithContext(ctx).Model(&folderPO{}).
+		Where("parent_folder_id = ? AND is_deleted = false", parentFolderID).
 		Distinct("group_id").
 		Pluck("group_id", &subGroupIDs).Error
 	if err != nil {
@@ -238,7 +212,8 @@ func (r *Repository) ListSubGroupIDsByParentFolderID(ctx context.Context, parent
 	return subGroupIDs, nil
 }
 
-// ListByGroupIDs 按 group_id 集合分页查询每 group_id 一条代表记录（屏蔽环境层级）
+// ListByGroupIDs 按 group_id 集合分页查询每 group_id 一条代表记录（屏蔽环境层级）。
+// groupIDs 已由顶级或子级入口限定，此处不再按 parent_folder_id 限制目录层级。
 //   - total = COUNT(DISTINCT group_id) （与 filter.Code / filter.Name 协同过滤）
 //   - 分页作用于 group_id 集合
 //   - 顺序：先按 code 字典序，每 code 内按 update_at DESC, create_at ASC 取代表
@@ -250,7 +225,7 @@ func (r *Repository) ListByGroupIDs(ctx context.Context, groupIDs []uuid.UUID, f
 	// 1. total = COUNT(DISTINCT group_id) 应用过滤
 	var total int64
 	countQ := r.db.WithContext(ctx).Model(&folderPO{}).
-		Where("group_id IN ? AND parent_folder_id IS NULL AND is_deleted = false", groupIDs)
+		Where("group_id IN ? AND is_deleted = false", groupIDs)
 	if filter.Code != "" {
 		countQ = countQ.Where("code ILIKE ?", "%"+filter.Code+"%")
 	}
@@ -265,7 +240,7 @@ func (r *Repository) ListByGroupIDs(ctx context.Context, groupIDs []uuid.UUID, f
 	var codes []string
 	codeQ := r.db.WithContext(ctx).Model(&folderPO{}).
 		Select("DISTINCT code").
-		Where("group_id IN ? AND parent_folder_id IS NULL AND is_deleted = false", groupIDs)
+		Where("group_id IN ? AND is_deleted = false", groupIDs)
 	if filter.Code != "" {
 		codeQ = codeQ.Where("code ILIKE ?", "%"+filter.Code+"%")
 	}
@@ -288,7 +263,7 @@ func (r *Repository) ListByGroupIDs(ctx context.Context, groupIDs []uuid.UUID, f
 	var pageGroupIDs []uuid.UUID
 	if err := r.db.WithContext(ctx).Model(&folderPO{}).
 		Select("DISTINCT group_id").
-		Where("group_id IN ? AND code IN ? AND parent_folder_id IS NULL AND is_deleted = false", groupIDs, codes).
+		Where("group_id IN ? AND code IN ? AND is_deleted = false", groupIDs, codes).
 		Pluck("group_id", &pageGroupIDs).Error; err != nil {
 		return nil, 0, err
 	}
@@ -297,14 +272,25 @@ func (r *Repository) ListByGroupIDs(ctx context.Context, groupIDs []uuid.UUID, f
 		return []*folderdomain.Folder{}, total, nil
 	}
 
-	// 3. 每 group_id 取代表记录：update_at DESC, create_at ASC 第一条
+	// 3. 每 group_id 取代表记录：update_at DESC, create_at ASC 第一条，并按该环境记录统计子资源。
 	// PostgreSQL DISTINCT ON 按 group_id 分组，与 ORDER BY 起始列匹配实现"每组一行"
 	var pos []folderPO
 	err := r.db.WithContext(ctx).Raw(
-		`SELECT DISTINCT ON (group_id) *
-         FROM folder_info
-         WHERE group_id IN ? AND parent_folder_id IS NULL AND is_deleted = false
-         ORDER BY group_id ASC, update_at DESC, create_at ASC`,
+		`WITH representative AS (
+             SELECT DISTINCT ON (group_id) *
+             FROM folder_info
+             WHERE group_id IN ? AND is_deleted = false
+             ORDER BY group_id ASC, update_at DESC, create_at ASC
+         )
+         SELECT representative.*,
+                (SELECT COUNT(*) FROM secret_info AS s
+                 WHERE s.folder_id = representative.id AND s.is_deleted = false) AS secret_count,
+                CASE WHEN representative.type = 'common' THEN
+                    (SELECT COUNT(*) FROM folder_info AS child
+                     WHERE child.parent_folder_id = representative.id AND child.is_deleted = false)
+                ELSE NULL END AS folder_count
+         FROM representative
+         ORDER BY representative.group_id ASC`,
 		pageGroupIDs,
 	).Scan(&pos).Error
 	if err != nil {
@@ -316,6 +302,17 @@ func (r *Repository) ListByGroupIDs(ctx context.Context, groupIDs []uuid.UUID, f
 		folders = append(folders, toDomain(&pos[i]))
 	}
 	return folders, total, nil
+}
+
+// withStats 按文件夹所在的单个环境统计有效密钥和直接子目录。
+func withStats(query *gorm.DB) *gorm.DB {
+	return query.Select(`folder_info.*,
+        (SELECT COUNT(*) FROM secret_info AS s
+         WHERE s.folder_id = folder_info.id AND s.is_deleted = false) AS secret_count,
+        CASE WHEN folder_info.type = 'common' THEN
+            (SELECT COUNT(*) FROM folder_info AS child
+             WHERE child.parent_folder_id = folder_info.id AND child.is_deleted = false)
+        ELSE NULL END AS folder_count`)
 }
 
 // toPO 领域模型转持久化对象
@@ -352,6 +349,8 @@ func toDomain(po *folderPO) *folderdomain.Folder {
 		Remark:         po.Remark,
 		Type:           po.Type,
 		Manager:        po.Manager,
+		SecretCount:    po.SecretCount,
+		FolderCount:    po.FolderCount,
 		IsDeleted:      po.IsDeleted,
 		DeleteAt:       po.DeleteAt,
 		DeleteBy:       po.DeleteBy,

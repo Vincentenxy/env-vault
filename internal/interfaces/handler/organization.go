@@ -25,16 +25,19 @@ func NewOrganizationHandler(svc orgapp.IService) *OrganizationHandler {
 
 // OrganizationDTO 组织响应数据（JSON 小驼峰）
 type OrganizationDTO struct {
-	ID       uuid.UUID `json:"id"`
-	Code     string    `json:"code"`
-	Name     string    `json:"name"`
-	Remark   string    `json:"remark"`
-	TenantID uuid.UUID `json:"tenantId"`
-	Manager  string    `json:"manager"`
-	CreateBy string    `json:"createBy"`
-	UpdateBy string    `json:"updateBy"`
-	CreateAt time.Time `json:"createAt"`
-	UpdateAt time.Time `json:"updateAt"`
+	ID           uuid.UUID `json:"id"`
+	Code         string    `json:"code"`
+	Name         string    `json:"name"`
+	Remark       string    `json:"remark"`
+	TenantID     uuid.UUID `json:"tenantId"`
+	Manager      string    `json:"manager"`
+	ManagerName  string    `json:"managerName"`
+	ProjectCount int64     `json:"projectCount"`
+	MemberCount  int64     `json:"memberCount"`
+	CreateBy     string    `json:"createBy"`
+	UpdateBy     string    `json:"updateBy"`
+	CreateAt     time.Time `json:"createAt"`
+	UpdateAt     time.Time `json:"updateAt"`
 }
 
 // CreateRequest 创建组织请求
@@ -259,15 +262,18 @@ func (h *OrganizationHandler) respondError(c *gin.Context, err error) {
 // toOrgDTO 领域模型转响应 DTO
 func toOrgDTO(o *orgdomain.Organization) *OrganizationDTO {
 	return &OrganizationDTO{
-		ID:       o.ID,
-		Code:     o.Code,
-		Name:     o.Name,
-		Remark:   o.Remark,
-		TenantID: o.TenantID,
-		Manager:  o.Manager,
-		CreateBy: o.CreateBy,
-		UpdateBy: o.UpdateBy,
-		CreateAt: o.CreateAt,
-		UpdateAt: o.UpdateAt,
+		ID:           o.ID,
+		Code:         o.Code,
+		Name:         o.Name,
+		Remark:       o.Remark,
+		TenantID:     o.TenantID,
+		Manager:      o.Manager,
+		ManagerName:  o.ManagerName,
+		ProjectCount: o.ProjectCount,
+		MemberCount:  o.MemberCount,
+		CreateBy:     o.CreateBy,
+		UpdateBy:     o.UpdateBy,
+		CreateAt:     o.CreateAt,
+		UpdateAt:     o.UpdateAt,
 	}
 }

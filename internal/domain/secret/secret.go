@@ -56,13 +56,22 @@ type History struct {
 	BatchID         uuid.UUID
 	GroupID         uuid.UUID
 	FolderID        uuid.UUID
+	EnvID           uuid.UUID // 批次查询投影字段，不写入历史表
 	EnvCode         string
+	Key             string // 批次查询投影字段，不写入历史表
+	Remark          string // 批次查询投影字段，不写入历史表
 	ValueCiphertext string
 	ValueType       string
 	Version         int
 	CommitMsg       string
 	CreateBy        string
 	CreateAt        time.Time
+}
+
+// HistoryTarget 表示一个逻辑 Secret 在某个环境下的物理记录。
+type HistoryTarget struct {
+	EnvID    uuid.UUID
+	SecretID uuid.UUID
 }
 
 // Repository 密钥仓储接口（领域层定义，基础设施层实现）
@@ -89,6 +98,8 @@ type Repository interface {
 	CreateHistoryBatch(ctx context.Context, histories []*History) error
 	// ListHistoryBySecretID 按具体环境实例分页查询历史
 	ListHistoryBySecretID(ctx context.Context, secretID uuid.UUID, offset, limit int) ([]*History, int64, error)
+	// ListHistoryTargetsByGroupID 查询逻辑 Secret 下各环境对应的 env_id 与 secret_id
+	ListHistoryTargetsByGroupID(ctx context.Context, groupID uuid.UUID) ([]HistoryTarget, error)
 	// ListHistoryByBatchID 查询一次变更批次的全部历史
 	ListHistoryByBatchID(ctx context.Context, batchID uuid.UUID) ([]*History, error)
 	// WithTx 在事务中执行 fn：fn 收到的 ctx 透传事务句柄，内部方法须通过 ctx 拿 tx
