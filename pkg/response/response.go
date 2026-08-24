@@ -47,9 +47,14 @@ func BadRequest(c *gin.Context, err error) {
 // HTTP 状态码与 body 内的 code、msg 保持对应，msg 使用标准 HTTP 状态文本。
 // 用于 400/401/403/404/500 等场景。
 func AbortWithHTTPStatus(c *gin.Context, httpStatus int) {
+	AbortWithHTTPStatusMessage(c, httpStatus, http.StatusText(httpStatus))
+}
+
+// AbortWithHTTPStatusMessage 使用指定提示信息终止请求，同时保持 HTTP 状态和业务码一致。
+func AbortWithHTTPStatusMessage(c *gin.Context, httpStatus int, message string) {
 	c.AbortWithStatusJSON(httpStatus, Response{
 		Code:    httpStatus,
-		Message: http.StatusText(httpStatus),
+		Message: message,
 		Data:    nil,
 	})
 }

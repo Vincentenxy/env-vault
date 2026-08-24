@@ -119,6 +119,13 @@ CREATE INDEX IF NOT EXISTS idx_organization_info_tenant_code ON organization_inf
 
 **说明**：用户信息表。`id` 为系统内部生成的 UUID，`user_id` 为外部系统传入的用户标识，对应当前 JWT 中的 `staffuserid`。用户归属租户和组织，关联关系由代码层维护，不使用外键。密码字段仅允许保存不可逆哈希，当前不设置密码时保存空字符串。
 
+已有表增加锁定字段：
+
+```sql
+ALTER TABLE user_info
+    ADD COLUMN IF NOT EXISTS is_blocked boolean NOT NULL DEFAULT false;
+```
+
 ```sql
 CREATE TABLE IF NOT EXISTS user_info (
     id            uuid        PRIMARY KEY,               -- 系统内部生成
@@ -128,8 +135,9 @@ CREATE TABLE IF NOT EXISTS user_info (
     password_hash text        NOT NULL DEFAULT '',       -- 密码哈希，当前不设置
     email         text        NOT NULL DEFAULT '',       -- 邮箱，当前不设置
     phone         text        NOT NULL DEFAULT '',       -- 手机号，当前不设置
-    tenant_id     uuid        NOT NULL,                  -- 所属租户 ID（代码层面关联，无外键）
-    org_id        uuid        NOT NULL,                  -- 所属组织 ID（代码层面关联，无外键）
+    tenant_id     uuid                ,                  -- 所属租户 ID（代码层面关联，无外键）
+    org_id        uuid                ,                  -- 所属组织 ID（代码层面关联，无外键）
+    is_blocked    boolean     NOT NULL DEFAULT false,   -- 是否锁定，锁定用户禁止访问认证接口
     is_deleted    boolean     NOT NULL DEFAULT false,
     delete_at     timestamptz,
     delete_by     text        NOT NULL DEFAULT '',
@@ -164,11 +172,13 @@ CREATE INDEX IF NOT EXISTS idx_user_info_tenant_username ON user_info (tenant_id
 - `username` 在同一租户的未删除用户中唯一。
 - 用户更新接口只更新已存在的用户，不承担创建职责；用户创建由后续登录相关接口实现。
 - `password_hash` 仅允许保存不可逆密码哈希，禁止保存明文密码。
+- `is_blocked = true` 的用户通过 JWT 验签后由认证中间件返回 HTTP 403，不进入业务处理器。
 
 **缓存规则**：
 
 - PostgreSQL 是用户信息的权威数据源。
 - 系统启动后异步查询全部未删除用户，将用户资料刷新到 Redis，并将 `user_id -> nickname` 刷新到进程内存。
+- 用户锁定状态单独写入 Redis Hash，认证时优先查询 Redis，未命中或 Redis 异常时回源 PostgreSQL。
 - 查询用户姓名时依次查询进程内存、Redis、PostgreSQL；Redis 或 PostgreSQL 命中后回填前级缓存，PostgreSQL 仍未查询到时返回用户不存在错误。
 - 用户资料更新成功后，同步刷新当前实例的内存姓名缓存和 Redis 用户资料缓存；缓存刷新失败不回滚已提交的数据库更新。
 - Redis 用户资料不保存 `password_hash`，避免扩大密码凭证的存储范围。
@@ -428,7 +438,7 @@ CREATE INDEX IF NOT EXISTS idx_secret_info_folder_key ON secret_info (folder_id,
 |------|------|
 | `group_id` 一致性 | 同一 secret 的所有环境实例共享同一 `group_id`（创建时服务端一次性生成，全环境共享） |
 | key 唯一范围 | 同一业务 folder（逻辑）下 key 唯一；物理上同一 `folder_id` 内唯一。校验时通过 folder 的 `group_id` 展开全部环境实例后比对 |
-| 创建展开 | 入参 `folderGroupId` + 各环境的 value 列表（含 envId），后端按 `folderGroupId + envId` 定位该环境下 folder 的 id 落库 |
+| 创建展开 | 入参 `folderGroupId` + 各环境的 value 列表（含 envId）；每个 secret 至少填写一个非空环境值，已提交的空环境仍创建实例以便后续通过 `secretId` 补值，后端按 `folderGroupId + envId` 定位对应 folder 的 id |
 | `env_code` 冗余 | 与 `folder_id` 所属环境的 code 一致（创建时写入）。因 folder.env_id 创建后不变、所有表的 code 均不可更新，该冗余永久有效，查询聚合时无需再跳 folder/env 表 |
 | `value_type` 预留 | 当前默认空串，后续启用 number/string 类型语义 |
 | `version` 递增 | 每个环境实例独立维护版本号，默认 1；仅该环境的 value 实际变化时递增 |

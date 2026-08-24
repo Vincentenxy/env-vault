@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	userdomain "env-vault/internal/domain/user"
 )
@@ -22,6 +23,7 @@ type userPO struct {
 	Phone        string     `gorm:"column:phone"`
 	TenantID     uuid.UUID  `gorm:"column:tenant_id"`
 	OrgID        uuid.UUID  `gorm:"column:org_id"`
+	IsBlocked    bool       `gorm:"column:is_blocked"`
 	IsDeleted    bool       `gorm:"column:is_deleted"`
 	DeleteAt     *time.Time `gorm:"column:delete_at"`
 	DeleteBy     string     `gorm:"column:delete_by"`
@@ -29,6 +31,16 @@ type userPO struct {
 	UpdateBy     string     `gorm:"column:update_by"`
 	CreateAt     time.Time  `gorm:"column:create_at"`
 	UpdateAt     time.Time  `gorm:"column:update_at"`
+}
+
+type projectUserRelationPO struct {
+	ID        uuid.UUID `gorm:"column:id;primaryKey"`
+	ProjectID uuid.UUID `gorm:"column:project_id"`
+	UserID    uuid.UUID `gorm:"column:user_id"`
+}
+
+func (projectUserRelationPO) TableName() string {
+	return "project_user_relation"
 }
 
 func (userPO) TableName() string {
@@ -97,7 +109,7 @@ func (r *Repository) List(ctx context.Context, filter userdomain.ListFilter) ([]
 	var pos []userPO
 	query := r.db.WithContext(ctx).
 		Model(&userPO{}).
-		Select("user_info.id, user_info.user_id, user_info.nickname").
+		Select("user_info.id, user_info.user_id, user_info.nickname, user_info.is_blocked").
 		Where("user_info.is_deleted = false")
 
 	switch {
@@ -134,6 +146,135 @@ func (r *Repository) List(ctx context.Context, filter userdomain.ListFilter) ([]
 	return users, nil
 }
 
+// Allocate 在单个事务内批量修改用户的租户、组织和项目归属。
+func (r *Repository) Allocate(ctx context.Context, change userdomain.AllocationChange) ([]*userdomain.User, []string, error) {
+	var updated []*userdomain.User
+	var missing []string
+
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var pos []userPO
+		if err := tx.
+			Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("user_id IN ? AND is_deleted = false", change.UserIDs).
+			Find(&pos).Error; err != nil {
+			return err
+		}
+
+		found := make(map[string]struct{}, len(pos))
+		userInternalIDs := make([]uuid.UUID, 0, len(pos))
+		for i := range pos {
+			found[pos[i].UserID] = struct{}{}
+			userInternalIDs = append(userInternalIDs, pos[i].ID)
+		}
+		for _, userID := range change.UserIDs {
+			if _, ok := found[userID]; !ok {
+				missing = append(missing, userID)
+			}
+		}
+		if len(missing) > 0 {
+			return nil
+		}
+
+		now := time.Now()
+		updates := map[string]any{
+			"update_by": change.Operator,
+			"update_at": now,
+		}
+
+		switch change.Type {
+		case userdomain.AllocationTypeTenant:
+			if change.Operation == userdomain.AllocationOperationAdd {
+				updates["tenant_id"] = change.TenantID
+				if err := updateUsers(tx, change.UserIDs, nil, updates); err != nil {
+					return err
+				}
+			} else {
+				updates["tenant_id"] = nil
+				updates["org_id"] = nil
+				if err := updateUsers(tx, change.UserIDs, &change.ResourceID, updates); err != nil {
+					return err
+				}
+				if err := tx.Where(`user_id IN ? AND project_id IN (
+					SELECT p.id FROM project_info AS p
+					JOIN organization_info AS o ON o.id = p.org_id
+					WHERE o.tenant_id = ?
+				)`, userInternalIDs, change.ResourceID).Delete(&projectUserRelationPO{}).Error; err != nil {
+					return err
+				}
+			}
+
+		case userdomain.AllocationTypeOrg:
+			if change.Operation == userdomain.AllocationOperationAdd {
+				updates["tenant_id"] = change.TenantID
+				updates["org_id"] = change.OrgID
+				if err := updateUsers(tx, change.UserIDs, nil, updates); err != nil {
+					return err
+				}
+			} else {
+				updates["org_id"] = nil
+				if err := updateUsersByOrg(tx, change.UserIDs, change.ResourceID, updates); err != nil {
+					return err
+				}
+				if err := tx.Where(`user_id IN ? AND project_id IN (
+					SELECT id FROM project_info WHERE org_id = ?
+				)`, userInternalIDs, change.ResourceID).Delete(&projectUserRelationPO{}).Error; err != nil {
+					return err
+				}
+			}
+
+		case userdomain.AllocationTypeProject:
+			if change.Operation == userdomain.AllocationOperationAdd {
+				updates["tenant_id"] = change.TenantID
+				updates["org_id"] = change.OrgID
+				if err := updateUsers(tx, change.UserIDs, nil, updates); err != nil {
+					return err
+				}
+				relations := make([]projectUserRelationPO, 0, len(userInternalIDs))
+				for _, userID := range userInternalIDs {
+					relations = append(relations, projectUserRelationPO{
+						ID: uuid.New(), ProjectID: change.ProjectID, UserID: userID,
+					})
+				}
+				if err := tx.Clauses(clause.OnConflict{
+					Columns:   []clause.Column{{Name: "project_id"}, {Name: "user_id"}},
+					DoNothing: true,
+				}).Create(&relations).Error; err != nil {
+					return err
+				}
+			} else if err := tx.
+				Where("project_id = ? AND user_id IN ?", change.ProjectID, userInternalIDs).
+				Delete(&projectUserRelationPO{}).Error; err != nil {
+				return err
+			}
+		}
+
+		var refreshed []userPO
+		if err := tx.Where("id IN ? AND is_deleted = false", userInternalIDs).Find(&refreshed).Error; err != nil {
+			return err
+		}
+		updated = make([]*userdomain.User, 0, len(refreshed))
+		for i := range refreshed {
+			updated = append(updated, toDomain(&refreshed[i]))
+		}
+		return nil
+	})
+	return updated, missing, err
+}
+
+func updateUsers(tx *gorm.DB, userIDs []string, tenantID *uuid.UUID, updates map[string]any) error {
+	query := tx.Model(&userPO{}).Where("user_id IN ? AND is_deleted = false", userIDs)
+	if tenantID != nil {
+		query = query.Where("tenant_id = ?", *tenantID)
+	}
+	return query.Updates(updates).Error
+}
+
+func updateUsersByOrg(tx *gorm.DB, userIDs []string, orgID uuid.UUID, updates map[string]any) error {
+	return tx.Model(&userPO{}).
+		Where("user_id IN ? AND org_id = ? AND is_deleted = false", userIDs, orgID).
+		Updates(updates).Error
+}
+
 // ListAll 查询全部未删除用户。
 func (r *Repository) ListAll(ctx context.Context) ([]*userdomain.User, error) {
 	var pos []userPO
@@ -162,6 +303,7 @@ func toDomain(po *userPO) *userdomain.User {
 		Phone:        po.Phone,
 		TenantID:     po.TenantID,
 		OrgID:        po.OrgID,
+		IsBlocked:    po.IsBlocked,
 		IsDeleted:    po.IsDeleted,
 		DeleteAt:     po.DeleteAt,
 		DeleteBy:     po.DeleteBy,

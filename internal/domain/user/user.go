@@ -19,6 +19,7 @@ type User struct {
 	Phone        string
 	TenantID     uuid.UUID
 	OrgID        uuid.UUID
+	IsBlocked    bool
 	IsDeleted    bool
 	DeleteAt     *time.Time
 	DeleteBy     string
@@ -26,6 +27,35 @@ type User struct {
 	UpdateBy     string
 	CreateAt     time.Time
 	UpdateAt     time.Time
+}
+
+// AllocationType 用户归属资源类型。
+type AllocationType string
+
+const (
+	AllocationTypeTenant  AllocationType = "tenant"
+	AllocationTypeOrg     AllocationType = "org"
+	AllocationTypeProject AllocationType = "project"
+)
+
+// AllocationOperation 用户归属变更操作。
+type AllocationOperation string
+
+const (
+	AllocationOperationAdd    AllocationOperation = "add"
+	AllocationOperationRemove AllocationOperation = "remove"
+)
+
+// AllocationChange 已完成资源层级解析的用户归属变更命令。
+type AllocationChange struct {
+	Type       AllocationType
+	Operation  AllocationOperation
+	ResourceID uuid.UUID
+	UserIDs    []string
+	TenantID   uuid.UUID
+	OrgID      uuid.UUID
+	ProjectID  uuid.UUID
+	Operator   string
 }
 
 // ListFilter 用户列表筛选条件。上层已按 projectId > orgId > tenantId > undistributed 归一化。
@@ -48,12 +78,22 @@ type Repository interface {
 	List(ctx context.Context, filter ListFilter) ([]*User, error)
 	// ListAll 查询全部未删除用户，用于启动时预热缓存。
 	ListAll(ctx context.Context) ([]*User, error)
+	// Allocate 在单个事务内批量更新用户归属及项目成员关系。
+	// 返回更新后的用户和不存在的外部用户 ID；存在缺失用户时不执行任何写入。
+	Allocate(ctx context.Context, change AllocationChange) ([]*User, []string, error)
 }
 
 // ProfileCache 用户资料二级缓存接口。
 type ProfileCache interface {
 	Get(ctx context.Context, userID string) (*User, error)
 	Set(ctx context.Context, user *User) error
+	Replace(ctx context.Context, users []*User) error
+}
+
+// BlockStatusCache 用户锁定状态缓存。found=false 表示缓存未命中，需要回源数据库。
+type BlockStatusCache interface {
+	Get(ctx context.Context, userID string) (blocked bool, found bool, err error)
+	Set(ctx context.Context, userID string, blocked bool) error
 	Replace(ctx context.Context, users []*User) error
 }
 

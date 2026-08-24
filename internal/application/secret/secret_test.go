@@ -336,6 +336,66 @@ func TestService_Create_Success(t *testing.T) {
 	}
 }
 
+func TestService_Create_PartialEnvironmentValues(t *testing.T) {
+	envs := newTestEnvs()
+	folderGroupID := uuid.New()
+	folders := newTestFolderGroup(folderGroupID, envs)
+	var createdBatch []*secretdomain.Secret
+	var histories []*secretdomain.History
+
+	secretRepo := &stubSecretRepo{
+		getByFolderKey: func(context.Context, []uuid.UUID, string) (*secretdomain.Secret, error) {
+			return nil, nil
+		},
+		createBatch: func(_ context.Context, secrets []*secretdomain.Secret) error {
+			createdBatch = secrets
+			return nil
+		},
+		createHistoryBatch: func(_ context.Context, items []*secretdomain.History) error {
+			histories = items
+			return nil
+		},
+	}
+	folderRepo := &stubFolderRepo{listByGroupID: func(context.Context, uuid.UUID) ([]*folderdomain.Folder, error) {
+		return folders, nil
+	}}
+	envRepo := &stubEnvRepo{getByID: func(_ context.Context, id uuid.UUID) (*envdomain.Environment, error) {
+		for _, env := range envs {
+			if env.ID == id {
+				return env, nil
+			}
+		}
+		return nil, nil
+	}}
+
+	svc := NewService(secretRepo, folderRepo, envRepo, testCipher(t))
+	created, err := svc.Create(context.Background(), CreateInput{SecretList: []CreateItemInput{{
+		FolderGroupID: folderGroupID,
+		Key:           "PARTIAL_SECRET",
+		Values: []ValueItemInput{
+			{EnvID: envs[0].ID, Value: "dev-value"},
+			{EnvID: envs[1].ID, Value: ""},
+		},
+	}}}, "operator")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if len(created) != 2 || len(createdBatch) != 2 || len(histories) != 2 {
+		t.Fatalf("expected both submitted environments, got created=%d batch=%d histories=%d", len(created), len(createdBatch), len(histories))
+	}
+	if created[0].EnvCode != "dev" || created[0].FolderID != folders[0].ID {
+		t.Fatalf("unexpected created environment: %+v", created[0])
+	}
+	plaintext, err := testCipher(t).Decrypt(created[0].ValueCiphertext)
+	if err != nil || plaintext != "dev-value" {
+		t.Fatalf("unexpected encrypted value plaintext=%q err=%v", plaintext, err)
+	}
+	emptyPlaintext, err := testCipher(t).Decrypt(created[1].ValueCiphertext)
+	if err != nil || emptyPlaintext != "" {
+		t.Fatalf("empty environment value must remain updateable, plaintext=%q err=%v", emptyPlaintext, err)
+	}
+}
+
 func TestService_Create_KeyExists(t *testing.T) {
 	envs := newTestEnvs()
 	folderGroupID := uuid.New()
@@ -427,6 +487,8 @@ func TestService_Create_InvalidParam(t *testing.T) {
 		{SecretList: []CreateItemInput{{FolderGroupID: uuid.Nil, Key: "K", Values: []ValueItemInput{{EnvID: uuid.New(), Value: "v"}}}}},
 		{SecretList: []CreateItemInput{{FolderGroupID: uuid.New(), Key: "", Values: []ValueItemInput{{EnvID: uuid.New(), Value: "v"}}}}},
 		{SecretList: []CreateItemInput{{FolderGroupID: uuid.New(), Key: "K", Values: nil}}},
+		{SecretList: []CreateItemInput{{FolderGroupID: uuid.New(), Key: "K", Values: []ValueItemInput{{EnvID: uuid.New(), Value: ""}}}}},
+		{SecretList: []CreateItemInput{{FolderGroupID: uuid.New(), Key: "K", Values: []ValueItemInput{{EnvID: uuid.New(), Value: "   "}, {EnvID: uuid.New(), Value: "\t"}}}}},
 	}
 	for _, in := range cases {
 		if _, err := svc.Create(context.Background(), in, "u"); !errors.Is(err, ErrInvalidParam) {
@@ -772,6 +834,8 @@ func TestService_GetByGroup_Success(t *testing.T) {
 	c := testCipher(t)
 	ct0, _ := c.Encrypt("prod-token")
 	ct1, _ := c.Encrypt("test-token")
+	devUpdateAt := time.Date(2026, time.August, 24, 10, 11, 12, 0, time.UTC)
+	testUpdateAt := time.Date(2026, time.August, 24, 11, 12, 13, 0, time.UTC)
 
 	secretRepo := &stubSecretRepo{
 		listByGroup: func(ctx context.Context, gid uuid.UUID) ([]*secretdomain.Secret, error) {
@@ -779,8 +843,8 @@ func TestService_GetByGroup_Success(t *testing.T) {
 				t.Fatalf("unexpected group %v", gid)
 			}
 			return []*secretdomain.Secret{
-				{ID: uuid.New(), GroupID: groupID, FolderID: folders[0].ID, EnvCode: "dev", Key: "TOKEN", ValueCiphertext: ct0, Version: 3, ValueType: "string"},
-				{ID: uuid.New(), GroupID: groupID, FolderID: folders[1].ID, EnvCode: "test", Key: "TOKEN", ValueCiphertext: ct1, Version: 5, ValueType: "number"},
+				{ID: uuid.New(), GroupID: groupID, FolderID: folders[0].ID, EnvCode: "dev", Key: "TOKEN", ValueCiphertext: ct0, Version: 3, ValueType: "string", UpdateAt: devUpdateAt},
+				{ID: uuid.New(), GroupID: groupID, FolderID: folders[1].ID, EnvCode: "test", Key: "TOKEN", ValueCiphertext: ct1, Version: 5, ValueType: "number", UpdateAt: testUpdateAt},
 			}, nil
 		},
 	}
@@ -798,6 +862,9 @@ func TestService_GetByGroup_Success(t *testing.T) {
 	}
 	if view.Values["test"].Version != 5 || view.Values["test"].ValueType != "number" {
 		t.Fatalf("test detail fields not propagated: %+v", view.Values["test"])
+	}
+	if !view.Values["dev"].UpdateAt.Equal(devUpdateAt) || !view.Values["test"].UpdateAt.Equal(testUpdateAt) {
+		t.Fatalf("environment update times not propagated: %+v", view.Values)
 	}
 }
 

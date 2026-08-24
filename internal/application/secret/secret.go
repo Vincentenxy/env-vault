@@ -88,6 +88,7 @@ type SecretValueView struct {
 	Value     string
 	Version   int
 	ValueType string
+	UpdateAt  time.Time
 }
 
 // HistoryInput 历史查询入参，查询优先级 groupId > secretId > batchId
@@ -188,7 +189,7 @@ func NewService(repo secretdomain.Repository, folderRepo folderdomain.Repository
 // 确保 Service 满足 IService 编译期断言
 var _ IService = (*Service)(nil)
 
-// Create 批量创建 secrets：每个 secret 按 folderGroupId 展开全部环境实例，按 envId 定位各环境下 folder 的 id 落库
+// Create 批量创建 secrets：每个 secret 至少包含一个非空环境值，已提交的空环境仍创建实例以便后续更新。
 func (s *Service) Create(ctx context.Context, in CreateInput, operator string) ([]*secretdomain.Secret, error) {
 	if len(in.SecretList) == 0 {
 		return nil, ErrInvalidParam
@@ -233,9 +234,20 @@ func (s *Service) Create(ctx context.Context, in CreateInput, operator string) (
 	return created, nil
 }
 
-// createOne 创建单个 secret（展开到全部环境）
+// createOne 创建单个 secret。
 func (s *Service) createOne(ctx context.Context, item CreateItemInput, operator string, now time.Time) ([]*secretdomain.Secret, error) {
 	if item.FolderGroupID == uuid.Nil || item.Key == "" || len(item.Values) == 0 {
+		return nil, ErrInvalidParam
+	}
+
+	hasValue := false
+	for _, value := range item.Values {
+		if strings.TrimSpace(value.Value) != "" {
+			hasValue = true
+			break
+		}
+	}
+	if !hasValue {
 		return nil, ErrInvalidParam
 	}
 
@@ -707,6 +719,7 @@ func (s *Service) buildViews(ctx context.Context, secrets []*secretdomain.Secret
 			Value:     value,
 			Version:   sec.Version,
 			ValueType: sec.ValueType,
+			UpdateAt:  sec.UpdateAt,
 		}
 	}
 

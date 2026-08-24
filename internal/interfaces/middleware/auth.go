@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"crypto/rsa"
 	"encoding/base64"
 	"errors"
@@ -17,19 +18,29 @@ import (
 	"go.uber.org/zap"
 )
 
+// UserBlockChecker 查询认证用户是否已被锁定。
+type UserBlockChecker interface {
+	IsBlocked(ctx context.Context, userID string) (bool, error)
+}
+
 // Auth JWT 认证中间件。
 //
 // 规则：
 //   - 从请求头 Authorization: Bearer <token> 提取 JWT
 //   - 使用配置的 RSA 公钥验签（仅允许 RS256/384/512）
 //   - 解析成功后将用户信息（userId/name/jwt/cookie）写入 gin.Context
-//   - 任何失败统一返回 HTTP 401 标准错误结构（code/msg 与 HTTP 状态对应）
+//   - JWT 认证失败返回 HTTP 401，锁定用户返回 HTTP 403，锁定状态查询异常返回 HTTP 500
 //
 // publicKeyB64 支持两种格式：base64 编码的 DER 公钥，或 PEM 文本。
-func Auth(publicKeyB64 string) (gin.HandlerFunc, error) {
+func Auth(publicKeyB64 string, blockCheckers ...UserBlockChecker) (gin.HandlerFunc, error) {
 	publicKey, err := parsePublicKey(publicKeyB64)
 	if err != nil {
 		return nil, fmt.Errorf("auth middleware init: %w", err)
+	}
+
+	var blockChecker UserBlockChecker
+	if len(blockCheckers) > 0 {
+		blockChecker = blockCheckers[0]
 	}
 
 	return func(c *gin.Context) {
@@ -59,6 +70,18 @@ func Auth(publicKeyB64 string) (gin.HandlerFunc, error) {
 			UserID: getClaimString(claims, "staffuserid"),
 			Name:   getClaimString(claims, "name"),
 			Jwt:    tokenString,
+		}
+		if blockChecker != nil && user.UserID != "" {
+			blocked, err := blockChecker.IsBlocked(c, user.UserID)
+			if err != nil {
+				logger.Error(c, "check user block status failed", zap.String("userId", user.UserID), zap.Error(err))
+				response.AbortWithHTTPStatusMessage(c, 500, "internal error")
+				return
+			}
+			if blocked {
+				response.AbortWithHTTPStatusMessage(c, 403, "用户被锁定")
+				return
+			}
 		}
 		userctx.Set(c, user)
 

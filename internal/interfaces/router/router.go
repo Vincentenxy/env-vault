@@ -49,8 +49,15 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 	folderRepo := folderrepo.NewRepository(db)
 	userRepo := userrepo.NewRepository(db)
 	userProfileCache := usercache.NewRedisProfileCache(redisClient, cfg.Redis.KeyPrefix)
+	userBlockStatusCache := usercache.NewRedisBlockStatusCache(redisClient, cfg.Redis.KeyPrefix)
 	userNameCache := usercache.NewMemoryNameCache()
-	userSvc := userapp.NewService(userRepo, userProfileCache, userNameCache)
+	userSvc := userapp.NewService(
+		userRepo,
+		userProfileCache,
+		userNameCache,
+		userapp.WithBlockStatusCache(userBlockStatusCache),
+		userapp.WithAllocationRepositories(tenantRepo, orgRepo, projRepo),
+	)
 
 	tenantSvc := tenantapp.NewService(tenantRepo, orgRepo, userSvc)
 	orgSvc := orgapp.NewService(orgRepo, userSvc)
@@ -80,7 +87,7 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 	secretHandler := handler.NewSecretHandler(secretSvc)
 
 	// 初始化 JWT 认证中间件（加载配置中的公钥）
-	authMiddleware, err := middleware.Auth(cfg.Auth.JwtPublicKey)
+	authMiddleware, err := middleware.Auth(cfg.Auth.JwtPublicKey, userSvc)
 	if err != nil {
 		return nil, err
 	}
@@ -102,6 +109,7 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 		{
 			userGroup.POST("/update", userHandler.Update)
 			userGroup.POST("/list", userHandler.List)
+			userGroup.POST("/allocate", userHandler.Allocate)
 			userGroup.GET("/me", userHandler.Me)
 		}
 

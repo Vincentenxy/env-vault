@@ -19,7 +19,16 @@ import (
 type stubUserService struct {
 	updateFn     func(ctx context.Context, in userapp.UpdateInput) (*userdomain.User, error)
 	listFn       func(ctx context.Context, in userapp.ListInput) ([]*userdomain.User, error)
+	allocateFn   func(ctx context.Context, in userapp.AllocateInput) (int, error)
 	getProfileFn func(ctx context.Context, userID string) (*userdomain.User, error)
+	isBlockedFn  func(ctx context.Context, userID string) (bool, error)
+}
+
+func (s *stubUserService) Allocate(ctx context.Context, in userapp.AllocateInput) (int, error) {
+	if s.allocateFn != nil {
+		return s.allocateFn(ctx, in)
+	}
+	return 0, nil
 }
 
 func (s *stubUserService) Update(ctx context.Context, in userapp.UpdateInput) (*userdomain.User, error) {
@@ -47,6 +56,13 @@ func (s *stubUserService) GetNickname(ctx context.Context, userID string) (strin
 	return "", nil
 }
 
+func (s *stubUserService) IsBlocked(ctx context.Context, userID string) (bool, error) {
+	if s.isBlockedFn != nil {
+		return s.isBlockedFn(ctx, userID)
+	}
+	return false, nil
+}
+
 func (s *stubUserService) WarmUp(ctx context.Context) (int, error) {
 	return 0, nil
 }
@@ -64,6 +80,7 @@ func newUserTestEngine(svc userapp.IService, authUser *userctx.User) *gin.Engine
 	r.GET("/api/v1/auth/me", h.Me)
 	r.POST("/api/v1/user/update", h.Update)
 	r.POST("/api/v1/user/list", h.List)
+	r.POST("/api/v1/user/allocate", h.Allocate)
 	return r
 }
 
@@ -140,6 +157,7 @@ func TestUserHandler_List_ReturnsOnlyPublicFields(t *testing.T) {
 		return []*userdomain.User{{
 			ID: internalID, UserID: "external-1", Nickname: "User One",
 			Username: "login-name", PasswordHash: "password-hash", Email: "private@example.com", Phone: "13800000000",
+			IsBlocked: true,
 		}}, nil
 	}}
 
@@ -159,13 +177,38 @@ func TestUserHandler_List_ReturnsOnlyPublicFields(t *testing.T) {
 		t.Fatalf("expected one user, got %+v", list)
 	}
 	item := list[0].(map[string]any)
-	if len(item) != 3 || item["id"] != internalID.String() || item["userId"] != "external-1" || item["nickname"] != "User One" {
+	if len(item) != 4 || item["id"] != internalID.String() || item["userId"] != "external-1" ||
+		item["nickname"] != "User One" || item["isBlocked"] != true {
 		t.Fatalf("unexpected public user data: %+v", item)
 	}
 	for _, sensitive := range []string{"username", "passwordHash", "email", "phone", "tenantId", "orgId"} {
 		if _, exists := item[sensitive]; exists {
 			t.Fatalf("sensitive field %q leaked: %+v", sensitive, item)
 		}
+	}
+}
+
+func TestUserHandler_Allocate_PassesResourceAndOperator(t *testing.T) {
+	resourceID := uuid.New()
+	svc := &stubUserService{allocateFn: func(_ context.Context, in userapp.AllocateInput) (int, error) {
+		if in.Type != "org" || in.Operation != "add" || in.ResourceID != resourceID ||
+			in.Operator != "operator" || len(in.UserIDs) != 2 || in.UserIDs[0] != "u-1" {
+			t.Fatalf("unexpected allocate input: %+v", in)
+		}
+		return 2, nil
+	}}
+	r := newUserTestEngine(svc, &userctx.User{UserID: "operator"})
+	w := doJSON(t, r, http.MethodPost, "/api/v1/user/allocate", map[string]any{
+		"type": "org", "operate": "add", "resourceId": resourceID,
+		"userIdList": []string{"u-1", "u-2"},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := decodeBody(t, w)
+	data := body["data"].(map[string]any)
+	if body["code"] != float64(0) || data["affectedCount"] != float64(2) {
+		t.Fatalf("unexpected response: %s", w.Body.String())
 	}
 }
 

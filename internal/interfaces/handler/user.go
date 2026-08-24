@@ -41,27 +41,42 @@ type UserListRequest struct {
 	Undistributed bool      `json:"undistributed"`
 }
 
+// UserAllocateRequest 用户批量分配请求。
+type UserAllocateRequest struct {
+	Type       string    `json:"type"`
+	Operate    string    `json:"operate"`
+	ResourceID uuid.UUID `json:"resourceId"`
+	UserIDList []string  `json:"userIdList"`
+}
+
 // UserListItemDTO 用户列表项，只包含公开展示字段。
 type UserListItemDTO struct {
-	ID       uuid.UUID `json:"id"`
-	UserID   string    `json:"userId"`
-	Nickname string    `json:"nickname"`
+	ID        uuid.UUID `json:"id"`
+	UserID    string    `json:"userId"`
+	Nickname  string    `json:"nickname"`
+	IsBlocked bool      `json:"isBlocked"`
+}
+
+// UserAllocateResponse 用户批量分配结果。
+type UserAllocateResponse struct {
+	AffectedCount int `json:"affectedCount"`
 }
 
 // UserDTO 用户资料响应，不包含密码哈希和软删除字段。
 type UserDTO struct {
-	ID       uuid.UUID `json:"id"`
-	UserID   string    `json:"userId"`
-	Nickname string    `json:"nickname"`
-	Username string    `json:"username"`
-	Email    string    `json:"email"`
-	Phone    string    `json:"phone"`
-	TenantID uuid.UUID `json:"tenantId"`
-	OrgID    uuid.UUID `json:"orgId"`
-	CreateBy string    `json:"createBy"`
-	UpdateBy string    `json:"updateBy"`
-	CreateAt time.Time `json:"createAt"`
-	UpdateAt time.Time `json:"updateAt"`
+	ID        uuid.UUID `json:"id"`
+	UserID    string    `json:"userId"`
+	Nickname  string    `json:"nickname"`
+	Username  string    `json:"username"`
+	Email     string    `json:"email"`
+	Phone     string    `json:"phone"`
+	TenantID  uuid.UUID `json:"tenantId"`
+	OrgID     uuid.UUID `json:"orgId"`
+	IsBlocked bool      `json:"isBlocked"`
+	CreateBy  string    `json:"createBy"`
+	UpdateBy  string    `json:"updateBy"`
+	CreateAt  time.Time `json:"createAt"`
+	UpdateAt  time.Time `json:"updateAt"`
 }
 
 // Me 获取当前认证用户资料。
@@ -110,12 +125,32 @@ func (h *UserHandler) List(c *gin.Context) {
 	list := make([]UserListItemDTO, 0, len(users))
 	for _, user := range users {
 		list = append(list, UserListItemDTO{
-			ID:       user.ID,
-			UserID:   user.UserID,
-			Nickname: user.Nickname,
+			ID:        user.ID,
+			UserID:    user.UserID,
+			Nickname:  user.Nickname,
+			IsBlocked: user.IsBlocked,
 		})
 	}
 	response.Success(c, list)
+}
+
+// Allocate 批量分配或移除用户的租户、组织、项目归属。
+func (h *UserHandler) Allocate(c *gin.Context) {
+	var req UserAllocateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, err)
+		return
+	}
+
+	affected, err := h.svc.Allocate(c, userapp.AllocateInput{
+		Type: req.Type, Operation: req.Operate, ResourceID: req.ResourceID,
+		UserIDs: req.UserIDList, Operator: operator(c),
+	})
+	h.respondError(c, err)
+	if err != nil {
+		return
+	}
+	response.Success(c, UserAllocateResponse{AffectedCount: affected})
 }
 
 // Update 更新当前认证用户资料。
@@ -159,7 +194,10 @@ func (h *UserHandler) respondError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, userapp.ErrInvalidParam),
 		errors.Is(err, userapp.ErrNotFound),
-		errors.Is(err, userapp.ErrUsernameExists):
+		errors.Is(err, userapp.ErrUsernameExists),
+		errors.Is(err, userapp.ErrTenantNotFound),
+		errors.Is(err, userapp.ErrOrgNotFound),
+		errors.Is(err, userapp.ErrProjectNotFound):
 		response.Error(c, err.Error())
 	default:
 		response.Error(c, "internal error")
@@ -168,17 +206,18 @@ func (h *UserHandler) respondError(c *gin.Context, err error) {
 
 func toUserDTO(user *userdomain.User) *UserDTO {
 	return &UserDTO{
-		ID:       user.ID,
-		UserID:   user.UserID,
-		Nickname: user.Nickname,
-		Username: user.Username,
-		Email:    user.Email,
-		Phone:    user.Phone,
-		TenantID: user.TenantID,
-		OrgID:    user.OrgID,
-		CreateBy: user.CreateBy,
-		UpdateBy: user.UpdateBy,
-		CreateAt: user.CreateAt,
-		UpdateAt: user.UpdateAt,
+		ID:        user.ID,
+		UserID:    user.UserID,
+		Nickname:  user.Nickname,
+		Username:  user.Username,
+		Email:     user.Email,
+		Phone:     user.Phone,
+		TenantID:  user.TenantID,
+		OrgID:     user.OrgID,
+		IsBlocked: user.IsBlocked,
+		CreateBy:  user.CreateBy,
+		UpdateBy:  user.UpdateBy,
+		CreateAt:  user.CreateAt,
+		UpdateAt:  user.UpdateAt,
 	}
 }

@@ -38,3 +38,27 @@ func TestRedisProfileCache_NilClientIsNoOp(t *testing.T) {
 		t.Fatalf("nil-client replace should be no-op: %v", err)
 	}
 }
+
+func TestRedisBlockStatusCache_NilClientIsNoOp(t *testing.T) {
+	cache := NewRedisBlockStatusCache(nil, "env_vault")
+	if cache.key != "env_vault:user:blocked" {
+		t.Fatalf("unexpected redis key: %s", cache.key)
+	}
+	blocked, found, err := cache.Get(t.Context(), "u-1")
+	if err != nil || found || blocked {
+		t.Fatalf("unexpected nil-client result blocked=%v found=%v err=%v", blocked, found, err)
+	}
+	if err := cache.Set(t.Context(), "u-1", true); err != nil {
+		t.Fatalf("nil-client set should be no-op: %v", err)
+	}
+	if err := cache.Replace(t.Context(), []*userdomain.User{{UserID: "u-1", IsBlocked: true}}); err != nil {
+		t.Fatalf("nil-client replace should be no-op: %v", err)
+	}
+}
+
+func TestCachedUser_PreservesBlockedStatus(t *testing.T) {
+	user := &userdomain.User{UserID: "u-1", IsBlocked: true}
+	if cached := toCachedUser(user); !cached.IsBlocked || !cached.toDomain().IsBlocked {
+		t.Fatal("blocked status was not preserved in Redis profile payload")
+	}
+}

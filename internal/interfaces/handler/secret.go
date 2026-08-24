@@ -102,6 +102,7 @@ type SecretValueDTO struct {
 	Value     string    `json:"value"`
 	Version   int       `json:"version"`
 	ValueType string    `json:"valueType"`
+	UpdateAt  time.Time `json:"updateAt"`
 }
 
 // SecretHistoryDTO 单条解密后的 value 历史版本
@@ -429,6 +430,7 @@ func toSecretViewDTO(v secretapp.SecretView) SecretViewDTO {
 			Value:     sv.Value,
 			Version:   sv.Version,
 			ValueType: sv.ValueType,
+			UpdateAt:  sv.UpdateAt,
 		}
 	}
 	return SecretViewDTO{

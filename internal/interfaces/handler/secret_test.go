@@ -285,6 +285,8 @@ func TestSecretHandler_List_Success(t *testing.T) {
 	devSecretID := uuid.New()
 	testSecretID := uuid.New()
 	groupID := uuid.New()
+	devUpdateAt := time.Date(2026, time.August, 24, 10, 11, 12, 0, time.UTC)
+	testUpdateAt := time.Date(2026, time.August, 24, 11, 12, 13, 0, time.UTC)
 	svc := &stubSecretService{
 		listByFolder: func(ctx context.Context, gid uuid.UUID) ([]secretapp.SecretView, error) {
 			if gid != folderGroupID {
@@ -296,8 +298,8 @@ func TestSecretHandler_List_Success(t *testing.T) {
 					Key:     "DB_PASSWORD",
 					Remark:  "数据库密码",
 					Values: map[string]secretapp.SecretValueView{
-						"dev":  {SecretID: devSecretID, FolderID: devFolderID, Value: "dev-pass", Version: 2, ValueType: "string"},
-						"test": {SecretID: testSecretID, FolderID: testFolderID, Value: "test-pass", Version: 4, ValueType: "number"},
+						"dev":  {SecretID: devSecretID, FolderID: devFolderID, Value: "dev-pass", Version: 2, ValueType: "string", UpdateAt: devUpdateAt},
+						"test": {SecretID: testSecretID, FolderID: testFolderID, Value: "test-pass", Version: 4, ValueType: "number", UpdateAt: testUpdateAt},
 					},
 				},
 			}, nil
@@ -333,12 +335,18 @@ func TestSecretHandler_List_Success(t *testing.T) {
 	if dev["version"].(float64) != 2 || dev["valueType"].(string) != "string" {
 		t.Fatalf("list detail fields missing from dev value: %+v", dev)
 	}
+	if dev["updateAt"].(string) != devUpdateAt.Format(time.RFC3339) {
+		t.Fatalf("unexpected dev updateAt: %+v", dev)
+	}
 	test := values["test"].(map[string]any)
 	if test["folderId"].(string) != testFolderID.String() {
 		t.Fatalf("unexpected test value: %+v", test)
 	}
 	if test["version"].(float64) != 4 || test["valueType"].(string) != "number" {
 		t.Fatalf("list detail fields missing from test value: %+v", test)
+	}
+	if test["updateAt"].(string) != testUpdateAt.Format(time.RFC3339) {
+		t.Fatalf("unexpected test updateAt: %+v", test)
 	}
 }
 

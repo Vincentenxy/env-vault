@@ -8,6 +8,9 @@ import (
 
 	"github.com/google/uuid"
 
+	orgdomain "env-vault/internal/domain/organization"
+	projectdomain "env-vault/internal/domain/project"
+	tenantdomain "env-vault/internal/domain/tenant"
 	userdomain "env-vault/internal/domain/user"
 )
 
@@ -17,6 +20,7 @@ type stubUserRepo struct {
 	getByTenantUsername func(ctx context.Context, tenantID uuid.UUID, username string) (*userdomain.User, error)
 	list                func(ctx context.Context, filter userdomain.ListFilter) ([]*userdomain.User, error)
 	listAll             func(ctx context.Context) ([]*userdomain.User, error)
+	allocate            func(ctx context.Context, change userdomain.AllocationChange) ([]*userdomain.User, []string, error)
 }
 
 func (s *stubUserRepo) UpdateByUserID(ctx context.Context, user *userdomain.User) error {
@@ -54,6 +58,13 @@ func (s *stubUserRepo) ListAll(ctx context.Context) ([]*userdomain.User, error) 
 	return nil, nil
 }
 
+func (s *stubUserRepo) Allocate(ctx context.Context, change userdomain.AllocationChange) ([]*userdomain.User, []string, error) {
+	if s.allocate != nil {
+		return s.allocate(ctx, change)
+	}
+	return nil, nil, nil
+}
+
 type stubProfileCache struct {
 	getFn     func(ctx context.Context, userID string) (*userdomain.User, error)
 	setFn     func(ctx context.Context, user *userdomain.User) error
@@ -84,6 +95,66 @@ func (s *stubProfileCache) Replace(ctx context.Context, users []*userdomain.User
 type stubNameCache struct {
 	values   map[string]string
 	replaced []*userdomain.User
+}
+
+type stubBlockCache struct {
+	getFn     func(context.Context, string) (bool, bool, error)
+	setFn     func(context.Context, string, bool) error
+	replaceFn func(context.Context, []*userdomain.User) error
+}
+
+func (s *stubBlockCache) Get(ctx context.Context, userID string) (bool, bool, error) {
+	if s.getFn != nil {
+		return s.getFn(ctx, userID)
+	}
+	return false, false, nil
+}
+
+func (s *stubBlockCache) Set(ctx context.Context, userID string, blocked bool) error {
+	if s.setFn != nil {
+		return s.setFn(ctx, userID, blocked)
+	}
+	return nil
+}
+
+func (s *stubBlockCache) Replace(ctx context.Context, users []*userdomain.User) error {
+	if s.replaceFn != nil {
+		return s.replaceFn(ctx, users)
+	}
+	return nil
+}
+
+type stubTenantReader struct {
+	get func(context.Context, uuid.UUID) (*tenantdomain.Tenant, error)
+}
+
+func (s stubTenantReader) GetByID(ctx context.Context, id uuid.UUID) (*tenantdomain.Tenant, error) {
+	if s.get != nil {
+		return s.get(ctx, id)
+	}
+	return nil, nil
+}
+
+type stubOrgReader struct {
+	get func(context.Context, uuid.UUID) (*orgdomain.Organization, error)
+}
+
+func (s stubOrgReader) GetByID(ctx context.Context, id uuid.UUID) (*orgdomain.Organization, error) {
+	if s.get != nil {
+		return s.get(ctx, id)
+	}
+	return nil, nil
+}
+
+type stubProjectReader struct {
+	get func(context.Context, uuid.UUID) (*projectdomain.Project, error)
+}
+
+func (s stubProjectReader) GetByID(ctx context.Context, id uuid.UUID) (*projectdomain.Project, error) {
+	if s.get != nil {
+		return s.get(ctx, id)
+	}
+	return nil, nil
 }
 
 func newStubNameCache() *stubNameCache {
@@ -164,6 +235,66 @@ func TestService_List_AppliesFilterPriority(t *testing.T) {
 				t.Fatalf("unexpected result users=%+v err=%v", got, err)
 			}
 		})
+	}
+}
+
+func TestService_AllocateProject_ResolvesHierarchyAndRefreshesCache(t *testing.T) {
+	tenantID, orgID, projectID := uuid.New(), uuid.New(), uuid.New()
+	updated := &userdomain.User{ID: uuid.New(), UserID: "u-1", TenantID: tenantID, OrgID: orgID}
+	repo := &stubUserRepo{allocate: func(_ context.Context, change userdomain.AllocationChange) ([]*userdomain.User, []string, error) {
+		if change.Type != userdomain.AllocationTypeProject || change.Operation != userdomain.AllocationOperationAdd ||
+			change.ProjectID != projectID || change.OrgID != orgID || change.TenantID != tenantID ||
+			len(change.UserIDs) != 1 || change.UserIDs[0] != "u-1" || change.Operator != "operator" {
+			t.Fatalf("unexpected allocation change: %+v", change)
+		}
+		return []*userdomain.User{updated}, nil, nil
+	}}
+	profileRefreshed := false
+	profileCache := &stubProfileCache{setFn: func(_ context.Context, user *userdomain.User) error {
+		profileRefreshed = user == updated
+		return nil
+	}}
+	svc := NewService(repo, profileCache, nil, WithAllocationRepositories(
+		stubTenantReader{},
+		stubOrgReader{get: func(_ context.Context, id uuid.UUID) (*orgdomain.Organization, error) {
+			if id != orgID {
+				t.Fatalf("unexpected org id: %s", id)
+			}
+			return &orgdomain.Organization{ID: orgID, TenantID: tenantID}, nil
+		}},
+		stubProjectReader{get: func(_ context.Context, id uuid.UUID) (*projectdomain.Project, error) {
+			if id != projectID {
+				t.Fatalf("unexpected project id: %s", id)
+			}
+			return &projectdomain.Project{ID: projectID, OrgID: orgID}, nil
+		}},
+	))
+
+	affected, err := svc.Allocate(context.Background(), AllocateInput{
+		Type: "project", Operation: "add", ResourceID: projectID,
+		UserIDs: []string{" u-1 ", "u-1"}, Operator: "operator",
+	})
+	if err != nil || affected != 1 || !profileRefreshed {
+		t.Fatalf("unexpected allocation result affected=%d refreshed=%v err=%v", affected, profileRefreshed, err)
+	}
+}
+
+func TestService_Allocate_ReturnsMissingUsersWithoutSuccess(t *testing.T) {
+	tenantID := uuid.New()
+	repo := &stubUserRepo{allocate: func(context.Context, userdomain.AllocationChange) ([]*userdomain.User, []string, error) {
+		return nil, []string{"missing"}, nil
+	}}
+	svc := NewService(repo, nil, nil, WithAllocationRepositories(
+		stubTenantReader{get: func(context.Context, uuid.UUID) (*tenantdomain.Tenant, error) {
+			return &tenantdomain.Tenant{ID: tenantID}, nil
+		}}, stubOrgReader{}, stubProjectReader{},
+	))
+	_, err := svc.Allocate(context.Background(), AllocateInput{
+		Type: "tenant", Operation: "remove", ResourceID: tenantID,
+		UserIDs: []string{"missing"}, Operator: "operator",
+	})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
 
@@ -404,13 +535,45 @@ func TestService_GetNickname_DatabaseMiss(t *testing.T) {
 	}
 }
 
-func TestService_WarmUp_ReplacesBothCaches(t *testing.T) {
+func TestService_IsBlocked_UsesCacheAndFallsBackToDatabase(t *testing.T) {
+	t.Run("cache hit", func(t *testing.T) {
+		repo := &stubUserRepo{getByUserID: func(context.Context, string) (*userdomain.User, error) {
+			t.Fatal("database must not be queried on block cache hit")
+			return nil, nil
+		}}
+		cache := &stubBlockCache{getFn: func(context.Context, string) (bool, bool, error) {
+			return true, true, nil
+		}}
+		blocked, err := NewService(repo, nil, nil, WithBlockStatusCache(cache)).IsBlocked(context.Background(), "u-1")
+		if err != nil || !blocked {
+			t.Fatalf("unexpected blocked=%v err=%v", blocked, err)
+		}
+	})
+
+	t.Run("cache miss", func(t *testing.T) {
+		backfilled := false
+		cache := &stubBlockCache{setFn: func(_ context.Context, userID string, blocked bool) error {
+			backfilled = userID == "u-2" && blocked
+			return nil
+		}}
+		repo := &stubUserRepo{getByUserID: func(context.Context, string) (*userdomain.User, error) {
+			return &userdomain.User{UserID: "u-2", IsBlocked: true}, nil
+		}}
+		blocked, err := NewService(repo, nil, nil, WithBlockStatusCache(cache)).IsBlocked(context.Background(), "u-2")
+		if err != nil || !blocked || !backfilled {
+			t.Fatalf("unexpected blocked=%v backfilled=%v err=%v", blocked, backfilled, err)
+		}
+	})
+}
+
+func TestService_WarmUp_ReplacesAllCaches(t *testing.T) {
 	users := []*userdomain.User{
 		{UserID: "u-1", Nickname: "one"},
 		{UserID: "u-2", Nickname: "two"},
 	}
 	nameCache := newStubNameCache()
 	redisReplaced := false
+	blockReplaced := false
 	profileCache := &stubProfileCache{replaceFn: func(ctx context.Context, got []*userdomain.User) error {
 		redisReplaced = true
 		if len(got) != len(users) {
@@ -421,12 +584,16 @@ func TestService_WarmUp_ReplacesBothCaches(t *testing.T) {
 	repo := &stubUserRepo{listAll: func(ctx context.Context) ([]*userdomain.User, error) {
 		return users, nil
 	}}
-	svc := NewService(repo, profileCache, nameCache)
+	blockCache := &stubBlockCache{replaceFn: func(_ context.Context, got []*userdomain.User) error {
+		blockReplaced = len(got) == len(users)
+		return nil
+	}}
+	svc := NewService(repo, profileCache, nameCache, WithBlockStatusCache(blockCache))
 	count, err := svc.WarmUp(context.Background())
 	if err != nil || count != 2 {
 		t.Fatalf("unexpected warmup result count=%d err=%v", count, err)
 	}
-	if !redisReplaced || len(nameCache.replaced) != 2 {
-		t.Fatalf("caches were not replaced: redis=%v memory=%d", redisReplaced, len(nameCache.replaced))
+	if !redisReplaced || !blockReplaced || len(nameCache.replaced) != 2 {
+		t.Fatalf("caches were not replaced: redis=%v block=%v memory=%d", redisReplaced, blockReplaced, len(nameCache.replaced))
 	}
 }
