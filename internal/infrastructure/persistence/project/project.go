@@ -68,6 +68,7 @@ func (r *Repository) Update(ctx context.Context, p *projdomain.Project) error {
 		Updates(map[string]any{
 			"name":      po.Name,
 			"remark":    po.Remark,
+			"manager":   po.Manager,
 			"update_by": po.UpdateBy,
 			"update_at": po.UpdateAt,
 		}).Error

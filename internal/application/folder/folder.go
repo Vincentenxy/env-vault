@@ -49,11 +49,12 @@ type CreateSubInput struct {
 	Manager        string
 }
 
-// UpdateInput 批量更新文件夹入参（仅 name/remark，按 group_id 全环境同步）
+// UpdateInput 批量更新文件夹入参（按 group_id 全环境同步）
 type UpdateInput struct {
 	GroupID uuid.UUID
 	Name    string
 	Remark  string
+	Manager string
 }
 
 // DeleteInput 删除文件夹入参（按 group_id，软删除全环境记录）
@@ -237,9 +238,11 @@ func (s *Service) CreateSub(ctx context.Context, in CreateSubInput, operator str
 	return folders, nil
 }
 
-// Update 批量更新文件夹（按 group_id 全环境同步，仅 name/remark）
+// Update 批量更新文件夹（按 group_id 全环境同步）
 func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) error {
-	affected, err := s.repo.UpdateByGroupID(ctx, in.GroupID, in.Name, in.Remark, operator, time.Now())
+	affected, err := s.repo.UpdateByGroupID(
+		ctx, in.GroupID, in.Name, in.Remark, strings.TrimSpace(in.Manager), operator, time.Now(),
+	)
 	if err != nil {
 		return err
 	}

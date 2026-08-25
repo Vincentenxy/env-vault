@@ -56,11 +56,12 @@ type CreateFolderRequest struct {
 	Manager        string     `json:"manager,omitempty"`
 }
 
-// UpdateFolderRequest 更新文件夹请求（仅 name/remark，按 group_id 全环境同步）
+// UpdateFolderRequest 更新文件夹请求（按 group_id 全环境同步）
 type UpdateFolderRequest struct {
 	GroupID uuid.UUID `json:"groupId"`
 	Name    string    `json:"name"`
 	Remark  string    `json:"remark"`
+	Manager string    `json:"manager,omitempty"`
 }
 
 // DeleteFolderRequest 删除文件夹请求（按 group_id 软删除全环境记录）
@@ -149,7 +150,7 @@ func (h *FolderHandler) Create(c *gin.Context) {
 	response.Success(c, list)
 }
 
-// Update 更新文件夹（仅 name/remark，按各环境下的 id 集合）
+// Update 更新文件夹（按 group_id 同步各环境下的目录）
 func (h *FolderHandler) Update(c *gin.Context) {
 	var req UpdateFolderRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -166,6 +167,7 @@ func (h *FolderHandler) Update(c *gin.Context) {
 		GroupID: req.GroupID,
 		Name:    req.Name,
 		Remark:  req.Remark,
+		Manager: req.Manager,
 	}, operator(c))
 	h.respondError(c, err)
 	if err != nil {

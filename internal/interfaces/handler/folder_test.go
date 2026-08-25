@@ -220,7 +220,7 @@ func TestFolderHandler_Update_Success(t *testing.T) {
 	svc := &stubFolderService{
 		updateFn: func(ctx context.Context, in folderapp.UpdateInput, operator string) error {
 			called = true
-			if in.GroupID != groupID || in.Name != "new-name" || in.Remark != "r" {
+			if in.GroupID != groupID || in.Name != "new-name" || in.Remark != "r" || in.Manager != "manager-new" {
 				t.Fatalf("input not passed: %+v", in)
 			}
 			return nil
@@ -228,7 +228,7 @@ func TestFolderHandler_Update_Success(t *testing.T) {
 	}
 	r := newFolderTestEngine(svc, testUser())
 	w := doJSONP(t, r, http.MethodPost, "/api/v1/folder/update", map[string]any{
-		"groupId": groupID, "name": "new-name", "remark": "r",
+		"groupId": groupID, "name": "new-name", "remark": "r", "manager": "manager-new",
 	})
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)

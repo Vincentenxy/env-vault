@@ -15,7 +15,7 @@ import (
 // stubFolderRepo 内存实现的文件夹 Repository，便于 application 层单测
 type stubFolderRepo struct {
 	createBatch                     func(ctx context.Context, folders []*folderdomain.Folder) error
-	updateByGroupID                 func(ctx context.Context, groupID uuid.UUID, name, remark, updateBy string, updateAt time.Time) (int64, error)
+	updateByGroupID                 func(ctx context.Context, groupID uuid.UUID, name, remark, manager, updateBy string, updateAt time.Time) (int64, error)
 	deleteByGroupID                 func(ctx context.Context, groupID uuid.UUID, deleteBy string) (int64, error)
 	getByID                         func(ctx context.Context, id uuid.UUID) (*folderdomain.Folder, error)
 	getByGroupID                    func(ctx context.Context, groupID uuid.UUID) (*folderdomain.Folder, error)
@@ -34,9 +34,9 @@ func (s *stubFolderRepo) CreateBatch(ctx context.Context, folders []*folderdomai
 	}
 	return nil
 }
-func (s *stubFolderRepo) UpdateByGroupID(ctx context.Context, groupID uuid.UUID, name, remark, updateBy string, updateAt time.Time) (int64, error) {
+func (s *stubFolderRepo) UpdateByGroupID(ctx context.Context, groupID uuid.UUID, name, remark, manager, updateBy string, updateAt time.Time) (int64, error) {
 	if s.updateByGroupID != nil {
-		return s.updateByGroupID(ctx, groupID, name, remark, updateBy, updateAt)
+		return s.updateByGroupID(ctx, groupID, name, remark, manager, updateBy, updateAt)
 	}
 	return 1, nil
 }
@@ -460,10 +460,13 @@ func TestService_Update_Success(t *testing.T) {
 	groupID := uuid.New()
 	called := false
 	folderRepo := &stubFolderRepo{
-		updateByGroupID: func(ctx context.Context, gid uuid.UUID, name, remark, updateBy string, updateAt time.Time) (int64, error) {
+		updateByGroupID: func(ctx context.Context, gid uuid.UUID, name, remark, manager, updateBy string, updateAt time.Time) (int64, error) {
 			called = true
 			if gid != groupID || name != "new-name" || remark != "new-remark" {
 				t.Fatalf("update args wrong: gid=%v name=%s remark=%s", gid, name, remark)
+			}
+			if manager != "manager-new" {
+				t.Fatalf("manager not propagated: %q", manager)
 			}
 			if updateBy != "operator" {
 				t.Fatalf("updateBy not set: %s", updateBy)
@@ -473,7 +476,7 @@ func TestService_Update_Success(t *testing.T) {
 	}
 	svc := NewService(folderRepo, &stubEnvRepo{})
 	if err := svc.Update(context.Background(), UpdateInput{
-		GroupID: groupID, Name: "new-name", Remark: "new-remark",
+		GroupID: groupID, Name: "new-name", Remark: "new-remark", Manager: " manager-new ",
 	}, "operator"); err != nil {
 		t.Fatalf("expected nil err, got %v", err)
 	}
@@ -484,7 +487,7 @@ func TestService_Update_Success(t *testing.T) {
 
 func TestService_Update_NotFound(t *testing.T) {
 	folderRepo := &stubFolderRepo{
-		updateByGroupID: func(ctx context.Context, gid uuid.UUID, name, remark, updateBy string, updateAt time.Time) (int64, error) {
+		updateByGroupID: func(ctx context.Context, gid uuid.UUID, name, remark, manager, updateBy string, updateAt time.Time) (int64, error) {
 			return 0, nil
 		},
 	}

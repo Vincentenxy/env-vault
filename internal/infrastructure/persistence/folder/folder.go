@@ -61,17 +61,22 @@ func (r *Repository) CreateBatch(ctx context.Context, folders []*folderdomain.Fo
 	return r.db.WithContext(ctx).Create(&pos).Error
 }
 
-// UpdateByGroupID 按 group_id 全环境同步更新 name/remark
-func (r *Repository) UpdateByGroupID(ctx context.Context, groupID uuid.UUID, name, remark, updateBy string, updateAt time.Time) (int64, error) {
+// UpdateByGroupID 按 group_id 全环境同步更新 name/remark/manager。
+func (r *Repository) UpdateByGroupID(ctx context.Context, groupID uuid.UUID, name, remark, manager, updateBy string, updateAt time.Time) (int64, error) {
+	updates := map[string]any{
+		"name":      name,
+		"remark":    remark,
+		"update_by": updateBy,
+		"update_at": updateAt,
+	}
+	if manager != "" {
+		updates["manager"] = manager
+	}
+
 	result := r.db.WithContext(ctx).
 		Model(&folderPO{}).
 		Where("group_id = ? AND is_deleted = false", groupID).
-		Updates(map[string]any{
-			"name":      name,
-			"remark":    remark,
-			"update_by": updateBy,
-			"update_at": updateAt,
-		})
+		Updates(updates)
 	return result.RowsAffected, result.Error
 }
 

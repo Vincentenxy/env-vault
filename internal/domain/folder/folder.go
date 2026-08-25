@@ -51,8 +51,9 @@ type ListFilter struct {
 type Repository interface {
 	// CreateBatch 批量创建文件夹（每个环境各一条，group_id 全环境共享）
 	CreateBatch(ctx context.Context, folders []*Folder) error
-	// UpdateByGroupID 按 group_id 全环境同步更新 name/remark（返回受影响行数）
-	UpdateByGroupID(ctx context.Context, groupID uuid.UUID, name, remark, updateBy string, updateAt time.Time) (int64, error)
+	// UpdateByGroupID 按 group_id 全环境同步更新 name/remark/manager（返回受影响行数）
+	// manager 为空时保留原值，兼容未提交管理员字段的调用方。
+	UpdateByGroupID(ctx context.Context, groupID uuid.UUID, name, remark, manager, updateBy string, updateAt time.Time) (int64, error)
 	// DeleteByGroupID 按 group_id 软删除全环境下的记录（所有层级），返回受影响行数
 	DeleteByGroupID(ctx context.Context, groupID uuid.UUID, deleteBy string) (int64, error)
 	// GetByID 按 ID 查询文件夹（不含已删除）— Detail 接口：返回某环境下的具体记录
