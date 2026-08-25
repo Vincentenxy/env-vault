@@ -13,7 +13,9 @@ import (
 
 type stubTenantRepo struct {
 	getByCode      func(context.Context, string) (*tenantdomain.Tenant, error)
+	getByID        func(context.Context, uuid.UUID) (*tenantdomain.Tenant, error)
 	create         func(context.Context, *tenantdomain.Tenant) error
+	update         func(context.Context, *tenantdomain.Tenant) error
 	list           func(context.Context, tenantdomain.ListFilter) ([]*tenantdomain.Tenant, int64, error)
 	listAccessible func(context.Context, tenantdomain.AccessibleFilter) ([]*tenantdomain.Tenant, error)
 }
@@ -24,9 +26,18 @@ func (s *stubTenantRepo) Create(ctx context.Context, tenant *tenantdomain.Tenant
 	}
 	return nil
 }
-func (s *stubTenantRepo) Update(context.Context, *tenantdomain.Tenant) error { return nil }
-func (s *stubTenantRepo) Delete(context.Context, uuid.UUID, string) error    { return nil }
-func (s *stubTenantRepo) GetByID(context.Context, uuid.UUID) (*tenantdomain.Tenant, error) {
+func (s *stubTenantRepo) Update(ctx context.Context, tenant *tenantdomain.Tenant) error {
+	if s.update != nil {
+		return s.update(ctx, tenant)
+	}
+	return nil
+}
+func (s *stubTenantRepo) Delete(context.Context, uuid.UUID, string) error { return nil }
+
+func (s *stubTenantRepo) GetByID(ctx context.Context, id uuid.UUID) (*tenantdomain.Tenant, error) {
+	if s.getByID != nil {
+		return s.getByID(ctx, id)
+	}
 	return nil, nil
 }
 
@@ -103,6 +114,35 @@ func TestService_Create_ManagerDefaultsToOperator(t *testing.T) {
 	}
 	if got.ManagerName != "管理员一" {
 		t.Fatalf("expected manager name from cache, got %q", got.ManagerName)
+	}
+}
+
+func TestService_Update_Manager(t *testing.T) {
+	id := uuid.New()
+	existing := &tenantdomain.Tenant{ID: id, Name: "旧租户", Manager: "manager-old"}
+	repo := &stubTenantRepo{
+		getByID: func(_ context.Context, gotID uuid.UUID) (*tenantdomain.Tenant, error) {
+			if gotID != id {
+				t.Fatalf("unexpected id %s", gotID)
+			}
+			return existing, nil
+		},
+		update: func(_ context.Context, tenant *tenantdomain.Tenant) error {
+			if tenant.Manager != "manager-new" {
+				t.Fatalf("manager not updated: %+v", tenant)
+			}
+			return nil
+		},
+	}
+
+	got, err := NewService(repo, nil).Update(context.Background(), UpdateInput{
+		ID: id, Name: "新租户", Remark: "new-remark", Manager: " manager-new ",
+	}, "operator")
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if got.Manager != "manager-new" {
+		t.Fatalf("unexpected manager %q", got.Manager)
 	}
 }
 

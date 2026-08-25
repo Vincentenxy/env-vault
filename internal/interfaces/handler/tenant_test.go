@@ -19,12 +19,17 @@ import (
 type stubTenantService struct {
 	listWithOrgProjects func(context.Context, tenantapp.WithOrgProjectsInput) ([]*tenantdomain.TenantWithOrgProjects, error)
 	list                func(context.Context, tenantapp.ListInput) ([]*tenantdomain.Tenant, int64, error)
+	update              func(context.Context, tenantapp.UpdateInput, string) (*tenantdomain.Tenant, error)
 }
 
 func (s *stubTenantService) Create(context.Context, tenantapp.CreateInput, string) (*tenantdomain.Tenant, error) {
 	return nil, nil
 }
-func (s *stubTenantService) Update(context.Context, tenantapp.UpdateInput, string) (*tenantdomain.Tenant, error) {
+
+func (s *stubTenantService) Update(ctx context.Context, in tenantapp.UpdateInput, operator string) (*tenantdomain.Tenant, error) {
+	if s.update != nil {
+		return s.update(ctx, in, operator)
+	}
 	return nil, nil
 }
 func (s *stubTenantService) Delete(context.Context, uuid.UUID, string) error { return nil }
@@ -56,8 +61,28 @@ func newTenantTestEngine(svc tenantapp.IService, user *userctx.User) *gin.Engine
 	})
 	h := NewTenantHandler(svc)
 	r.POST("/api/v1/tenant/list", h.List)
+	r.POST("/api/v1/tenant/update", h.Update)
 	r.GET("/api/v1/tenant/withOrgProject", h.WithOrgProject)
 	return r
+}
+
+func TestTenantHandler_Update_PassesManager(t *testing.T) {
+	id := uuid.New()
+	svc := &stubTenantService{
+		update: func(_ context.Context, in tenantapp.UpdateInput, _ string) (*tenantdomain.Tenant, error) {
+			if in.ID != id || in.Manager != "manager-new" {
+				t.Fatalf("manager not passed: %+v", in)
+			}
+			return &tenantdomain.Tenant{ID: id, Name: in.Name, Manager: in.Manager}, nil
+		},
+	}
+	r := newTenantTestEngine(svc, &userctx.User{UserID: "operator"})
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/tenant/update", map[string]any{
+		"id": id, "name": "租户一", "manager": "manager-new",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status=%d body=%s", w.Code, w.Body.String())
+	}
 }
 
 func TestTenantHandler_List_SummaryFields(t *testing.T) {

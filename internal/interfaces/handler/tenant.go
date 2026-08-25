@@ -52,9 +52,10 @@ type CreateRequest struct {
 
 // UpdateRequest 更新租户请求
 type UpdateRequest struct {
-	ID     uuid.UUID `json:"id"`
-	Name   string    `json:"name"`
-	Remark string    `json:"remark"`
+	ID      uuid.UUID `json:"id"`
+	Name    string    `json:"name"`
+	Remark  string    `json:"remark"`
+	Manager string    `json:"manager,omitempty"`
 }
 
 // DeleteRequest 删除租户请求
@@ -127,9 +128,10 @@ func (h *TenantHandler) Update(c *gin.Context) {
 	}
 
 	t, err := h.svc.Update(c, tenantapp.UpdateInput{
-		ID:     req.ID,
-		Name:   req.Name,
-		Remark: req.Remark,
+		ID:      req.ID,
+		Name:    req.Name,
+		Remark:  req.Remark,
+		Manager: req.Manager,
 	}, operator(c))
 	h.respondError(c, err)
 	if err != nil {

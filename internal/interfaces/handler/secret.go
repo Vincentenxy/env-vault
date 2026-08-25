@@ -87,12 +87,20 @@ type DeleteSecretRequest struct {
 	GroupID uuid.UUID `json:"groupId"`
 }
 
-// SecretHistoryRequest 历史查询请求，优先级 groupId > secretId > batchId
+// SecretHistoryRequest 历史查询请求，优先级 groupId > secretId > batchId。
+// EnvList 为空查询全部环境，非空时只查询指定环境。
 type SecretHistoryRequest struct {
 	SecretID uuid.UUID `json:"secretId"`
 	BatchID  uuid.UUID `json:"batchId"`
 	GroupID  uuid.UUID `json:"groupId"`
+	EnvList  []string  `json:"envList"`
 	page.Request
+}
+
+// SecretBatchHistoryRequest 批次历史查询请求，不使用分页参数。
+type SecretBatchHistoryRequest struct {
+	BatchID uuid.UUID `json:"batchId"`
+	EnvList []string  `json:"envList"`
 }
 
 // SecretValueDTO 单个环境下的值（解密后，values 的 key 即 env code）
@@ -265,6 +273,8 @@ func (h *SecretHandler) History(c *gin.Context) {
 		SecretID: req.SecretID,
 		BatchID:  req.BatchID,
 		GroupID:  req.GroupID,
+		EnvList:  req.EnvList,
+		UserID:   operator(c),
 		PageNum:  req.PageNum,
 		PageSize: req.PageSize,
 	})
@@ -295,6 +305,41 @@ func (h *SecretHandler) History(c *gin.Context) {
 		Total: result.Total,
 		List:  toSecretHistoryDTOs(result.HistoryList),
 	})
+}
+
+// BatchHistory 查询一次提交批次内的全部密钥历史。
+// @Summary 查询密钥批次历史
+// @Description 根据 batchId 查询该批次涉及的全部密钥及各环境版本，不分页
+// @Tags secret
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param request body SecretBatchHistoryRequest true "批次历史查询参数"
+// @Success 200 {object} response.Response{data=[]SecretBatchHistoryDTO}
+// @Failure 401 {object} response.Response
+// @Router /api/v1/secret/history/batch [post]
+func (h *SecretHandler) BatchHistory(c *gin.Context) {
+	var req SecretBatchHistoryRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, err)
+		return
+	}
+	if req.BatchID == uuid.Nil {
+		response.Error(c, "invalid params")
+		return
+	}
+
+	result, err := h.svc.History(c, secretapp.HistoryInput{
+		BatchID: req.BatchID,
+		EnvList: req.EnvList,
+		UserID:  operator(c),
+	})
+	h.respondError(c, err)
+	if err != nil {
+		return
+	}
+
+	response.Success(c, toSecretBatchHistoryDTOs(result.BatchHistories))
 }
 
 func toSecretBatchHistoryDTOs(items []secretapp.BatchHistoryView) []SecretBatchHistoryDTO {

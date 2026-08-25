@@ -91,11 +91,14 @@ type SecretValueView struct {
 	UpdateAt  time.Time
 }
 
-// HistoryInput 历史查询入参，查询优先级 groupId > secretId > batchId
+// HistoryInput 历史查询入参，查询优先级 groupId > secretId > batchId。
+// EnvList 为空查询全部环境；UserID 预留给后续环境权限过滤。
 type HistoryInput struct {
 	SecretID uuid.UUID
 	BatchID  uuid.UUID
 	GroupID  uuid.UUID
+	EnvList  []string
+	UserID   string
 	PageNum  int
 	PageSize int
 }
@@ -423,19 +426,28 @@ func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) e
 }
 
 // History 按 secretId 分页、按 batchId 不分页，或按 groupId 对各环境分别分页查询历史。
+// EnvList 为空时查询全部环境；非空时只查询指定环境。
 func (s *Service) History(ctx context.Context, in HistoryInput) (*HistoryResult, error) {
 	var histories []*secretdomain.History
 	var total int64
 	var err error
+	in.EnvList = normalizeList(in.EnvList)
+	in.UserID = strings.TrimSpace(in.UserID)
 
 	switch {
 	case in.GroupID != uuid.Nil:
 		return s.historyByGroup(ctx, in)
 	case in.SecretID != uuid.Nil:
-		histories, total, err = s.repo.ListHistoryBySecretID(ctx, in.SecretID, (in.PageNum-1)*in.PageSize, in.PageSize)
+		histories, total, err = s.repo.ListHistoryBySecretID(ctx, secretdomain.HistoryPageFilter{
+			SecretID: in.SecretID,
+			EnvCodes: in.EnvList,
+			UserID:   in.UserID,
+			Offset:   (in.PageNum - 1) * in.PageSize,
+			Limit:    in.PageSize,
+		})
 	case in.BatchID != uuid.Nil:
 		// 特殊情况：batchId 表示一次提交批次，需要完整返回该批次记录，不使用分页参数。
-		return s.historyByBatch(ctx, in.BatchID)
+		return s.historyByBatch(ctx, in)
 	default:
 		return nil, ErrInvalidParam
 	}
@@ -450,8 +462,12 @@ func (s *Service) History(ctx context.Context, in HistoryInput) (*HistoryResult,
 	return &HistoryResult{Total: total, HistoryList: views}, nil
 }
 
-func (s *Service) historyByBatch(ctx context.Context, batchID uuid.UUID) (*HistoryResult, error) {
-	histories, err := s.repo.ListHistoryByBatchID(ctx, batchID)
+func (s *Service) historyByBatch(ctx context.Context, in HistoryInput) (*HistoryResult, error) {
+	histories, err := s.repo.ListHistoryByBatchID(ctx, secretdomain.HistoryBatchFilter{
+		BatchID:  in.BatchID,
+		EnvCodes: in.EnvList,
+		UserID:   in.UserID,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -488,7 +504,11 @@ func (s *Service) historyByBatch(ctx context.Context, batchID uuid.UUID) (*Histo
 }
 
 func (s *Service) historyByGroup(ctx context.Context, in HistoryInput) (*HistoryResult, error) {
-	targets, err := s.repo.ListHistoryTargetsByGroupID(ctx, in.GroupID)
+	targets, err := s.repo.ListHistoryTargetsByGroupID(ctx, secretdomain.HistoryTargetFilter{
+		GroupID:  in.GroupID,
+		EnvCodes: in.EnvList,
+		UserID:   in.UserID,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -511,7 +531,13 @@ func (s *Service) historyByGroup(ctx context.Context, in HistoryInput) (*History
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			histories, total, err := s.repo.ListHistoryBySecretID(queryCtx, target.SecretID, (in.PageNum-1)*in.PageSize, in.PageSize)
+			histories, total, err := s.repo.ListHistoryBySecretID(queryCtx, secretdomain.HistoryPageFilter{
+				SecretID: target.SecretID,
+				EnvCodes: in.EnvList,
+				UserID:   in.UserID,
+				Offset:   (in.PageNum - 1) * in.PageSize,
+				Limit:    in.PageSize,
+			})
 			if err == nil {
 				var views []HistoryView
 				views, err = s.toHistoryViews(queryCtx, histories, &names)

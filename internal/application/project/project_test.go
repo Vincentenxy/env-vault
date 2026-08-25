@@ -235,7 +235,7 @@ func TestService_Update_Success(t *testing.T) {
 			return existing, nil
 		},
 		update: func(ctx context.Context, p *projdomain.Project) error {
-			if p.Name != "new-name" || p.Remark != "new-remark" {
+			if p.Name != "new-name" || p.Remark != "new-remark" || p.Manager != "manager-new" {
 				t.Fatalf("fields not updated: %+v", p)
 			}
 			if p.UpdateBy != "operator-2" {
@@ -246,12 +246,12 @@ func TestService_Update_Success(t *testing.T) {
 	}
 	svc := NewService(repo)
 	got, err := svc.Update(context.Background(), UpdateInput{
-		ID: id, Name: "new-name", Remark: "new-remark",
+		ID: id, Name: "new-name", Remark: "new-remark", Manager: "manager-new",
 	}, "operator-2")
 	if err != nil {
 		t.Fatalf("expected nil err, got %v", err)
 	}
-	if got.Name != "new-name" || got.Remark != "new-remark" {
+	if got.Name != "new-name" || got.Remark != "new-remark" || got.Manager != "manager-new" {
 		t.Fatalf("returned project not updated: %+v", got)
 	}
 }

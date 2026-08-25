@@ -74,6 +74,32 @@ type HistoryTarget struct {
 	SecretID uuid.UUID
 }
 
+// HistoryPageFilter 按具体 Secret 查询历史时的过滤条件。
+// UserID 预留给后续环境权限 SQL；EnvCodes 为空表示不限制环境。
+type HistoryPageFilter struct {
+	SecretID uuid.UUID
+	EnvCodes []string
+	UserID   string
+	Offset   int
+	Limit    int
+}
+
+// HistoryTargetFilter 按逻辑 Secret 查询环境实例时的过滤条件。
+// UserID 预留给后续环境权限 SQL；EnvCodes 为空表示不限制环境。
+type HistoryTargetFilter struct {
+	GroupID  uuid.UUID
+	EnvCodes []string
+	UserID   string
+}
+
+// HistoryBatchFilter 按批次查询历史时的过滤条件。
+// UserID 预留给后续环境权限 SQL；EnvCodes 为空表示不限制环境。
+type HistoryBatchFilter struct {
+	BatchID  uuid.UUID
+	EnvCodes []string
+	UserID   string
+}
+
 // Repository 密钥仓储接口（领域层定义，基础设施层实现）
 type Repository interface {
 	// CreateBatch 批量创建密钥（每个环境各一条）
@@ -96,12 +122,12 @@ type Repository interface {
 	UpdateRemarkByGroupID(ctx context.Context, groupID uuid.UUID, remark, updateBy string, updateAt time.Time) (int64, error)
 	// CreateHistoryBatch 批量写入不可变 value 历史快照
 	CreateHistoryBatch(ctx context.Context, histories []*History) error
-	// ListHistoryBySecretID 按具体环境实例分页查询历史
-	ListHistoryBySecretID(ctx context.Context, secretID uuid.UUID, offset, limit int) ([]*History, int64, error)
-	// ListHistoryTargetsByGroupID 查询逻辑 Secret 下各环境对应的 env_id 与 secret_id
-	ListHistoryTargetsByGroupID(ctx context.Context, groupID uuid.UUID) ([]HistoryTarget, error)
-	// ListHistoryByBatchID 查询一次变更批次的全部历史
-	ListHistoryByBatchID(ctx context.Context, batchID uuid.UUID) ([]*History, error)
+	// ListHistoryBySecretID 按具体环境实例分页查询历史，可按环境编码及用户权限过滤
+	ListHistoryBySecretID(ctx context.Context, filter HistoryPageFilter) ([]*History, int64, error)
+	// ListHistoryTargetsByGroupID 查询逻辑 Secret 下各环境对应的 env_id 与 secret_id，可按环境编码及用户权限过滤
+	ListHistoryTargetsByGroupID(ctx context.Context, filter HistoryTargetFilter) ([]HistoryTarget, error)
+	// ListHistoryByBatchID 查询一次变更批次的全部历史，可按环境编码及用户权限过滤
+	ListHistoryByBatchID(ctx context.Context, filter HistoryBatchFilter) ([]*History, error)
 	// WithTx 在事务中执行 fn：fn 收到的 ctx 透传事务句柄，内部方法须通过 ctx 拿 tx
 	WithTx(ctx context.Context, fn func(ctx context.Context) error) error
 }

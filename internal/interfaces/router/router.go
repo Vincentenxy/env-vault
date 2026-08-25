@@ -173,6 +173,7 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 			secretGroup.POST("/list", secretHandler.List)
 			secretGroup.POST("/info", secretHandler.Detail)
 			secretGroup.POST("/history", secretHandler.History)
+			secretGroup.POST("/history/batch", secretHandler.BatchHistory)
 			secretGroup.POST("/delete", secretHandler.Delete)
 		}
 	}

@@ -6,12 +6,16 @@
 
 ## 0. 前后端联合工作目录
 
-- EnvVault 默认包含两个开发仓库：
-  - 后端（Go）：`/Users/vincent/GolandProjects/env-vault`
-  - 前端（Vue）：`/Users/vincent/Desktop/codes.nosync/env-vault-web`
-- 后续处理每一项需求时，都必须先判断影响后端、前端或两端；涉及接口契约或完整用户流程时，需要同时检查两个仓库。
+- 密钥管理模块：
+  - 后端 `env-vault`：`/Users/vincent/GolandProjects/env-vault`
+  - 前端 `env-vault-web`：`/Users/vincent/Desktop/codes.nosync/env-vault-web`
+- 发布模块：
+  - 后端 `publish-devops-api`：`/Users/vincent/IdeaProjects/efficient-platform/publish-devops-api`
+  - 前端 `devops-frontend`：`/Users/vincent/Desktop/codes.nosync/devops-frontend`
+- “修改发布模块前端”指修改 `devops-frontend`；“修改密钥管理平台前端”指修改 `env-vault-web`。
+- 后续处理每一项需求时，都必须先判断影响对应模块的后端、前端或两端；涉及接口契约或完整用户流程时，需要同时检查对应的前后端仓库。
 - 修改哪个仓库，就遵循哪个仓库内的智能体规范并执行对应测试；跨端修改需要分别完成验证。
-- 两个仓库不在同一父目录下，切换仓库时使用上述绝对路径。
+- 四个仓库不在同一父目录下，切换仓库时使用上述绝对路径。
 
 ---
 
@@ -24,6 +28,21 @@
 - `/api/[版本号]/pub/...`：**无认证接口**，任何人可调用（如健康检查、分享链接）
 - `/api/[版本号]/...`（不带 `pub` 前缀）：**认证接口**，必须携带合法凭证
 - 路由分组与认证中间件必须以此前缀作为拦截依据
+
+#### 资源归属（强制）
+
+- 版本号后的第一个业务路径段必须表示该能力所属的核心业务资源。历史、批次、搜索、详情等附属能力必须放在所属资源路径下，不得作为无明确归属的一级资源。
+- 路径结构统一为：`/api/{version}/{resource}/{subresource}/{operation-or-mode}`。
+
+| 类型 | 路径 |
+|---|---|
+| 正确 | `/api/v1/secret/history/batch` |
+| 正确 | `/api/v1/project/member/allocate` |
+| 错误 | `/api/v1/history/batch` |
+| 错误 | `/api/v1/allocate` |
+
+- 只有当某项能力具备独立的数据模型、生命周期、权限边界，并且会被多个业务资源共同使用时，才允许将其设计为一级资源。
+- 新增接口评审时必须先明确资源归属，并保证后端路由、前端调用和接口文档中的路径一致。
 
 ### 1.2 请求方法
 

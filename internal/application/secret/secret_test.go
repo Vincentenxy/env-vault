@@ -43,9 +43,9 @@ type stubSecretRepo struct {
 	updateValueByIDs    func(ctx context.Context, items []secretdomain.ValueUpdateItem, updateBy string, updateAt time.Time) error
 	updateRemarkByGroup func(ctx context.Context, groupID uuid.UUID, remark, updateBy string, updateAt time.Time) (int64, error)
 	createHistoryBatch  func(ctx context.Context, histories []*secretdomain.History) error
-	listHistoryBySecret func(ctx context.Context, secretID uuid.UUID, offset, limit int) ([]*secretdomain.History, int64, error)
-	listHistoryTargets  func(ctx context.Context, groupID uuid.UUID) ([]secretdomain.HistoryTarget, error)
-	listHistoryByBatch  func(ctx context.Context, batchID uuid.UUID) ([]*secretdomain.History, error)
+	listHistoryBySecret func(ctx context.Context, filter secretdomain.HistoryPageFilter) ([]*secretdomain.History, int64, error)
+	listHistoryTargets  func(ctx context.Context, filter secretdomain.HistoryTargetFilter) ([]secretdomain.HistoryTarget, error)
+	listHistoryByBatch  func(ctx context.Context, filter secretdomain.HistoryBatchFilter) ([]*secretdomain.History, error)
 	withTx              func(ctx context.Context, fn func(ctx context.Context) error) error
 }
 
@@ -109,21 +109,21 @@ func (s *stubSecretRepo) CreateHistoryBatch(ctx context.Context, histories []*se
 	}
 	return nil
 }
-func (s *stubSecretRepo) ListHistoryBySecretID(ctx context.Context, secretID uuid.UUID, offset, limit int) ([]*secretdomain.History, int64, error) {
+func (s *stubSecretRepo) ListHistoryBySecretID(ctx context.Context, filter secretdomain.HistoryPageFilter) ([]*secretdomain.History, int64, error) {
 	if s.listHistoryBySecret != nil {
-		return s.listHistoryBySecret(ctx, secretID, offset, limit)
+		return s.listHistoryBySecret(ctx, filter)
 	}
 	return nil, 0, nil
 }
-func (s *stubSecretRepo) ListHistoryTargetsByGroupID(ctx context.Context, groupID uuid.UUID) ([]secretdomain.HistoryTarget, error) {
+func (s *stubSecretRepo) ListHistoryTargetsByGroupID(ctx context.Context, filter secretdomain.HistoryTargetFilter) ([]secretdomain.HistoryTarget, error) {
 	if s.listHistoryTargets != nil {
-		return s.listHistoryTargets(ctx, groupID)
+		return s.listHistoryTargets(ctx, filter)
 	}
 	return nil, nil
 }
-func (s *stubSecretRepo) ListHistoryByBatchID(ctx context.Context, batchID uuid.UUID) ([]*secretdomain.History, error) {
+func (s *stubSecretRepo) ListHistoryByBatchID(ctx context.Context, filter secretdomain.HistoryBatchFilter) ([]*secretdomain.History, error) {
 	if s.listHistoryByBatch != nil {
-		return s.listHistoryByBatch(ctx, batchID)
+		return s.listHistoryByBatch(ctx, filter)
 	}
 	return nil, nil
 }
@@ -882,9 +882,12 @@ func TestService_History_SecretIDPriorityOverBatchAndPagination(t *testing.T) {
 	cipher := testCipher(t)
 	ciphertext, _ := cipher.Encrypt("version-value")
 	repo := &stubSecretRepo{
-		listHistoryBySecret: func(ctx context.Context, gotSecretID uuid.UUID, offset, limit int) ([]*secretdomain.History, int64, error) {
-			if gotSecretID != secretID || offset != 20 || limit != 10 {
-				t.Fatalf("unexpected secret history query: id=%s offset=%d limit=%d", gotSecretID, offset, limit)
+		listHistoryBySecret: func(ctx context.Context, filter secretdomain.HistoryPageFilter) ([]*secretdomain.History, int64, error) {
+			if filter.SecretID != secretID || filter.Offset != 20 || filter.Limit != 10 || filter.UserID != "reader-1" {
+				t.Fatalf("unexpected secret history query: %+v", filter)
+			}
+			if len(filter.EnvCodes) != 2 || filter.EnvCodes[0] != "prod" || filter.EnvCodes[1] != "test" {
+				t.Fatalf("environment filter not normalized: %+v", filter.EnvCodes)
 			}
 			return []*secretdomain.History{{
 				ID: uuid.New(), SecretID: secretID, BatchID: batchID, GroupID: groupID,
@@ -892,7 +895,7 @@ func TestService_History_SecretIDPriorityOverBatchAndPagination(t *testing.T) {
 				ValueType: "string", Version: 3, CommitMsg: "rotate", CreateBy: "u",
 			}}, 21, nil
 		},
-		listHistoryByBatch: func(ctx context.Context, batchID uuid.UUID) ([]*secretdomain.History, error) {
+		listHistoryByBatch: func(ctx context.Context, filter secretdomain.HistoryBatchFilter) ([]*secretdomain.History, error) {
 			t.Fatal("batch query must not run when secretId is present")
 			return nil, nil
 		},
@@ -905,7 +908,7 @@ func TestService_History_SecretIDPriorityOverBatchAndPagination(t *testing.T) {
 	})
 	svc := NewService(repo, &stubFolderRepo{}, &stubEnvRepo{}, cipher, resolver)
 	result, err := svc.History(context.Background(), HistoryInput{
-		SecretID: secretID, BatchID: batchID, PageNum: 3, PageSize: 10,
+		SecretID: secretID, BatchID: batchID, EnvList: []string{" prod ", "test", "prod", ""}, UserID: " reader-1 ", PageNum: 3, PageSize: 10,
 	})
 	if err != nil {
 		t.Fatalf("expected nil err, got %v", err)
@@ -928,9 +931,9 @@ func TestService_History_BatchWithoutPagination(t *testing.T) {
 	prodCiphertext, _ := cipher.Encrypt("prod-value")
 	testCiphertext, _ := cipher.Encrypt("test-value")
 	repo := &stubSecretRepo{
-		listHistoryByBatch: func(ctx context.Context, gotBatchID uuid.UUID) ([]*secretdomain.History, error) {
-			if gotBatchID != batchID {
-				t.Fatalf("unexpected batch id %s", gotBatchID)
+		listHistoryByBatch: func(ctx context.Context, filter secretdomain.HistoryBatchFilter) ([]*secretdomain.History, error) {
+			if filter.BatchID != batchID || len(filter.EnvCodes) != 0 {
+				t.Fatalf("unexpected batch history filter: %+v", filter)
 			}
 			return []*secretdomain.History{
 				{
@@ -1020,30 +1023,30 @@ func TestService_History_GroupIDPriorityAndPaginatesEachEnvironment(t *testing.T
 	prodCiphertext, _ := cipher.Encrypt("prod-v2")
 
 	repo := &stubSecretRepo{
-		listHistoryTargets: func(_ context.Context, gotGroupID uuid.UUID) ([]secretdomain.HistoryTarget, error) {
-			if gotGroupID != groupID {
-				t.Fatalf("unexpected group id %s", gotGroupID)
+		listHistoryTargets: func(_ context.Context, filter secretdomain.HistoryTargetFilter) ([]secretdomain.HistoryTarget, error) {
+			if filter.GroupID != groupID || filter.UserID != "reader-1" || len(filter.EnvCodes) != 2 || filter.EnvCodes[0] != "dev" || filter.EnvCodes[1] != "prod" {
+				t.Fatalf("unexpected group history filter: %+v", filter)
 			}
 			return []secretdomain.HistoryTarget{
 				{EnvID: devEnvID, SecretID: devSecretID},
 				{EnvID: prodEnvID, SecretID: prodSecretID},
 			}, nil
 		},
-		listHistoryBySecret: func(_ context.Context, secretID uuid.UUID, offset, limit int) ([]*secretdomain.History, int64, error) {
-			if offset != 5 || limit != 5 {
-				t.Fatalf("unexpected pagination offset=%d limit=%d", offset, limit)
+		listHistoryBySecret: func(_ context.Context, filter secretdomain.HistoryPageFilter) ([]*secretdomain.History, int64, error) {
+			if filter.Offset != 5 || filter.Limit != 5 || filter.UserID != "reader-1" || len(filter.EnvCodes) != 2 {
+				t.Fatalf("unexpected environment page filter: %+v", filter)
 			}
-			switch secretID {
+			switch filter.SecretID {
 			case devSecretID:
-				return []*secretdomain.History{{SecretID: secretID, GroupID: groupID, EnvCode: "dev", ValueCiphertext: devCiphertext, Version: 3}}, 8, nil
+				return []*secretdomain.History{{SecretID: filter.SecretID, GroupID: groupID, EnvCode: "dev", ValueCiphertext: devCiphertext, Version: 3}}, 8, nil
 			case prodSecretID:
-				return []*secretdomain.History{{SecretID: secretID, GroupID: groupID, EnvCode: "prod", ValueCiphertext: prodCiphertext, Version: 2}}, 6, nil
+				return []*secretdomain.History{{SecretID: filter.SecretID, GroupID: groupID, EnvCode: "prod", ValueCiphertext: prodCiphertext, Version: 2}}, 6, nil
 			default:
-				t.Fatalf("unexpected secret id %s", secretID)
+				t.Fatalf("unexpected secret id %s", filter.SecretID)
 				return nil, 0, nil
 			}
 		},
-		listHistoryByBatch: func(context.Context, uuid.UUID) ([]*secretdomain.History, error) {
+		listHistoryByBatch: func(context.Context, secretdomain.HistoryBatchFilter) ([]*secretdomain.History, error) {
 			t.Fatal("batch query must not run when groupId is present")
 			return nil, nil
 		},
@@ -1051,7 +1054,8 @@ func TestService_History_GroupIDPriorityAndPaginatesEachEnvironment(t *testing.T
 
 	result, err := NewService(repo, &stubFolderRepo{}, &stubEnvRepo{}, cipher).History(
 		context.Background(), HistoryInput{
-			GroupID: groupID, SecretID: ignoredSecretID, BatchID: ignoredBatchID, PageNum: 2, PageSize: 5,
+			GroupID: groupID, SecretID: ignoredSecretID, BatchID: ignoredBatchID,
+			EnvList: []string{"dev", "prod"}, UserID: "reader-1", PageNum: 2, PageSize: 5,
 		},
 	)
 	if err != nil {
@@ -1077,10 +1081,10 @@ func TestService_History_GroupQueriesEnvironmentsConcurrently(t *testing.T) {
 	started := make(chan struct{}, len(targets))
 	release := make(chan struct{})
 	repo := &stubSecretRepo{
-		listHistoryTargets: func(context.Context, uuid.UUID) ([]secretdomain.HistoryTarget, error) {
+		listHistoryTargets: func(context.Context, secretdomain.HistoryTargetFilter) ([]secretdomain.HistoryTarget, error) {
 			return targets, nil
 		},
-		listHistoryBySecret: func(context.Context, uuid.UUID, int, int) ([]*secretdomain.History, int64, error) {
+		listHistoryBySecret: func(context.Context, secretdomain.HistoryPageFilter) ([]*secretdomain.History, int64, error) {
 			started <- struct{}{}
 			<-release
 			return []*secretdomain.History{}, 0, nil

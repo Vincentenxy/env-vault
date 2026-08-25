@@ -221,7 +221,7 @@ func TestOrgHandler_Update_Success(t *testing.T) {
 	want := &orgdomain.Organization{ID: id, Code: "org-001", Name: "new-name"}
 	svc := &stubOrgService{
 		updateFn: func(ctx context.Context, in orgapp.UpdateInput, operator string) (*orgdomain.Organization, error) {
-			if in.ID != id || in.Name != "new-name" {
+			if in.ID != id || in.Name != "new-name" || in.Manager != "manager-new" {
 				t.Fatalf("input not passed: %+v", in)
 			}
 			return want, nil
@@ -229,7 +229,7 @@ func TestOrgHandler_Update_Success(t *testing.T) {
 	}
 	r := newOrgTestEngine(svc, testUser())
 	w := doJSON(t, r, http.MethodPost, "/api/v1/org/update", map[string]any{
-		"id": id, "name": "new-name", "remark": "r",
+		"id": id, "name": "new-name", "remark": "r", "manager": "manager-new",
 	})
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)

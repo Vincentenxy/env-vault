@@ -51,9 +51,10 @@ type CreateOrgRequest struct {
 
 // UpdateRequest 更新组织请求
 type UpdateOrgRequest struct {
-	ID     uuid.UUID `json:"id"`
-	Name   string    `json:"name"`
-	Remark string    `json:"remark"`
+	ID      uuid.UUID `json:"id"`
+	Name    string    `json:"name"`
+	Remark  string    `json:"remark"`
+	Manager string    `json:"manager,omitempty"`
 }
 
 // DeleteRequest 删除组织请求
@@ -135,9 +136,10 @@ func (h *OrganizationHandler) Update(c *gin.Context) {
 	}
 
 	o, err := h.svc.Update(c, orgapp.UpdateInput{
-		ID:     req.ID,
-		Name:   req.Name,
-		Remark: req.Remark,
+		ID:      req.ID,
+		Name:    req.Name,
+		Remark:  req.Remark,
+		Manager: req.Manager,
 	}, operator(c))
 	h.respondError(c, err)
 	if err != nil {

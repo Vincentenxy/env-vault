@@ -31,9 +31,10 @@ type CreateInput struct {
 
 // UpdateInput 更新组织入参
 type UpdateInput struct {
-	ID     uuid.UUID
-	Name   string
-	Remark string
+	ID      uuid.UUID
+	Name    string
+	Remark  string
+	Manager string
 }
 
 // ListInput 组织列表查询入参
@@ -125,6 +126,9 @@ func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) (
 
 	o.Name = in.Name
 	o.Remark = in.Remark
+	if manager := strings.TrimSpace(in.Manager); manager != "" {
+		o.Manager = manager
+	}
 	o.UpdateBy = operator
 	o.UpdateAt = time.Now()
 

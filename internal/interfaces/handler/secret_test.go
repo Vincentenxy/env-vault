@@ -90,6 +90,7 @@ func newSecretTestEngine(svc secretapp.IService, u *userctx.User) *gin.Engine {
 	g.POST("/list", h.List)
 	g.POST("/detail", h.Detail)
 	g.POST("/history", h.History)
+	g.POST("/history/batch", h.BatchHistory)
 	g.POST("/delete", h.Delete)
 	return r
 }
@@ -441,8 +442,11 @@ func TestSecretHandler_History_Success(t *testing.T) {
 	createdAt := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
 	svc := &stubSecretService{
 		historyFn: func(ctx context.Context, in secretapp.HistoryInput) (*secretapp.HistoryResult, error) {
-			if in.SecretID != secretID || in.BatchID != batchID || in.GroupID != uuid.Nil || in.PageNum != 2 || in.PageSize != 5 {
+			if in.SecretID != secretID || in.BatchID != batchID || in.GroupID != uuid.Nil || in.UserID != "u-1" || in.PageNum != 2 || in.PageSize != 5 {
 				t.Fatalf("history input not passed: %+v", in)
+			}
+			if len(in.EnvList) != 2 || in.EnvList[0] != "prod" || in.EnvList[1] != "test" {
+				t.Fatalf("history envList not passed: %+v", in.EnvList)
 			}
 			return &secretapp.HistoryResult{
 				Total: 6,
@@ -458,6 +462,7 @@ func TestSecretHandler_History_Success(t *testing.T) {
 	w := doJSONP(t, r, http.MethodPost, "/api/v1/secret/history", map[string]any{
 		"secretId": secretID,
 		"batchId":  batchID,
+		"envList":  []string{"prod", "test"},
 		"pageNum":  2,
 		"pageSize": 5,
 	})
@@ -494,7 +499,7 @@ func TestSecretHandler_History_BatchGroupedResponse(t *testing.T) {
 	createdAt := time.Date(2026, 8, 23, 11, 40, 49, 0, time.FixedZone("CST", 8*60*60))
 	svc := &stubSecretService{
 		historyFn: func(_ context.Context, in secretapp.HistoryInput) (*secretapp.HistoryResult, error) {
-			if in.BatchID != batchID || in.GroupID != uuid.Nil || in.SecretID != uuid.Nil {
+			if in.BatchID != batchID || in.GroupID != uuid.Nil || in.SecretID != uuid.Nil || in.UserID != "u-1" || len(in.EnvList) != 0 {
 				t.Fatalf("history input not passed: %+v", in)
 			}
 			return &secretapp.HistoryResult{BatchHistories: []secretapp.BatchHistoryView{
@@ -537,6 +542,63 @@ func TestSecretHandler_History_BatchGroupedResponse(t *testing.T) {
 	}
 }
 
+func TestSecretHandler_BatchHistory_Success(t *testing.T) {
+	batchID := uuid.New()
+	groupID := uuid.New()
+	envID := uuid.New()
+	serviceCalled := false
+	svc := &stubSecretService{
+		historyFn: func(_ context.Context, in secretapp.HistoryInput) (*secretapp.HistoryResult, error) {
+			serviceCalled = true
+			if in.BatchID != batchID || in.GroupID != uuid.Nil || in.SecretID != uuid.Nil || in.UserID != "u-1" {
+				t.Fatalf("batch history input not passed: %+v", in)
+			}
+			if len(in.EnvList) != 2 || in.EnvList[0] != "dev" || in.EnvList[1] != "prod" {
+				t.Fatalf("batch history envList not passed: %+v", in.EnvList)
+			}
+			return &secretapp.HistoryResult{BatchHistories: []secretapp.BatchHistoryView{
+				{
+					GroupID: groupID,
+					Key:     "DATABASE_URL",
+					Versions: map[uuid.UUID]secretapp.HistoryView{
+						envID: {BatchID: batchID, GroupID: groupID, EnvCode: "dev", Version: 3},
+					},
+				},
+			}}, nil
+		},
+	}
+
+	r := newSecretTestEngine(svc, testUser())
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/secret/history/batch", map[string]any{
+		"batchId": batchID,
+		"envList": []string{"dev", "prod"},
+	})
+	body := decodeBody(t, w)
+	if !serviceCalled || body["code"].(float64) != 0 {
+		t.Fatalf("expected batch history success, got %+v", body)
+	}
+	data, ok := body["data"].([]any)
+	if !ok || len(data) != 1 || data[0].(map[string]any)["key"].(string) != "DATABASE_URL" {
+		t.Fatalf("unexpected batch history response: %+v", body["data"])
+	}
+}
+
+func TestSecretHandler_BatchHistory_RequiresBatchID(t *testing.T) {
+	svc := &stubSecretService{
+		historyFn: func(_ context.Context, _ secretapp.HistoryInput) (*secretapp.HistoryResult, error) {
+			t.Fatal("service must not be called without batchId")
+			return nil, nil
+		},
+	}
+
+	r := newSecretTestEngine(svc, testUser())
+	w := doJSONP(t, r, http.MethodPost, "/api/v1/secret/history/batch", map[string]any{})
+	body := decodeBody(t, w)
+	if body["code"].(float64) != -1 || body["msg"].(string) != "invalid params" {
+		t.Fatalf("expected invalid params, got %+v", body)
+	}
+}
+
 func TestSecretHandler_History_GroupedByEnvironmentID(t *testing.T) {
 	groupID := uuid.New()
 	ignoredSecretID, ignoredBatchID := uuid.New(), uuid.New()
@@ -544,8 +606,11 @@ func TestSecretHandler_History_GroupedByEnvironmentID(t *testing.T) {
 	devSecretID, prodSecretID := uuid.New(), uuid.New()
 	svc := &stubSecretService{
 		historyFn: func(_ context.Context, in secretapp.HistoryInput) (*secretapp.HistoryResult, error) {
-			if in.GroupID != groupID || in.SecretID != ignoredSecretID || in.BatchID != ignoredBatchID || in.PageNum != 2 || in.PageSize != 5 {
+			if in.GroupID != groupID || in.SecretID != ignoredSecretID || in.BatchID != ignoredBatchID || in.UserID != "u-1" || in.PageNum != 2 || in.PageSize != 5 {
 				t.Fatalf("history input not passed: %+v", in)
+			}
+			if len(in.EnvList) != 1 || in.EnvList[0] != "dev" {
+				t.Fatalf("history envList not passed: %+v", in.EnvList)
 			}
 			return &secretapp.HistoryResult{EnvironmentHistories: map[uuid.UUID]secretapp.HistoryPage{
 				devEnvID: {
@@ -561,7 +626,8 @@ func TestSecretHandler_History_GroupedByEnvironmentID(t *testing.T) {
 	}
 	r := newSecretTestEngine(svc, testUser())
 	w := doJSONP(t, r, http.MethodPost, "/api/v1/secret/history", map[string]any{
-		"groupId": groupID, "secretId": ignoredSecretID, "batchId": ignoredBatchID, "pageNum": 2, "pageSize": 5,
+		"groupId": groupID, "secretId": ignoredSecretID, "batchId": ignoredBatchID,
+		"envList": []string{"dev"}, "pageNum": 2, "pageSize": 5,
 	})
 	body := decodeBody(t, w)
 	if body["code"].(float64) != 0 {

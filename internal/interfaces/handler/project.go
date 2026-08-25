@@ -60,9 +60,10 @@ type CreateProjectEnvironmentItem struct {
 
 // UpdateRequest 更新项目请求
 type UpdateProjectRequest struct {
-	ID     uuid.UUID `json:"id"`
-	Name   string    `json:"name"`
-	Remark string    `json:"remark"`
+	ID      uuid.UUID `json:"id"`
+	Name    string    `json:"name"`
+	Remark  string    `json:"remark"`
+	Manager string    `json:"manager,omitempty"`
 }
 
 // DeleteRequest 删除项目请求
@@ -138,9 +139,10 @@ func (h *ProjectHandler) Update(c *gin.Context) {
 	}
 
 	p, err := h.svc.Update(c, projapp.UpdateInput{
-		ID:     req.ID,
-		Name:   req.Name,
-		Remark: req.Remark,
+		ID:      req.ID,
+		Name:    req.Name,
+		Remark:  req.Remark,
+		Manager: req.Manager,
 	}, operator(c))
 	h.respondError(c, err)
 	if err != nil {
