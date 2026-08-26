@@ -38,7 +38,15 @@ type AuthConfig struct {
 
 // SecurityConfig 安全相关配置
 type SecurityConfig struct {
-	EncryptionKey string `mapstructure:"encryption_key"` // secret value 加密私钥（AES-256-GCM，32 字节 base64 编码）
+	EncryptionKey          string                  `mapstructure:"encryption_key"`            // secret value 加密私钥（AES-256-GCM，32 字节 base64 编码）
+	AllowConfigKeyFallback bool                    `mapstructure:"allow_config_key_fallback"` // 是否允许使用配置文件中的开发密钥
+	ReadyAllowlist         []ReadyAllowRouteConfig `mapstructure:"ready_allowlist"`           // 主密钥未就绪时允许访问的接口
+}
+
+// ReadyAllowRouteConfig 主密钥未就绪时放行的单个接口配置
+type ReadyAllowRouteConfig struct {
+	Method string `mapstructure:"method"` // HTTP 请求方法
+	Path   string `mapstructure:"path"`   // 不包含查询参数的精确接口路径
 }
 
 // DatabaseConfig PostgreSQL 配置

@@ -19,7 +19,6 @@ import (
 	envdomain "env-vault/internal/domain/environment"
 	folderdomain "env-vault/internal/domain/folder"
 	secretdomain "env-vault/internal/domain/secret"
-	"env-vault/pkg/crypto"
 )
 
 // 业务错误（应用层显式定义，handler 映射为业务错误码）
@@ -171,17 +170,23 @@ type IService interface {
 	Delete(ctx context.Context, groupID uuid.UUID, operator string) error
 }
 
+// valueCryptor 定义 Secret 应用服务所需的动态加解密能力
+type valueCryptor interface {
+	Encrypt(plaintext string) (string, error)
+	Decrypt(ciphertext string) (string, error)
+}
+
 // Service 密钥应用服务实现（依赖密钥/文件夹/环境仓储与加解密器）
 type Service struct {
 	repo         secretdomain.Repository
 	folderRepo   folderdomain.Repository
 	envRepo      envdomain.Repository
-	cipher       *crypto.Cipher
+	cipher       valueCryptor
 	nameResolver app.NicknameResolver
 }
 
 // NewService 创建密钥应用服务
-func NewService(repo secretdomain.Repository, folderRepo folderdomain.Repository, envRepo envdomain.Repository, cipher *crypto.Cipher, resolvers ...app.NicknameResolver) *Service {
+func NewService(repo secretdomain.Repository, folderRepo folderdomain.Repository, envRepo envdomain.Repository, cipher valueCryptor, resolvers ...app.NicknameResolver) *Service {
 	var resolver app.NicknameResolver
 	if len(resolvers) > 0 {
 		resolver = resolvers[0]

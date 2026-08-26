@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	secretdomain "env-vault/internal/domain/secret"
+	"env-vault/internal/infrastructure/persistence"
 )
 
 // txKey context 中携带事务句柄的 key（类型不导出避免跨包冲突）
@@ -22,7 +23,7 @@ func (r *Repository) withTxDB(ctx context.Context) *gorm.DB {
 			return tx
 		}
 	}
-	return r.db
+	return persistence.TxDB(ctx, r.db)
 }
 
 // secretPO secret_info 表持久化对象（数据库列名下划线）

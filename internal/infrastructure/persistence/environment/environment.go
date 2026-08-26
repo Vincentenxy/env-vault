@@ -46,6 +46,13 @@ func NewRepository(db *gorm.DB) *Repository {
 	return &Repository{db: db}
 }
 
+// WithTx 在事务中执行 fn
+func (r *Repository) WithTx(ctx context.Context, fn func(context.Context) error) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return fn(persistence.WithTx(ctx, tx))
+	})
+}
+
 // CreateBatch 批量创建环境（GORM 对 slice 生成单条多行 INSERT，天然原子）
 func (r *Repository) CreateBatch(ctx context.Context, environments []*envdomain.Environment) error {
 	if len(environments) == 0 {

@@ -2,6 +2,7 @@ package environment
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"testing"
 	"time"
@@ -9,6 +10,9 @@ import (
 	"github.com/google/uuid"
 
 	envdomain "env-vault/internal/domain/environment"
+	folderdomain "env-vault/internal/domain/folder"
+	secretdomain "env-vault/internal/domain/secret"
+	"env-vault/pkg/crypto"
 )
 
 // stubRepo 内存实现的 Repository，便于 application 层单测
@@ -19,6 +23,7 @@ type stubRepo struct {
 	update           func(ctx context.Context, e *envdomain.Environment) error
 	delete           func(ctx context.Context, id uuid.UUID, deleteBy string) error
 	list             func(ctx context.Context, projectID uuid.UUID) ([]*envdomain.Environment, error)
+	withTx           func(ctx context.Context, fn func(context.Context) error) error
 }
 
 func (s *stubRepo) CreateBatch(ctx context.Context, environments []*envdomain.Environment) error {
@@ -56,6 +61,43 @@ func (s *stubRepo) List(ctx context.Context, projectID uuid.UUID) ([]*envdomain.
 		return s.list(ctx, projectID)
 	}
 	return nil, nil
+}
+func (s *stubRepo) WithTx(ctx context.Context, fn func(context.Context) error) error {
+	if s.withTx != nil {
+		return s.withTx(ctx, fn)
+	}
+	return fn(ctx)
+}
+
+type stubFolderStructureRepo struct {
+	createBatch func(ctx context.Context, folders []*folderdomain.Folder) error
+	listByEnvID func(ctx context.Context, envID uuid.UUID) ([]*folderdomain.Folder, error)
+}
+
+func (s *stubFolderStructureRepo) CreateBatch(ctx context.Context, folders []*folderdomain.Folder) error {
+	return s.createBatch(ctx, folders)
+}
+
+func (s *stubFolderStructureRepo) ListByEnvID(ctx context.Context, envID uuid.UUID) ([]*folderdomain.Folder, error) {
+	return s.listByEnvID(ctx, envID)
+}
+
+type stubSecretStructureRepo struct {
+	createBatch        func(ctx context.Context, secrets []*secretdomain.Secret) error
+	listByFolderIDs    func(ctx context.Context, folderIDs []uuid.UUID) ([]*secretdomain.Secret, error)
+	createHistoryBatch func(ctx context.Context, histories []*secretdomain.History) error
+}
+
+func (s *stubSecretStructureRepo) CreateBatch(ctx context.Context, secrets []*secretdomain.Secret) error {
+	return s.createBatch(ctx, secrets)
+}
+
+func (s *stubSecretStructureRepo) ListByFolderIDs(ctx context.Context, folderIDs []uuid.UUID) ([]*secretdomain.Secret, error) {
+	return s.listByFolderIDs(ctx, folderIDs)
+}
+
+func (s *stubSecretStructureRepo) CreateHistoryBatch(ctx context.Context, histories []*secretdomain.History) error {
+	return s.createHistoryBatch(ctx, histories)
 }
 
 func newTestEnvironment(projectID uuid.UUID, code string) *envdomain.Environment {
@@ -122,6 +164,149 @@ func TestService_Create_Success(t *testing.T) {
 	}
 	if got[0].IsCheckPerm {
 		t.Fatalf("expected default isCheckPerm false for dev")
+	}
+}
+
+func TestService_Create_UsesExplicitOrderNo(t *testing.T) {
+	projectID := uuid.New()
+	repo := &stubRepo{
+		createBatch: func(ctx context.Context, environments []*envdomain.Environment) error {
+			if len(environments) != 1 || environments[0].OrderNo != 35 {
+				t.Fatalf("expected explicit orderNo 35, got %+v", environments)
+			}
+			return nil
+		},
+	}
+
+	svc := NewService(repo)
+	got, err := svc.Create(context.Background(), CreateInput{
+		ProjectID: projectID,
+		Environments: []CreateItemInput{
+			{Code: "stage", Name: "预发布环境", OrderNo: 35},
+		},
+	}, "operator-1")
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if got[0].OrderNo != 35 {
+		t.Fatalf("expected explicit orderNo 35, got %d", got[0].OrderNo)
+	}
+}
+
+func TestService_Create_ClonesFoldersAndEmptySecrets(t *testing.T) {
+	projectID := uuid.New()
+	sourceEnvironment := newTestEnvironment(projectID, "dev")
+	sourceEnvironment.OrderNo = 20
+	topFolderID := uuid.New()
+	childFolderID := uuid.New()
+	topGroupID := uuid.New()
+	childGroupID := uuid.New()
+	secretGroupID := uuid.New()
+	steps := make([]string, 0, 4)
+
+	cipher, err := crypto.New(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatalf("create cipher: %v", err)
+	}
+
+	var createdEnvironments []*envdomain.Environment
+	envRepo := &stubRepo{
+		list: func(ctx context.Context, pid uuid.UUID) ([]*envdomain.Environment, error) {
+			return []*envdomain.Environment{sourceEnvironment}, nil
+		},
+		createBatch: func(ctx context.Context, environments []*envdomain.Environment) error {
+			steps = append(steps, "environment")
+			createdEnvironments = environments
+			return nil
+		},
+		withTx: func(ctx context.Context, fn func(context.Context) error) error {
+			return fn(ctx)
+		},
+	}
+
+	var createdFolders []*folderdomain.Folder
+	folderRepo := &stubFolderStructureRepo{
+		listByEnvID: func(ctx context.Context, envID uuid.UUID) ([]*folderdomain.Folder, error) {
+			if envID != sourceEnvironment.ID {
+				t.Fatalf("unexpected source environment %s", envID)
+			}
+			return []*folderdomain.Folder{
+				{ID: topFolderID, GroupID: topGroupID, Code: "groups", Name: "分组", EnvID: envID, Type: folderdomain.TypeCommon},
+				{ID: childFolderID, GroupID: childGroupID, Code: "app", Name: "应用", EnvID: envID, ParentFolderID: &topFolderID, Type: folderdomain.TypeCommon},
+			}, nil
+		},
+		createBatch: func(ctx context.Context, folders []*folderdomain.Folder) error {
+			steps = append(steps, "folder")
+			createdFolders = folders
+			return nil
+		},
+	}
+
+	var createdSecrets []*secretdomain.Secret
+	var createdHistories []*secretdomain.History
+	secretRepo := &stubSecretStructureRepo{
+		listByFolderIDs: func(ctx context.Context, folderIDs []uuid.UUID) ([]*secretdomain.Secret, error) {
+			if len(folderIDs) != 2 || folderIDs[0] != topFolderID || folderIDs[1] != childFolderID {
+				t.Fatalf("unexpected source folders: %v", folderIDs)
+			}
+			return []*secretdomain.Secret{{
+				ID: uuid.New(), GroupID: secretGroupID, FolderID: childFolderID,
+				EnvCode: "dev", Key: "TOKEN", ValueType: "string", Remark: "令牌", Version: 3,
+			}}, nil
+		},
+		createBatch: func(ctx context.Context, secrets []*secretdomain.Secret) error {
+			steps = append(steps, "secret")
+			createdSecrets = secrets
+			return nil
+		},
+		createHistoryBatch: func(ctx context.Context, histories []*secretdomain.History) error {
+			steps = append(steps, "history")
+			createdHistories = histories
+			return nil
+		},
+	}
+
+	svc := NewService(envRepo, WithResourceClone(folderRepo, secretRepo, cipher))
+	got, err := svc.Create(context.Background(), CreateInput{
+		ProjectID: projectID,
+		Environments: []CreateItemInput{
+			{Code: "test", Name: "测试环境"},
+			{Code: "prod", Name: "生产环境"},
+		},
+	}, "operator-1")
+	if err != nil {
+		t.Fatalf("create environments: %v", err)
+	}
+	if len(got) != 2 || got[0].OrderNo != 30 || got[1].OrderNo != 40 {
+		t.Fatalf("unexpected environments: %+v", got)
+	}
+	if len(createdEnvironments) != 2 || len(createdFolders) != 4 || len(createdSecrets) != 2 || len(createdHistories) != 2 {
+		t.Fatalf("unexpected clone counts: environments=%d folders=%d secrets=%d histories=%d",
+			len(createdEnvironments), len(createdFolders), len(createdSecrets), len(createdHistories))
+	}
+	for _, secret := range createdSecrets {
+		if secret.GroupID != secretGroupID || secret.Version != 1 || secret.ValueType != "string" {
+			t.Fatalf("secret metadata was not preserved: %+v", secret)
+		}
+		value, decryptErr := cipher.Decrypt(secret.ValueCiphertext)
+		if decryptErr != nil || value != "" {
+			t.Fatalf("expected encrypted empty value, value=%q err=%v", value, decryptErr)
+		}
+	}
+	batchID := createdHistories[0].BatchID
+	if batchID == uuid.Nil || createdHistories[1].BatchID != batchID {
+		t.Fatalf("histories should share one batch ID: %+v", createdHistories)
+	}
+	for i, history := range createdHistories {
+		if history.SecretID != createdSecrets[i].ID || history.Version != 1 || history.CommitMsg != initialHistoryCommitMsg {
+			t.Fatalf("unexpected history: %+v", history)
+		}
+	}
+	wantSteps := []string{"environment", "folder", "secret", "history"}
+	for i := range wantSteps {
+		if steps[i] != wantSteps[i] {
+			t.Fatalf("unexpected create order: %v", steps)
+		}
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	folderdomain "env-vault/internal/domain/folder"
+	"env-vault/internal/infrastructure/persistence"
 )
 
 // folderPO folder_info 表持久化对象（数据库列名下划线）
@@ -58,7 +59,26 @@ func (r *Repository) CreateBatch(ctx context.Context, folders []*folderdomain.Fo
 	for _, f := range folders {
 		pos = append(pos, toPO(f))
 	}
-	return r.db.WithContext(ctx).Create(&pos).Error
+	return persistence.TxDB(ctx, r.db).WithContext(ctx).Create(&pos).Error
+}
+
+// ListByEnvID 查询一个环境下的全部文件夹
+func (r *Repository) ListByEnvID(ctx context.Context, envID uuid.UUID) ([]*folderdomain.Folder, error) {
+	var pos []folderPO
+	err := persistence.TxDB(ctx, r.db).WithContext(ctx).
+		Where("env_id = ? AND is_deleted = false", envID).
+		Order("CASE WHEN parent_folder_id IS NULL THEN 0 ELSE 1 END ASC").
+		Order("create_at ASC, id ASC").
+		Find(&pos).Error
+	if err != nil {
+		return nil, err
+	}
+
+	folders := make([]*folderdomain.Folder, 0, len(pos))
+	for i := range pos {
+		folders = append(folders, toDomain(&pos[i]))
+	}
+	return folders, nil
 }
 
 // UpdateByGroupID 按 group_id 全环境同步更新 name/remark/manager。

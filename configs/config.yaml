@@ -10,13 +10,26 @@ auth:
   jwt_public_key: MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAj4uJ5IOD52X+qQwKa/rfctviCqrKTQWFsEKUDo9EDAH5KUziS/1O5qWe3zhtfCBGAEcCnELW3bpQHaSgghazVVXesdnGqIDQZSbMuemt7UXLsp72qDppR/x94o67srTo9Z3Wz0MsrR3/dxArFZuYGW7v8z8BK1UFLLSgA+LJu0YEcrhgVMiMtugOcjZ5NbRGXpo4fFbnIMtslr6xhOpA7zB8ycUjomHZlbakbYQU7tnHuj3Oyoe9BNUEueSVyPTiK3rwUaOl1EAJ8oBd380xVi01yLRriIIQPmCY2r9/RZJ8mUFFn6DlsF3rg5aPuVGHkCJIXAYrOdiruNcEcOn8FwIDAQAB
 
 security:
+  # 开发环境允许使用配置文件中的密钥，生产环境必须设置为 false
+  allow_config_key_fallback: true
   # secret value 加密私钥（AES-256-GCM，32 字节 base64 编码，测试环境使用）
   encryption_key: "Pk6V+TnUEZO6R8WOklCSrI/iM4QKHc55VQQrrptmVfk="
+  # 主密钥未就绪时按请求方法和精确路径放行
+  ready_allowlist:
+    - method: GET
+      path: /api/v1/pub/health
+    - method: GET
+      path: /api/v1/pub/masterKey/status
+    - method: POST
+      path: /api/v1/pub/masterKey/shares
+    # 登录接口实现后沿用该公开路径
+    - method: POST
+      path: /api/v1/pub/auth/login
 
 
 database:
-  host: "192.168.1.110"
-#  host: "127.0.0.1"
+#  host: "192.168.1.110"
+  host: "127.0.0.1"
   port: 5432
   user: "env_vault"
   password: "123456"
@@ -31,8 +44,8 @@ redis:
   enabled: true
   mode: "single"
   addrs:
-#    - "127.0.0.1:6379"
-    - "192.168.1.110:6379"
+    - "127.0.0.1:6379"
+#    - "192.168.1.110:6379"
   password: "123456"
   db: 1
   key_prefix: "env_vault"

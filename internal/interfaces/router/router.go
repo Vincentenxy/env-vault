@@ -27,7 +27,7 @@ import (
 	userrepo "env-vault/internal/infrastructure/persistence/user"
 	"env-vault/internal/interfaces/handler"
 	"env-vault/internal/interfaces/middleware"
-	"env-vault/pkg/crypto"
+	"env-vault/internal/masterkey"
 	"env-vault/pkg/logger"
 )
 
@@ -66,16 +66,25 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 		projapp.WithEnvironmentRepository(envRepo),
 		projapp.WithNicknameResolver(userSvc),
 	)
-	envSvc := envapp.NewService(envRepo)
 	folderSvc := folderapp.NewService(folderRepo, envRepo, userSvc)
 
-	// secret value 加解密器（私钥来自配置 security.encryption_key）
-	cipher, err := crypto.New(cfg.Security.EncryptionKey)
+	// 主密钥未激活时仍允许 HTTP 服务完成启动
+	masterKeyManager := masterkey.NewManager()
+	if err := masterKeyManager.LoadConfigFallback(cfg.Security.AllowConfigKeyFallback, cfg.Security.EncryptionKey); err != nil {
+		return nil, err
+	}
+	readyMiddleware, err := masterkey.NewReadyMiddleware(masterKeyManager, readyAllowedRoutes(cfg.Security.ReadyAllowlist))
 	if err != nil {
 		return nil, err
 	}
+	// Ready 检查位于具体路由和 JWT 认证之前
+	r.Use(readyMiddleware)
 	secretRepo := secretrepo.NewRepository(db)
-	secretSvc := secretapp.NewService(secretRepo, folderRepo, envRepo, cipher, userSvc)
+	envSvc := envapp.NewService(
+		envRepo,
+		envapp.WithResourceClone(folderRepo, secretRepo, masterKeyManager),
+	)
+	secretSvc := secretapp.NewService(secretRepo, folderRepo, envRepo, masterKeyManager, userSvc)
 
 	healthHandler := handler.NewHealthHandler()
 	userHandler := handler.NewUserHandler(userSvc)
@@ -97,6 +106,7 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 		// 无认证接口分组
 		pub := v1.Group("/pub")
 		pub.GET("/health", healthHandler.Ping)
+		masterkey.RegisterRoutes(pub, masterKeyManager)
 
 		// 需认证接口分组
 		auth := v1.Group("", authMiddleware)
@@ -192,4 +202,17 @@ func warmUpUsers(svc userapp.IService) {
 		return
 	}
 	logger.Info(ctx, "user cache warmed up", zap.Int("count", count))
+}
+
+// readyAllowedRoutes 将安全配置转换为主密钥模块的白名单模型
+func readyAllowedRoutes(configured []config.ReadyAllowRouteConfig) []masterkey.AllowedRoute {
+	// 配置层 DTO 只在 Router 组装阶段转换为主密钥模块的路由模型
+	routes := make([]masterkey.AllowedRoute, 0, len(configured))
+	for _, route := range configured {
+		routes = append(routes, masterkey.AllowedRoute{
+			Method: route.Method,
+			Path:   route.Path,
+		})
+	}
+	return routes
 }

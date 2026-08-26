@@ -42,10 +42,11 @@ type CreateEnvironmentItemRequest struct {
 	Code        string `json:"code"`
 	Name        string `json:"name"`
 	Remark      string `json:"remark"`
+	OrderNo     int    `json:"orderNo"`     // 可选，<=0 时由后端按已有最大排序号 + 10 生成
 	IsCheckPerm bool   `json:"isCheckPerm"` // 是否进行权限校验，未传默认 false
 }
 
-// CreateEnvironmentRequest 批量创建环境请求（同属一个项目，orderNo 按列表顺序填充：第 1 个 10，第 2 个 20……）
+// CreateEnvironmentRequest 批量创建环境请求
 type CreateEnvironmentRequest struct {
 	ProjectID    uuid.UUID                      `json:"projectId"`
 	Environments []CreateEnvironmentItemRequest `json:"environments"`
@@ -89,6 +90,7 @@ func (h *EnvironmentHandler) Create(c *gin.Context) {
 			Code:        item.Code,
 			Name:        item.Name,
 			Remark:      item.Remark,
+			OrderNo:     item.OrderNo,
 			IsCheckPerm: item.IsCheckPerm,
 		})
 	}

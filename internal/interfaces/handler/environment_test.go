@@ -87,7 +87,7 @@ func TestEnvironmentHandler_Create_Success(t *testing.T) {
 			if in.ProjectID != projectID || len(in.Environments) != 3 {
 				t.Fatalf("input not passed: %+v", in)
 			}
-			if in.Environments[0].Code != "dev" || in.Environments[0].IsCheckPerm {
+			if in.Environments[0].Code != "dev" || in.Environments[0].OrderNo != 10 || in.Environments[0].IsCheckPerm {
 				t.Fatalf("first item wrong: %+v", in.Environments[0])
 			}
 			if !in.Environments[2].IsCheckPerm {
@@ -104,7 +104,7 @@ func TestEnvironmentHandler_Create_Success(t *testing.T) {
 	w := doJSONP(t, r, http.MethodPost, "/api/v1/environment/create", map[string]any{
 		"projectId": projectID,
 		"environments": []map[string]any{
-			{"code": "dev", "name": "开发环境", "isCheckPerm": false},
+			{"code": "dev", "name": "开发环境", "orderNo": 10, "isCheckPerm": false},
 			{"code": "test", "name": "测试环境", "isCheckPerm": false},
 			{"code": "prod", "name": "生产环境", "isCheckPerm": true},
 		},
