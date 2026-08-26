@@ -19,7 +19,9 @@
 
 ```
 env-vault/
-├── cmd/main.go                          # 项目入口（加载配置 → 初始化日志 → 启动 HTTP → 优雅退出）
+├── cmd/
+│   ├── main.go                          # 服务入口（加载配置 → 初始化日志 → 启动 HTTP → 优雅退出）
+│   └── masterkey/                       # 主密钥分片离线生成工具
 ├── configs/config.yaml                  # 配置文件（Viper 解析，支持环境变量覆盖）
 ├── design/database.md                   # 数据库表设计文档（SQL 代码块格式）
 ├── internal/
@@ -52,6 +54,117 @@ docker build -t env-vault:latest .
 ```
 
 健康检查：`GET /api/v1/pub/health`
+
+## 主密钥分片生成工具
+
+`cmd/masterkey` 是独立的离线工具，用于生成 EnvVault 主密钥的 3-of-5 Shamir 分片。工具一次输出同一批次的 5 个 `EVS1` Token，系统启动时任选其中 3 个提交到 `/masterKey` 页面即可恢复主密钥。
+
+工具只向标准输出写入分片 Token，不输出完整主密钥，不写数据库、Redis 或日志，也不接受命令行明文主密钥参数。
+
+### 构建工具
+
+直接通过源码运行：
+
+```bash
+go run ./cmd/masterkey help
+```
+
+构建独立程序：
+
+```bash
+# Linux / macOS
+go build -o env-vault-masterkey ./cmd/masterkey
+
+# Windows PowerShell
+go build -o env-vault-masterkey.exe ./cmd/masterkey
+```
+
+### 生成全新的主密钥分片
+
+首次安装且数据库中没有历史密文时，使用 `generate` 生成新的 AES-256 主密钥并拆成 5 份：
+
+```bash
+go run ./cmd/masterkey generate
+```
+
+输出格式如下，每一行冒号后是可以直接填入页面的完整 Token：
+
+```text
+EnvVault 主密钥分片（共 5 份，恢复需要任意 3 份）
+1: EVS1.<token-1>
+2: EVS1.<token-2>
+3: EVS1.<token-3>
+4: EVS1.<token-4>
+5: EVS1.<token-5>
+```
+
+需要结构化输出时使用 JSON：
+
+```bash
+go run ./cmd/masterkey generate --format json
+```
+
+`generate` 不输出生成过程中的完整主密钥。主密钥只能通过同一批次任意 3 份分片恢复。
+
+### 拆分已有主密钥
+
+数据库已经存在 Secret 密文时，不能生成新的随机主密钥，必须将加密这些数据时使用的原 Base64 主密钥拆分。否则系统虽然可以进入 Ready 状态，但历史密文无法解密。
+
+主密钥只允许通过环境变量传入，默认变量名为 `ENV_VAULT_MASTER_KEY`。
+
+Windows PowerShell：
+
+```powershell
+$env:ENV_VAULT_MASTER_KEY = '<原 security.encryption_key>'
+go run ./cmd/masterkey split
+Remove-Item Env:ENV_VAULT_MASTER_KEY
+```
+
+Linux / macOS：
+
+```bash
+read -s ENV_VAULT_MASTER_KEY
+export ENV_VAULT_MASTER_KEY
+go run ./cmd/masterkey split
+unset ENV_VAULT_MASTER_KEY
+```
+
+也可以指定其他环境变量名和 JSON 输出格式：
+
+```bash
+go run ./cmd/masterkey split --key-env MY_MASTER_KEY --format json
+```
+
+不要使用命令行参数、Shell 历史或共享脚本传递完整主密钥。
+
+### 测试分片启动流程
+
+1. 使用 `generate` 创建全新测试密钥，或者使用 `split` 拆分测试数据库原来的加密密钥。
+2. 关闭配置密钥回退。可以修改 `configs/config.yaml`，也可以在启动进程中设置环境变量：
+
+```powershell
+$env:SECURITY_ALLOW_CONFIG_KEY_FALLBACK = 'false'
+go run ./cmd
+```
+
+3. 查询状态接口，确认返回 `ready=false`：
+
+```bash
+curl http://localhost:8090/api/v1/pub/masterKey/status
+```
+
+4. 打开前端页面 `http://localhost:5173/masterKey`，从同一批次的 5 份分片中任选 3 份，分别粘贴冒号后的完整 `EVS1` Token。
+5. 提交成功后，状态接口返回 `ready=true`、`source=shares`，普通业务接口恢复访问。
+
+### 分片保管要求
+
+- 5 份分片应分别交给不同管理员或存放在相互独立的安全位置。
+- 任意 3 份分片可以恢复主密钥，少于 3 份无法恢复；不得把 3 份及以上分片保存在同一位置。
+- 不要在 CI、工单、聊天记录、终端录屏或应用日志中输出分片。
+- 重新执行工具会产生新的分片批次，不同批次的分片不能混用。
+- 分片丢失导致可用数量少于 3 份时，主密钥和已有密文将无法恢复。
+
+详细启动设计见 [design/master-key-loading.md](design/master-key-loading.md)。
 
 ## 接口设计规范
 
@@ -263,4 +376,4 @@ auth.POST("/user/update", userHandler.Update)   // 需认证
 
 ## 相关连接
 
-- hashicorp/vault/shamir 算法 
+- hashicorp/vault/shamir 算法

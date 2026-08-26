@@ -2,6 +2,7 @@ package masterkey
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -37,6 +38,8 @@ var (
 	ErrShareSetMismatch = errors.New("master key shares belong to different sets")
 	// ErrDuplicateShare 分片编号重复
 	ErrDuplicateShare = errors.New("duplicate master key share")
+	// ErrInvalidMasterKey 待拆分的主密钥格式或长度不合法
+	ErrInvalidMasterKey = errors.New("invalid master key")
 )
 
 // shareContent 表示参与完整性校验的稳定字段
@@ -59,6 +62,55 @@ type decodedShare struct {
 	keySetID uuid.UUID // 已解析的分片生成批次 ID
 	index    byte      // 已校验的分片编号
 	data     []byte    // 可直接交给 Shamir Combine 的原始数据
+}
+
+// GenerateShareTokens 生成新的 AES-256 主密钥并返回 3-of-5 分片 Token
+func GenerateShareTokens() ([]string, error) {
+	key := make([]byte, masterKeySize)
+	if _, err := rand.Read(key); err != nil {
+		return nil, fmt.Errorf("generate master key: %w", err)
+	}
+	defer clear(key)
+
+	return splitShareTokens(key)
+}
+
+// SplitShareTokens 将已有的 Base64 AES-256 主密钥拆分为 3-of-5 分片 Token
+func SplitShareTokens(keyBase64 string) ([]string, error) {
+	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(keyBase64))
+	if err != nil {
+		return nil, fmt.Errorf("%w: decode base64", ErrInvalidMasterKey)
+	}
+	defer clear(key)
+	if len(key) != masterKeySize {
+		return nil, fmt.Errorf("%w: key must be %d bytes", ErrInvalidMasterKey, masterKeySize)
+	}
+
+	return splitShareTokens(key)
+}
+
+// splitShareTokens 将主密钥拆分并封装为同一批次的五份 EVS1 Token
+func splitShareTokens(key []byte) ([]string, error) {
+	parts, err := shamir.Split(key, TotalShares, RequiredShares)
+	if err != nil {
+		return nil, fmt.Errorf("split master key: %w", err)
+	}
+	defer func() {
+		for _, part := range parts {
+			clear(part)
+		}
+	}()
+
+	keySetID := uuid.New()
+	tokens := make([]string, 0, TotalShares)
+	for _, part := range parts {
+		token, err := encodeShareToken(keySetID, part)
+		if err != nil {
+			return nil, err
+		}
+		tokens = append(tokens, token)
+	}
+	return tokens, nil
 }
 
 // RestoreShares 使用同一批次的任意三个分片恢复并激活主密钥
