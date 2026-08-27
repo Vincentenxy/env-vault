@@ -138,8 +138,11 @@ response.Success(c, page.Response[TenantDTO]{ Total: total, List: items })
 ## 2. 认证规范
 
 - 认证方式：请求头携带 `Authorization: Bearer <token>`
-- Token 类型：**JWT**，使用**公钥验签**（仅允许 RS256/384/512，防止算法降级），公钥通过配置文件 `auth.jwt-public-key` 注入（兼容 base64 DER 与 PEM 两种格式）
-- 认证实现：`middleware.Auth()` 在 router 层挂载，已实现：
+- Token 类型：**JWT**，统一使用 RS256；必须校验签名、`iss`、`aud` 和 `exp`，禁止算法降级
+- 认证来源：系统同时预留 EnvVault 本地认证和公司统一认证。EnvVault 本地登录使用自身 RSA 私钥签发 JWT；公司 JWT 仅使用公司公钥验签。两类密钥不得与 Secret 主密钥复用
+- 密钥管理：JWT 私钥禁止提交仓库，必须通过环境变量或 Kubernetes Secret 挂载文件注入；公钥可以通过配置注入。多实例必须共享同一套本地签名私钥，禁止每次启动临时生成
+- 本地登录：`POST /api/v1/pub/auth/login` 使用全局唯一 `username` 和密码认证。密码只允许保存 Argon2id PHC 格式哈希，禁止保存明文、可逆密文或使用 Secret 主密钥加密
+- 认证实现：认证中间件在 router 层挂载，已实现：
   - 路径含 `/pub/` 前缀 → 跳过认证
   - 其余 `/api/` 路径 → 强制认证，失败统一返回 401 标准错误结构（见 1.4）
 - **用户信息解析**（对应 Java UserContext 逻辑）：认证通过后写入 `pkg/userctx.User`：
@@ -152,6 +155,7 @@ response.Success(c, page.Response[TenantDTO]{ Total: total, List: items })
 | `Cookie` | 请求头 Cookie（下游透传用） |
 
 - 业务代码获取用户：`userctx.MustFromContext(c)`，详见 README.md 认证章节
+- 主密钥状态和单份分片提交接口虽然需要在系统未就绪时绕过 Ready 拦截，但仍必须经过 JWT 认证；只有 `/pub/auth/login` 是公开认证入口
 
 ---
 

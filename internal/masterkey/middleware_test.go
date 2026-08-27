@@ -112,25 +112,30 @@ func TestReadyMiddlewareBootstrapFlow(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
 	engine.Use(readyMiddleware)
-	pub := engine.Group("/api/v1/pub")
-	RegisterRoutes(pub, manager)
+	v1 := engine.Group("/api/v1")
+	RegisterRoutes(v1, manager)
 	engine.GET("/api/v1/protected", func(c *gin.Context) {
 		c.Status(http.StatusNoContent)
 	})
 
-	statusResponse := performReadyRequest(engine, http.MethodGet, "/api/v1/pub/masterKey/status")
+	statusResponse := performReadyRequest(engine, http.MethodGet, "/api/v1/masterKey/status")
 	if statusResponse.Code != http.StatusOK || manager.Ready() {
 		t.Fatalf("status request code=%d ready=%v", statusResponse.Code, manager.Ready())
 	}
 
 	tokens := createShareTokens(t, []byte("12345678901234567890123456789012"), uuid.New())
-	payload, err := json.Marshal(SubmitSharesRequest{Shares: []string{tokens[3], tokens[0], tokens[4]}})
-	if err != nil {
-		t.Fatalf("encode shares request: %v", err)
+	for index, token := range []string{tokens[3], tokens[0], tokens[4]} {
+		payload, err := json.Marshal(SubmitShareRequest{Share: token})
+		if err != nil {
+			t.Fatalf("encode share request: %v", err)
+		}
+		shareResponse := performReadyRequestWithBody(engine, http.MethodPost, "/api/v1/masterKey/share", bytes.NewReader(payload))
+		if shareResponse.Code != http.StatusOK {
+			t.Fatalf("share %d request code=%d body=%s", index+1, shareResponse.Code, shareResponse.Body.String())
+		}
 	}
-	sharesResponse := performReadyRequestWithBody(engine, http.MethodPost, "/api/v1/pub/masterKey/shares", bytes.NewReader(payload))
-	if sharesResponse.Code != http.StatusOK || !manager.Ready() {
-		t.Fatalf("shares request code=%d ready=%v body=%s", sharesResponse.Code, manager.Ready(), sharesResponse.Body.String())
+	if !manager.Ready() {
+		t.Fatal("manager must be ready after three shares")
 	}
 
 	protectedResponse := performReadyRequest(engine, http.MethodGet, "/api/v1/protected")
@@ -172,10 +177,11 @@ func performReadyRequestWithBody(engine *gin.Engine, method, path string, body i
 }
 
 func readyTestRoutes(extra ...AllowedRoute) []AllowedRoute {
-	// 每个有效测试配置都包含系统完成启动所需的两个接口
+	// 每个有效测试配置都包含系统登录和完成启动所需的接口
 	routes := []AllowedRoute{
-		{Method: http.MethodGet, Path: "/api/v1/pub/masterKey/status"},
-		{Method: http.MethodPost, Path: "/api/v1/pub/masterKey/shares"},
+		{Method: http.MethodPost, Path: "/api/v1/pub/auth/login"},
+		{Method: http.MethodGet, Path: "/api/v1/masterKey/status"},
+		{Method: http.MethodPost, Path: "/api/v1/masterKey/share"},
 	}
 	return append(routes, extra...)
 }

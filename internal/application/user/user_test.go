@@ -15,12 +15,13 @@ import (
 )
 
 type stubUserRepo struct {
-	updateByUserID      func(ctx context.Context, user *userdomain.User) error
-	getByUserID         func(ctx context.Context, userID string) (*userdomain.User, error)
-	getByTenantUsername func(ctx context.Context, tenantID uuid.UUID, username string) (*userdomain.User, error)
-	list                func(ctx context.Context, filter userdomain.ListFilter) ([]*userdomain.User, error)
-	listAll             func(ctx context.Context) ([]*userdomain.User, error)
-	allocate            func(ctx context.Context, change userdomain.AllocationChange) ([]*userdomain.User, []string, error)
+	updateByUserID     func(ctx context.Context, user *userdomain.User) error
+	getByUserID        func(ctx context.Context, userID string) (*userdomain.User, error)
+	getByUsername      func(ctx context.Context, username string) (*userdomain.User, error)
+	updatePasswordHash func(ctx context.Context, username, passwordHash, operator string) error
+	list               func(ctx context.Context, filter userdomain.ListFilter) ([]*userdomain.User, error)
+	listAll            func(ctx context.Context) ([]*userdomain.User, error)
+	allocate           func(ctx context.Context, change userdomain.AllocationChange) ([]*userdomain.User, []string, error)
 }
 
 func (s *stubUserRepo) UpdateByUserID(ctx context.Context, user *userdomain.User) error {
@@ -37,11 +38,18 @@ func (s *stubUserRepo) GetByUserID(ctx context.Context, userID string) (*userdom
 	return nil, nil
 }
 
-func (s *stubUserRepo) GetByTenantUsername(ctx context.Context, tenantID uuid.UUID, username string) (*userdomain.User, error) {
-	if s.getByTenantUsername != nil {
-		return s.getByTenantUsername(ctx, tenantID, username)
+func (s *stubUserRepo) GetByUsername(ctx context.Context, username string) (*userdomain.User, error) {
+	if s.getByUsername != nil {
+		return s.getByUsername(ctx, username)
 	}
 	return nil, nil
+}
+
+func (s *stubUserRepo) UpdatePasswordHashByUsername(ctx context.Context, username, passwordHash, operator string) error {
+	if s.updatePasswordHash != nil {
+		return s.updatePasswordHash(ctx, username, passwordHash, operator)
+	}
+	return nil
 }
 
 func (s *stubUserRepo) List(ctx context.Context, filter userdomain.ListFilter) ([]*userdomain.User, error) {
@@ -371,9 +379,9 @@ func TestService_Update_UsesExternalUserIDAndRefreshesCaches(t *testing.T) {
 			}
 			return current, nil
 		},
-		getByTenantUsername: func(ctx context.Context, gotTenantID uuid.UUID, username string) (*userdomain.User, error) {
-			if gotTenantID != tenantID || username != "new-login" {
-				t.Fatalf("unexpected username lookup: %s %s", gotTenantID, username)
+		getByUsername: func(ctx context.Context, username string) (*userdomain.User, error) {
+			if username != "new-login" {
+				t.Fatalf("unexpected username lookup: %s", username)
 			}
 			return nil, nil
 		},
@@ -420,7 +428,7 @@ func TestService_Update_RejectsUsernameOwnedByAnotherUser(t *testing.T) {
 		getByUserID: func(ctx context.Context, userID string) (*userdomain.User, error) {
 			return current, nil
 		},
-		getByTenantUsername: func(ctx context.Context, tenantID uuid.UUID, username string) (*userdomain.User, error) {
+		getByUsername: func(ctx context.Context, username string) (*userdomain.User, error) {
 			return testDomainUser("external-2"), nil
 		},
 		updateByUserID: func(ctx context.Context, user *userdomain.User) error {

@@ -15,6 +15,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hashicorp/vault/shamir"
+
+	"env-vault/pkg/crypto"
 )
 
 const (
@@ -159,6 +161,57 @@ func (m *Manager) RestoreShares(tokens []string) error {
 
 	// 复用 Manager 的并发和单次激活保护，来源记录为分片恢复
 	return m.Activate(base64.StdEncoding.EncodeToString(key), SourceShares)
+}
+
+// SubmitShare 校验并累计一份分片，达到阈值时立即恢复并激活主密钥
+func (m *Manager) SubmitShare(token string) error {
+	share, err := decodeShareToken(token)
+	if err != nil {
+		return err
+	}
+	defer clear(share.data)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cipher != nil {
+		return ErrAlreadyActivated
+	}
+
+	keySetID := share.keySetID.String()
+	if m.shareSetID == "" {
+		m.shareSetID = keySetID
+		m.pendingShares = make(map[byte][]byte, RequiredShares)
+	} else if m.shareSetID != keySetID {
+		return ErrShareSetMismatch
+	}
+	if _, exists := m.pendingShares[share.index]; exists {
+		return ErrDuplicateShare
+	}
+	m.pendingShares[share.index] = bytes.Clone(share.data)
+	if len(m.pendingShares) < RequiredShares {
+		return nil
+	}
+
+	parts := make([][]byte, 0, RequiredShares)
+	for _, part := range m.pendingShares {
+		parts = append(parts, part)
+	}
+	key, err := shamir.Combine(parts)
+	if err != nil {
+		return fmt.Errorf("combine master key shares: %w", ErrInvalidShare)
+	}
+	defer clear(key)
+	if len(key) != masterKeySize {
+		return fmt.Errorf("%w: recovered key must be %d bytes", ErrInvalidShare, masterKeySize)
+	}
+	cipher, err := crypto.New(base64.StdEncoding.EncodeToString(key))
+	if err != nil {
+		return fmt.Errorf("activate master key: %w", err)
+	}
+	m.cipher = cipher
+	m.source = SourceShares
+	m.clearPendingSharesLocked()
+	return nil
 }
 
 // encodeShareToken 将系统生成的原始分片编码为可传输的版本化 Token

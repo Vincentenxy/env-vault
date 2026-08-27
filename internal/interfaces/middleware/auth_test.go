@@ -32,7 +32,9 @@ func (s *stubBlockChecker) IsBlocked(_ context.Context, userID string) (bool, er
 func TestAuth_BlockedUserReturnsForbidden(t *testing.T) {
 	privateKey, publicKey := testRSAKeyPair(t)
 	checker := &stubBlockChecker{blocked: true}
-	auth, err := Auth(publicKey, checker)
+	auth, err := Auth([]JWTProvider{{
+		Issuer: "env-vault-test", Audience: "env-vault-web", KeyID: "test-key", PublicKey: publicKey,
+	}}, checker)
 	if err != nil {
 		t.Fatalf("Auth() error = %v", err)
 	}
@@ -81,8 +83,11 @@ func testJWT(t *testing.T, key *rsa.PrivateKey, userID string) string {
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
 		"staffuserid": userID,
 		"name":        "Tester",
+		"iss":         "env-vault-test",
+		"aud":         "env-vault-web",
 		"exp":         time.Now().Add(time.Hour).Unix(),
 	})
+	token.Header["kid"] = "test-key"
 	signed, err := token.SignedString(key)
 	if err != nil {
 		t.Fatalf("sign JWT: %v", err)

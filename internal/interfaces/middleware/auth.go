@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -23,6 +24,21 @@ type UserBlockChecker interface {
 	IsBlocked(ctx context.Context, userID string) (bool, error)
 }
 
+// JWTProvider 表示一个受信任 JWT 签发方及其验签公钥
+type JWTProvider struct {
+	Issuer    string
+	Audience  string
+	KeyID     string
+	PublicKey string
+}
+
+type parsedJWTProvider struct {
+	issuer    string
+	audience  string
+	keyID     string
+	publicKey *rsa.PublicKey
+}
+
 // Auth JWT 认证中间件。
 //
 // 规则：
@@ -31,11 +47,26 @@ type UserBlockChecker interface {
 //   - 解析成功后将用户信息（userId/name/jwt/cookie）写入 gin.Context
 //   - JWT 认证失败返回 HTTP 401，锁定用户返回 HTTP 403，锁定状态查询异常返回 HTTP 500
 //
-// publicKeyB64 支持两种格式：base64 编码的 DER 公钥，或 PEM 文本。
-func Auth(publicKeyB64 string, blockCheckers ...UserBlockChecker) (gin.HandlerFunc, error) {
-	publicKey, err := parsePublicKey(publicKeyB64)
-	if err != nil {
-		return nil, fmt.Errorf("auth middleware init: %w", err)
+// 每个 Provider 的 PublicKey 支持 base64 DER 或 PEM 格式。
+func Auth(providers []JWTProvider, blockCheckers ...UserBlockChecker) (gin.HandlerFunc, error) {
+	parsedProviders := make([]parsedJWTProvider, 0, len(providers))
+	for i, provider := range providers {
+		issuer := strings.TrimSpace(provider.Issuer)
+		audience := strings.TrimSpace(provider.Audience)
+		keyID := strings.TrimSpace(provider.KeyID)
+		if issuer == "" || audience == "" {
+			return nil, fmt.Errorf("auth middleware init: provider %d issuer or audience is empty", i+1)
+		}
+		publicKey, err := parsePublicKey(provider.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("auth middleware init: provider %d: %w", i+1, err)
+		}
+		parsedProviders = append(parsedProviders, parsedJWTProvider{
+			issuer: issuer, audience: audience, keyID: keyID, publicKey: publicKey,
+		})
+	}
+	if len(parsedProviders) == 0 {
+		return nil, errors.New("auth middleware init: no JWT provider configured")
 	}
 
 	var blockChecker UserBlockChecker
@@ -51,15 +82,8 @@ func Auth(publicKeyB64 string, blockCheckers ...UserBlockChecker) (gin.HandlerFu
 			return
 		}
 
-		claims := jwt.MapClaims{}
-		token, err := jwt.ParseWithClaims(tokenString, &claims, func(t *jwt.Token) (any, error) {
-			// 限定 RSA 算法，防止算法降级攻击
-			if _, ok := t.Method.(*jwt.SigningMethodRSA); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
-			}
-			return publicKey, nil
-		})
-		if err != nil || !token.Valid {
+		claims, err := verifyJWT(tokenString, parsedProviders)
+		if err != nil {
 			logger.Warn(c, "auth failed: invalid token", zap.Error(err))
 			response.AbortWithHTTPStatus(c, 401)
 			return
@@ -70,6 +94,14 @@ func Auth(publicKeyB64 string, blockCheckers ...UserBlockChecker) (gin.HandlerFu
 			UserID: getClaimString(claims, "staffuserid"),
 			Name:   getClaimString(claims, "name"),
 			Jwt:    tokenString,
+		}
+		if user.UserID == "" {
+			user.UserID = getClaimString(claims, "sub")
+		}
+		if user.UserID == "" {
+			logger.Warn(c, "auth failed: user ID claim is empty")
+			response.AbortWithHTTPStatus(c, 401)
+			return
 		}
 		if blockChecker != nil && user.UserID != "" {
 			blocked, err := blockChecker.IsBlocked(c, user.UserID)
@@ -89,6 +121,41 @@ func Auth(publicKeyB64 string, blockCheckers ...UserBlockChecker) (gin.HandlerFu
 	}, nil
 }
 
+func verifyJWT(tokenString string, providers []parsedJWTProvider) (jwt.MapClaims, error) {
+	var lastErr error
+	for _, provider := range providers {
+		claims := jwt.MapClaims{}
+		options := []jwt.ParserOption{
+			jwt.WithValidMethods([]string{jwt.SigningMethodRS256.Alg()}),
+			jwt.WithIssuer(provider.issuer),
+			jwt.WithAudience(provider.audience),
+			jwt.WithExpirationRequired(),
+			jwt.WithLeeway(30 * time.Second),
+		}
+		token, err := jwt.ParseWithClaims(tokenString, &claims, func(token *jwt.Token) (any, error) {
+			if provider.keyID != "" && getHeaderString(token, "kid") != provider.keyID {
+				return nil, errors.New("JWT key ID does not match provider")
+			}
+			return provider.publicKey, nil
+		}, options...)
+		if err == nil && token.Valid {
+			return claims, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = errors.New("JWT did not match a trusted provider")
+	}
+	return nil, lastErr
+}
+
+func getHeaderString(token *jwt.Token, key string) string {
+	if value, ok := token.Header[key].(string); ok {
+		return value
+	}
+	return ""
+}
+
 // extractBearerToken 从 Authorization 头提取 Bearer token
 func extractBearerToken(header string) (string, error) {
 	if header == "" {
@@ -105,7 +172,7 @@ func extractBearerToken(header string) (string, error) {
 func parsePublicKey(key string) (*rsa.PublicKey, error) {
 	key = strings.TrimSpace(key)
 	if key == "" {
-		return nil, errors.New("auth.jwt_public_key is empty")
+		return nil, errors.New("JWT public key is empty")
 	}
 
 	// PEM 格式（包含 BEGIN 标记）

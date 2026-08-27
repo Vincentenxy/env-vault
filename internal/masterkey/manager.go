@@ -40,15 +40,18 @@ type Cryptor interface {
 
 // Status 表示当前主密钥状态
 type Status struct {
-	Ready  bool   // 是否已经加载可用的主密钥
-	Source Source // 当前主密钥的加载来源
+	Ready           bool   // 是否已经加载可用的主密钥
+	Source          Source // 当前主密钥的加载来源
+	SubmittedShares int    // 当前实例已经累计的合法分片数量
 }
 
 // Manager 管理主密钥的单次激活和动态加解密
 type Manager struct {
-	mu     sync.RWMutex // 保护 cipher 和 source 的并发读写
-	cipher Cryptor      // 激活后创建的 AES-256-GCM 加解密器
-	source Source       // 成功激活当前加解密器的密钥来源
+	mu            sync.RWMutex    // 保护激活状态和待恢复分片的并发读写
+	cipher        Cryptor         // 激活后创建的 AES-256-GCM 加解密器
+	source        Source          // 成功激活当前加解密器的密钥来源
+	shareSetID    string          // 第一份合法分片确定的恢复批次
+	pendingShares map[byte][]byte // 激活前暂存在当前进程内存中的不同分片
 }
 
 // 编译期确认 Manager 实现 Secret 服务需要的加解密接口
@@ -95,6 +98,7 @@ func (m *Manager) Activate(keyBase64 string, source Source) error {
 	// cipher 和来源在同一个写锁内提交，对外只会看到完整状态
 	m.cipher = cipher
 	m.source = source
+	m.clearPendingSharesLocked()
 	return nil
 }
 
@@ -110,9 +114,19 @@ func (m *Manager) Status() Status {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return Status{
-		Ready:  m.cipher != nil,
-		Source: m.source,
+		Ready:           m.cipher != nil,
+		Source:          m.source,
+		SubmittedShares: len(m.pendingShares),
 	}
+}
+
+func (m *Manager) clearPendingSharesLocked() {
+	for index, share := range m.pendingShares {
+		clear(share)
+		delete(m.pendingShares, index)
+	}
+	m.pendingShares = nil
+	m.shareSetID = ""
 }
 
 // Encrypt 使用已经激活的主密钥加密明文

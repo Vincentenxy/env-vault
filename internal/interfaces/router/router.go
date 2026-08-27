@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -9,6 +10,7 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
+	authapp "env-vault/internal/application/auth"
 	envapp "env-vault/internal/application/environment"
 	folderapp "env-vault/internal/application/folder"
 	orgapp "env-vault/internal/application/organization"
@@ -16,6 +18,7 @@ import (
 	secretapp "env-vault/internal/application/secret"
 	tenantapp "env-vault/internal/application/tenant"
 	userapp "env-vault/internal/application/user"
+	infraauth "env-vault/internal/infrastructure/auth"
 	usercache "env-vault/internal/infrastructure/cache/user"
 	"env-vault/internal/infrastructure/config"
 	envrepo "env-vault/internal/infrastructure/persistence/environment"
@@ -59,6 +62,59 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 		userapp.WithAllocationRepositories(tenantRepo, orgRepo, projRepo),
 	)
 
+	passwordHasher, err := infraauth.NewPasswordHasher()
+	if err != nil {
+		return nil, fmt.Errorf("initialize local password hasher: %w", err)
+	}
+	jwtProviders := make([]middleware.JWTProvider, 0, 2)
+	var localAuthSvc authapp.IService
+	if cfg.Auth.Local.Enabled {
+		privateMaterial, err := infraauth.LoadKeyMaterial(cfg.Auth.Local.PrivateKey, cfg.Auth.Local.PrivateKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load local JWT private key: %w", err)
+		}
+		privateKey, err := infraauth.ParseRSAPrivateKey(privateMaterial)
+		if err != nil {
+			return nil, fmt.Errorf("parse local JWT private key: %w", err)
+		}
+		publicMaterial, err := infraauth.LoadKeyMaterial(cfg.Auth.Local.PublicKey, cfg.Auth.Local.PublicKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load local JWT public key: %w", err)
+		}
+		publicKey, err := infraauth.ParseRSAPublicKey(publicMaterial)
+		if err != nil {
+			return nil, fmt.Errorf("parse local JWT public key: %w", err)
+		}
+		if !privateKey.PublicKey.Equal(publicKey) {
+			return nil, fmt.Errorf("local JWT private and public keys do not match")
+		}
+		issuer, err := infraauth.NewJWTIssuer(
+			privateKey,
+			cfg.Auth.Local.Issuer,
+			cfg.Auth.Local.Audience,
+			cfg.Auth.Local.KeyID,
+			cfg.Auth.Local.AccessTokenTTL,
+		)
+		if err != nil {
+			return nil, err
+		}
+		localAuthSvc = authapp.NewService(userRepo, passwordHasher, issuer)
+		jwtProviders = append(jwtProviders, middleware.JWTProvider{
+			Issuer: cfg.Auth.Local.Issuer, Audience: cfg.Auth.Local.Audience,
+			KeyID: cfg.Auth.Local.KeyID, PublicKey: string(publicMaterial),
+		})
+	}
+	if cfg.Auth.Company.Enabled {
+		publicMaterial, err := infraauth.LoadKeyMaterial(cfg.Auth.Company.PublicKey, cfg.Auth.Company.PublicKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load company JWT public key: %w", err)
+		}
+		jwtProviders = append(jwtProviders, middleware.JWTProvider{
+			Issuer: cfg.Auth.Company.Issuer, Audience: cfg.Auth.Company.Audience,
+			KeyID: cfg.Auth.Company.KeyID, PublicKey: string(publicMaterial),
+		})
+	}
+
 	tenantSvc := tenantapp.NewService(tenantRepo, orgRepo, userSvc)
 	orgSvc := orgapp.NewService(orgRepo, userSvc)
 	projSvc := projapp.NewService(
@@ -87,6 +143,10 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 	secretSvc := secretapp.NewService(secretRepo, folderRepo, envRepo, masterKeyManager, userSvc)
 
 	healthHandler := handler.NewHealthHandler()
+	var authHandler *handler.AuthHandler
+	if localAuthSvc != nil {
+		authHandler = handler.NewAuthHandler(localAuthSvc)
+	}
 	userHandler := handler.NewUserHandler(userSvc)
 	tenantHandler := handler.NewTenantHandler(tenantSvc)
 	orgHandler := handler.NewOrganizationHandler(orgSvc)
@@ -96,7 +156,7 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 	secretHandler := handler.NewSecretHandler(secretSvc)
 
 	// 初始化 JWT 认证中间件（加载配置中的公钥）
-	authMiddleware, err := middleware.Auth(cfg.Auth.JwtPublicKey, userSvc)
+	authMiddleware, err := middleware.Auth(jwtProviders, userSvc)
 	if err != nil {
 		return nil, err
 	}
@@ -106,21 +166,23 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 		// 无认证接口分组
 		pub := v1.Group("/pub")
 		pub.GET("/health", healthHandler.Ping)
-		masterkey.RegisterRoutes(pub, masterKeyManager)
+		if authHandler != nil {
+			pub.POST("/auth/login", authHandler.Login)
+		}
 
 		// 需认证接口分组
 		auth := v1.Group("", authMiddleware)
-		//authGroup := auth.Group("/auth")
-		//{
-		//
-		//}
+		masterkey.RegisterRoutes(auth, masterKeyManager)
+		authGroup := auth.Group("/auth")
+		{
+			authGroup.GET("/me", userHandler.Me)
+		}
 
 		userGroup := auth.Group("/user")
 		{
 			userGroup.POST("/update", userHandler.Update)
 			userGroup.POST("/list", userHandler.List)
 			userGroup.POST("/allocate", userHandler.Allocate)
-			userGroup.GET("/me", userHandler.Me)
 		}
 
 		// 租户管理（带参数统一 POST）

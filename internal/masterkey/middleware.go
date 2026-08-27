@@ -18,8 +18,9 @@ var (
 
 // requiredReadyRoutes 防止配置遗漏导致系统无法查询状态或提交分片
 var requiredReadyRoutes = []allowedRouteKey{
-	{method: http.MethodGet, path: "/api/v1/pub/masterKey/status"},
-	{method: http.MethodPost, path: "/api/v1/pub/masterKey/shares"},
+	{method: http.MethodPost, path: "/api/v1/pub/auth/login"},
+	{method: http.MethodGet, path: "/api/v1/masterKey/status"},
+	{method: http.MethodPost, path: "/api/v1/masterKey/share"},
 }
 
 // AllowedRoute 表示主密钥未就绪时允许访问的单个接口

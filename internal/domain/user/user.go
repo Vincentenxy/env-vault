@@ -72,8 +72,10 @@ type Repository interface {
 	UpdateByUserID(ctx context.Context, user *User) error
 	// GetByUserID 按外部用户 ID 查询未删除用户，不存在返回 nil, nil。
 	GetByUserID(ctx context.Context, userID string) (*User, error)
-	// GetByTenantUsername 按租户和登录名查询未删除用户，不存在返回 nil, nil。
-	GetByTenantUsername(ctx context.Context, tenantID uuid.UUID, username string) (*User, error)
+	// GetByUsername 忽略大小写按全局登录名查询未删除用户，不存在返回 nil, nil。
+	GetByUsername(ctx context.Context, username string) (*User, error)
+	// UpdatePasswordHashByUsername 按全局登录名更新本地认证密码哈希。
+	UpdatePasswordHashByUsername(ctx context.Context, username, passwordHash, operator string) error
 	// List 查询未删除用户，只返回列表展示所需的 id/userId/nickname 字段。
 	List(ctx context.Context, filter ListFilter) ([]*User, error)
 	// ListAll 查询全部未删除用户，用于启动时预热缓存。

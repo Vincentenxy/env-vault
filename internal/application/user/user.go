@@ -22,7 +22,7 @@ import (
 var (
 	ErrInvalidParam    = errors.New("invalid param")
 	ErrNotFound        = errors.New("user not found")
-	ErrUsernameExists  = errors.New("username already exists under tenant")
+	ErrUsernameExists  = errors.New("username already exists")
 	ErrTenantNotFound  = errors.New("tenant not found")
 	ErrOrgNotFound     = errors.New("organization not found")
 	ErrProjectNotFound = errors.New("project not found")
@@ -326,7 +326,7 @@ func (s *Service) Update(ctx context.Context, in UpdateInput) (*userdomain.User,
 		return nil, ErrNotFound
 	}
 
-	usernameOwner, err := s.repo.GetByTenantUsername(ctx, in.TenantID, in.Username)
+	usernameOwner, err := s.repo.GetByUsername(ctx, in.Username)
 	if err != nil {
 		return nil, err
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -104,6 +105,47 @@ func TestManagerRestoreSharesRejectsActivatedManager(t *testing.T) {
 	}
 	if source := manager.Status().Source; source != SourceConfig {
 		t.Fatalf("source = %q, want %q", source, SourceConfig)
+	}
+}
+
+func TestManagerSubmitShareAccumulatesAndClearsAfterActivation(t *testing.T) {
+	manager := NewManager()
+	tokens := createShareTokens(t, []byte("12345678901234567890123456789012"), uuid.New())
+	for index, token := range tokens[:RequiredShares] {
+		if err := manager.SubmitShare(token); err != nil {
+			t.Fatalf("SubmitShare %d: %v", index+1, err)
+		}
+		status := manager.Status()
+		if index < RequiredShares-1 && (status.Ready || status.SubmittedShares != index+1) {
+			t.Fatalf("unexpected pending status after %d: %+v", index+1, status)
+		}
+	}
+	status := manager.Status()
+	if !status.Ready || status.Source != SourceShares || status.SubmittedShares != 0 {
+		t.Fatalf("unexpected activated status: %+v", status)
+	}
+}
+
+func TestManagerSubmitShareIsConcurrencySafe(t *testing.T) {
+	manager := NewManager()
+	tokens := createShareTokens(t, []byte("12345678901234567890123456789012"), uuid.New())
+	var wait sync.WaitGroup
+	errorsByIndex := make([]error, RequiredShares)
+	for index := 0; index < RequiredShares; index++ {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			errorsByIndex[index] = manager.SubmitShare(tokens[index])
+		}(index)
+	}
+	wait.Wait()
+	for index, err := range errorsByIndex {
+		if err != nil {
+			t.Fatalf("SubmitShare %d: %v", index+1, err)
+		}
+	}
+	if !manager.Ready() {
+		t.Fatal("manager must be ready after concurrent distinct shares")
 	}
 }
 

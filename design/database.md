@@ -153,8 +153,10 @@ CREATE INDEX IF NOT EXISTS idx_user_info_user_id ON user_info (user_id);
 CREATE INDEX IF NOT EXISTS idx_user_info_tenant ON user_info (tenant_id);
 -- 按组织查询用户
 CREATE INDEX IF NOT EXISTS idx_user_info_org ON user_info (org_id);
--- 租户内按登录名定位用户（唯一性在代码层面保证）
-CREATE INDEX IF NOT EXISTS idx_user_info_tenant_username ON user_info (tenant_id, username);
+-- 本地登录名在全部有效用户中忽略大小写后唯一；空登录名不启用本地认证
+CREATE UNIQUE INDEX IF NOT EXISTS uk_user_info_username_active
+    ON user_info (lower(username))
+    WHERE is_deleted = false AND username <> '';
 ```
 
 **索引说明**：
@@ -164,14 +166,15 @@ CREATE INDEX IF NOT EXISTS idx_user_info_tenant_username ON user_info (tenant_id
 | `idx_user_info_user_id` | `user_id` | 根据外部用户 ID 定位用户 |
 | `idx_user_info_tenant` | `tenant_id` | 查询租户下全部用户 |
 | `idx_user_info_org` | `org_id` | 查询组织下全部用户 |
-| `idx_user_info_tenant_username` | `tenant_id, username` | 租户内按登录名定位用户 |
+| `uk_user_info_username_active` | `lower(username)` | 本地登录按用户名定位用户，并保证有效非空用户名全局唯一 |
 
 **业务规则**（代码层校验）：
 
 - `user_id` 在未删除用户中全局唯一。
-- `username` 在同一租户的未删除用户中唯一。
+- `username` 在全部未删除且启用本地认证的用户中忽略大小写后全局唯一，登录时不要求用户选择租户。
 - 用户更新接口只更新已存在的用户，不承担创建职责；用户创建由后续登录相关接口实现。
-- `password_hash` 仅允许保存不可逆密码哈希，禁止保存明文密码。
+- `password_hash` 仅允许保存带独立随机 Salt 和参数的 Argon2id PHC 格式不可逆密码哈希，禁止保存明文、可逆密文或使用 Secret 主密钥加密密码。
+- `password_hash = ''` 表示该用户未启用本地密码登录，公司统一认证不依赖该字段。
 - `is_blocked = true` 的用户通过 JWT 验签后由认证中间件返回 HTTP 403，不进入业务处理器。
 
 **缓存规则**：

@@ -33,7 +33,31 @@ type AppConfig struct {
 
 // AuthConfig 认证配置
 type AuthConfig struct {
-	JwtPublicKey string `mapstructure:"jwt_public_key"` // JWT 验签公钥（base64 DER 或 PEM 格式，RSA）
+	Local   LocalAuthConfig   `mapstructure:"local"`   // EnvVault 本地用户名密码认证
+	Company CompanyAuthConfig `mapstructure:"company"` // 公司统一认证 JWT 验签配置
+}
+
+// LocalAuthConfig EnvVault 本地 JWT 签发和验签配置
+type LocalAuthConfig struct {
+	Enabled        bool          `mapstructure:"enabled"`
+	Issuer         string        `mapstructure:"issuer"`
+	Audience       string        `mapstructure:"audience"`
+	KeyID          string        `mapstructure:"key_id"`
+	PrivateKey     string        `mapstructure:"private_key"`
+	PrivateKeyFile string        `mapstructure:"private_key_file"`
+	PublicKey      string        `mapstructure:"public_key"`
+	PublicKeyFile  string        `mapstructure:"public_key_file"`
+	AccessTokenTTL time.Duration `mapstructure:"access_token_ttl"`
+}
+
+// CompanyAuthConfig 公司认证系统签发 JWT 的验签配置
+type CompanyAuthConfig struct {
+	Enabled       bool   `mapstructure:"enabled"`
+	Issuer        string `mapstructure:"issuer"`
+	Audience      string `mapstructure:"audience"`
+	KeyID         string `mapstructure:"key_id"`
+	PublicKey     string `mapstructure:"public_key"`
+	PublicKeyFile string `mapstructure:"public_key_file"`
 }
 
 // SecurityConfig 安全相关配置

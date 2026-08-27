@@ -40,7 +40,7 @@ func TestHTTPHandlerGetStatus(t *testing.T) {
 				}
 			}
 
-			body := performMasterKeyRequest(t, manager, http.MethodGet, "/api/v1/pub/masterKey/status", nil)
+			body := performMasterKeyRequest(t, manager, http.MethodGet, "/api/v1/masterKey/status", nil)
 			if body.Code != 0 {
 				t.Fatalf("code = %d, want 0", body.Code)
 			}
@@ -61,13 +61,21 @@ func TestHTTPHandlerGetStatus(t *testing.T) {
 	}
 }
 
-func TestHTTPHandlerSubmitShares(t *testing.T) {
-	// 使用乱序的三个有效 Token 验证接口可以完成系统激活
+func TestHTTPHandlerSubmitShare(t *testing.T) {
+	// 使用乱序的三个有效 Token 验证接口逐份累计并完成系统激活
 	manager := NewManager()
 	tokens := createShareTokens(t, []byte("12345678901234567890123456789012"), uuid.New())
-	body := performMasterKeyRequest(t, manager, http.MethodPost, "/api/v1/pub/masterKey/shares", SubmitSharesRequest{
-		Shares: []string{tokens[4], tokens[0], tokens[2]},
-	})
+	for index, token := range []string{tokens[4], tokens[0]} {
+		body := performMasterKeyRequest(t, manager, http.MethodPost, "/api/v1/masterKey/share", SubmitShareRequest{Share: token})
+		var status StatusResponse
+		if body.Code != 0 || json.Unmarshal(body.Data, &status) != nil {
+			t.Fatalf("submit %d failed: %+v", index+1, body)
+		}
+		if status.Ready || status.SubmittedShares != index+1 || !status.CanSubmit {
+			t.Fatalf("unexpected pending status: %+v", status)
+		}
+	}
+	body := performMasterKeyRequest(t, manager, http.MethodPost, "/api/v1/masterKey/share", SubmitShareRequest{Share: tokens[2]})
 
 	if body.Code != 0 {
 		t.Fatalf("code = %d, msg = %q", body.Code, body.Msg)
@@ -76,30 +84,43 @@ func TestHTTPHandlerSubmitShares(t *testing.T) {
 	if err := json.Unmarshal(body.Data, &status); err != nil {
 		t.Fatalf("decode status: %v", err)
 	}
-	if !status.Ready || status.Source != SourceShares || !manager.Ready() {
+	if !status.Ready || status.Source != SourceShares || status.SubmittedShares != 0 || status.CanSubmit || !manager.Ready() {
 		t.Fatalf("unexpected restored status: %+v", status)
 	}
 }
 
-func TestHTTPHandlerSubmitSharesErrors(t *testing.T) {
+func TestHTTPHandlerSubmitShareErrors(t *testing.T) {
 	key := []byte("12345678901234567890123456789012")
 	firstSet := createShareTokens(t, key, uuid.New())
 	secondSet := createShareTokens(t, key, uuid.New())
 
 	tests := []struct {
 		name    string
-		body    any
+		body    SubmitShareRequest
 		prepare func(*Manager)
 		wantMsg string
 	}{
-		{name: "wrong count", body: SubmitSharesRequest{Shares: firstSet[:2]}, wantMsg: "必须提交三份密钥分片"},
-		{name: "empty share", body: SubmitSharesRequest{Shares: []string{firstSet[0], " ", firstSet[2]}}, wantMsg: "密钥分片不能为空"},
-		{name: "invalid share", body: SubmitSharesRequest{Shares: []string{"invalid", firstSet[1], firstSet[2]}}, wantMsg: "密钥分片无效"},
-		{name: "different sets", body: SubmitSharesRequest{Shares: []string{firstSet[0], firstSet[1], secondSet[2]}}, wantMsg: "密钥分片不属于同一批次"},
-		{name: "duplicate share", body: SubmitSharesRequest{Shares: []string{firstSet[0], firstSet[0], firstSet[1]}}, wantMsg: "密钥分片重复"},
+		{name: "empty share", body: SubmitShareRequest{Share: " "}, wantMsg: "密钥分片不能为空"},
+		{name: "invalid share", body: SubmitShareRequest{Share: "invalid"}, wantMsg: "密钥分片无效"},
+		{
+			name: "different sets", body: SubmitShareRequest{Share: secondSet[1]}, wantMsg: "密钥分片不属于同一批次",
+			prepare: func(manager *Manager) {
+				if err := manager.SubmitShare(firstSet[0]); err != nil {
+					t.Fatalf("prepare first share: %v", err)
+				}
+			},
+		},
+		{
+			name: "duplicate share", body: SubmitShareRequest{Share: firstSet[0]}, wantMsg: "密钥分片重复",
+			prepare: func(manager *Manager) {
+				if err := manager.SubmitShare(firstSet[0]); err != nil {
+					t.Fatalf("prepare first share: %v", err)
+				}
+			},
+		},
 		{
 			name: "already activated",
-			body: SubmitSharesRequest{Shares: firstSet[:RequiredShares]},
+			body: SubmitShareRequest{Share: firstSet[0]},
 			prepare: func(manager *Manager) {
 				if err := manager.LoadConfigFallback(true, testKeyBase64); err != nil {
 					t.Fatalf("LoadConfigFallback: %v", err)
@@ -115,7 +136,7 @@ func TestHTTPHandlerSubmitSharesErrors(t *testing.T) {
 			if tt.prepare != nil {
 				tt.prepare(manager)
 			}
-			body := performMasterKeyRequest(t, manager, http.MethodPost, "/api/v1/pub/masterKey/shares", tt.body)
+			body := performMasterKeyRequest(t, manager, http.MethodPost, "/api/v1/masterKey/share", tt.body)
 			if body.Code != -1 || body.Msg != tt.wantMsg {
 				t.Fatalf("unexpected response: code=%d msg=%q", body.Code, body.Msg)
 			}
@@ -123,20 +144,19 @@ func TestHTTPHandlerSubmitSharesErrors(t *testing.T) {
 	}
 }
 
-func TestHTTPHandlerSubmitSharesRejectsInvalidJSON(t *testing.T) {
+func TestHTTPHandlerSubmitShareRejectsInvalidJSON(t *testing.T) {
 	// JSON 解析失败时沿用项目统一的参数错误响应
 	manager := NewManager()
-	body := performMasterKeyRawRequest(t, manager, http.MethodPost, "/api/v1/pub/masterKey/shares", strings.NewReader("{invalid"))
+	body := performMasterKeyRawRequest(t, manager, http.MethodPost, "/api/v1/masterKey/share", strings.NewReader("{invalid"))
 	if body.Code != -1 || !strings.HasPrefix(body.Msg, "invalid params:") {
 		t.Fatalf("unexpected response: code=%d msg=%q", body.Code, body.Msg)
 	}
 }
 
-func TestHTTPHandlerSubmitSharesRejectsOversizedBody(t *testing.T) {
-	// 未认证接口必须在 JSON 解析阶段拒绝超过上限的请求体
+func TestHTTPHandlerSubmitShareRejectsOversizedBody(t *testing.T) {
 	manager := NewManager()
-	payload := `{"shares":["` + strings.Repeat("A", maxShareRequestBodySize) + `"]}`
-	body := performMasterKeyRawRequest(t, manager, http.MethodPost, "/api/v1/pub/masterKey/shares", strings.NewReader(payload))
+	payload := `{"share":"` + strings.Repeat("A", maxShareRequestBodySize) + `"}`
+	body := performMasterKeyRawRequest(t, manager, http.MethodPost, "/api/v1/masterKey/share", strings.NewReader(payload))
 	if body.Code != -1 || !strings.Contains(body.Msg, "request body too large") {
 		t.Fatalf("unexpected response: code=%d msg=%q", body.Code, body.Msg)
 	}
@@ -163,8 +183,8 @@ func performMasterKeyRawRequest(t *testing.T, manager *Manager, method, path str
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	pub := engine.Group("/api/v1/pub")
-	RegisterRoutes(pub, manager)
+	v1 := engine.Group("/api/v1")
+	RegisterRoutes(v1, manager)
 
 	request := httptest.NewRequest(method, path, body)
 	request.Header.Set("Content-Type", "application/json")

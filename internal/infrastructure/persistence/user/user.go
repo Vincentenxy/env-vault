@@ -89,11 +89,11 @@ func (r *Repository) GetByUserID(ctx context.Context, userID string) (*userdomai
 	return toDomain(&po), nil
 }
 
-// GetByTenantUsername 按租户和登录名查询用户。
-func (r *Repository) GetByTenantUsername(ctx context.Context, tenantID uuid.UUID, username string) (*userdomain.User, error) {
+// GetByUsername 忽略大小写按全局登录名查询用户。
+func (r *Repository) GetByUsername(ctx context.Context, username string) (*userdomain.User, error) {
 	var po userPO
 	err := r.db.WithContext(ctx).
-		Where("tenant_id = ? AND username = ? AND is_deleted = false", tenantID, username).
+		Where("lower(username) = lower(?) AND username <> '' AND is_deleted = false", username).
 		First(&po).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
@@ -102,6 +102,25 @@ func (r *Repository) GetByTenantUsername(ctx context.Context, tenantID uuid.UUID
 		return nil, err
 	}
 	return toDomain(&po), nil
+}
+
+// UpdatePasswordHashByUsername 按全局登录名更新本地认证密码哈希。
+func (r *Repository) UpdatePasswordHashByUsername(ctx context.Context, username, passwordHash, operator string) error {
+	result := r.db.WithContext(ctx).
+		Model(&userPO{}).
+		Where("lower(username) = lower(?) AND username <> '' AND is_deleted = false", username).
+		Updates(map[string]any{
+			"password_hash": passwordHash,
+			"update_by":     operator,
+			"update_at":     time.Now(),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 // List 查询未删除用户，只投影接口需要的非敏感字段。

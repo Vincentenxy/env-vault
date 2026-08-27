@@ -21,6 +21,7 @@
 env-vault/
 ├── cmd/
 │   ├── main.go                          # 服务入口（加载配置 → 初始化日志 → 启动 HTTP → 优雅退出）
+│   ├── auth/                            # 本地 JWT 密钥和密码哈希离线工具
 │   └── masterkey/                       # 主密钥分片离线生成工具
 ├── configs/config.yaml                  # 配置文件（Viper 解析，支持环境变量覆盖）
 ├── design/database.md                   # 数据库表设计文档（SQL 代码块格式）
@@ -54,6 +55,57 @@ docker build -t env-vault:latest .
 ```
 
 健康检查：`GET /api/v1/pub/health`
+
+## 本地认证初始化
+
+EnvVault 本地认证使用独立 RSA 密钥签发 RS256 JWT，用户密码使用 Argon2id 哈希。JWT 私钥、用户密码和 Secret 主密钥是三类彼此独立的凭证，禁止复用。
+
+### 生成 JWT 密钥
+
+首次安装时离线生成一套长期使用的本地 JWT 密钥：
+
+```bash
+go run ./cmd/auth keygen --out-dir .local/auth
+```
+
+命令生成 `jwt-private.pem` 和 `jwt-public.pem`，且拒绝覆盖已有文件。`.local/` 已被 Git 忽略；生产部署应把私钥放入 Kubernetes Secret，并通过挂载文件或环境变量注入。所有实例必须使用同一套密钥，不能在每次启动时重新生成。
+
+默认开发配置读取：
+
+```yaml
+auth:
+  local:
+    private_key_file: ./.local/auth/jwt-private.pem
+    public_key_file: ./.local/auth/jwt-public.pem
+```
+
+### 初始化用户密码
+
+本地登录要求 `user_info.username` 全局唯一，并且 `password_hash` 已保存 Argon2id PHC 字符串。先执行 [design/database.md](design/database.md) 中的唯一索引：
+
+```sql
+CREATE UNIQUE INDEX IF NOT EXISTS uk_user_info_username_active
+    ON user_info (lower(username))
+    WHERE is_deleted = false AND username <> '';
+```
+
+通过环境变量向离线工具提供密码，避免把明文密码作为命令行参数传递：
+
+```powershell
+$env:ENV_VAULT_PASSWORD = '<待设置密码>'
+$passwordHash = go run ./cmd/auth hash-password
+Remove-Item Env:ENV_VAULT_PASSWORD
+```
+
+将输出的完整 PHC 字符串写入目标用户，不要修改字符串中的 `$`：
+
+```sql
+UPDATE user_info
+SET password_hash = '<工具输出>', update_by = 'bootstrap', update_at = now()
+WHERE lower(username) = lower('<登录用户名>') AND is_deleted = false;
+```
+
+`password_hash = ''` 表示未启用本地密码登录。登录接口为 `POST /api/v1/pub/auth/login`，请求只包含全局 `username` 和 `password`。公司统一认证启用后使用公司公钥作为第二个受信任签发方，不需要也不能使用公司的私钥。
 
 ## 主密钥分片生成工具
 
@@ -147,14 +199,9 @@ $env:SECURITY_ALLOW_CONFIG_KEY_FALLBACK = 'false'
 go run ./cmd
 ```
 
-3. 查询状态接口，确认返回 `ready=false`：
-
-```bash
-curl http://localhost:8090/api/v1/pub/masterKey/status
-```
-
-4. 打开前端页面 `http://localhost:5173/masterKey`，从同一批次的 5 份分片中任选 3 份，分别粘贴冒号后的完整 `EVS1` Token。
-5. 提交成功后，状态接口返回 `ready=true`、`source=shares`，普通业务接口恢复访问。
+3. 打开前端 `http://localhost:5173/login`，使用已经初始化密码的用户登录。
+4. 系统未就绪时会进入等待页面。点击右上角密钥图标，从同一批次的 5 份分片中任选 3 份，每次提交一个完整 `EVS1` Token。
+5. 第三份有效分片提交后，状态变为 `ready=true`、`source=shares`，前端自动进入业务页面。
 
 ### 分片保管要求
 
