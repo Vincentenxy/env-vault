@@ -12,7 +12,12 @@
   - Pod启动时自动生成私钥和CSR：Pod启动脚本里调用openssl生成私钥和CSR（证书签名请求），通过K8s API提交
   - K8s自动签发：Kubernetes内置的控制器会自动签发一个有效期很短（比如24小时）的证书
 
-- [ ] 针对不同的文件夹，使用不同的key粗略，目前仅支持大写字符、数字、下划线，后续要支持设置用户密码，或者指定的类型，跟文件夹走，做对应的文件夹层级的格式校验
+
+- 增加字段
+ALTER TABLE folder_info
+ADD COLUMN IF NOT EXISTS key_pattern text NOT NULL DEFAULT '';
+
+
 
 1: EVS1.eyJrZXlTZXRJZCI6Ijc4YTBlYTY1LWMwNmItNDUxZC1hNTUzLTYyZTIwMDhhZmVmNyIsImluZGV4IjoxMTgsImRhdGEiOiJraDN2ckJvKyt1VjJQTHBYU1NUaTFadVZLNDdBWkZCOC9iS2hOd0djWG5OMiIsImNoZWNrc3VtIjoiOTUzYTc2NDQ1OGE4NjE3YTQyMDMzMGM0MzYwNzdhZmE1ZTAxMzgzMDY5NjA5MWE2ODdhYWQwNGVhNjE3YjlhMiJ9
 2: EVS1.eyJrZXlTZXRJZCI6Ijc4YTBlYTY1LWMwNmItNDUxZC1hNTUzLTYyZTIwMDhhZmVmNyIsImluZGV4IjoxNTksImRhdGEiOiJpUDc4NEtCYW9Da1cveWo3b05wRy9oRkRkeUhxT2RSdWtMZkhVZFN3VEErZiIsImNoZWNrc3VtIjoiMjQ5Y2NjYWExYmJmZDhmMDEyMGQ5NDQ4OTk2NDY0YWViYmUzMTk1NmY2OTc1YWJkYzA2NDM2MjE1YTlkYjY0MSJ9

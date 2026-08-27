@@ -143,7 +143,7 @@ type stubFolderRepo struct {
 func (s *stubFolderRepo) CreateBatch(ctx context.Context, folders []*folderdomain.Folder) error {
 	return nil
 }
-func (s *stubFolderRepo) UpdateByGroupID(ctx context.Context, groupID uuid.UUID, name, remark, manager, updateBy string, updateAt time.Time) (int64, error) {
+func (s *stubFolderRepo) UpdateByGroupID(ctx context.Context, groupID uuid.UUID, name, remark, manager string, keyPattern *string, updateBy string, updateAt time.Time) (int64, error) {
 	return 0, nil
 }
 func (s *stubFolderRepo) DeleteByGroupID(ctx context.Context, groupID uuid.UUID, deleteBy string) (int64, error) {
@@ -430,6 +430,57 @@ func TestService_Create_KeyExists(t *testing.T) {
 	}}, "u")
 	if !errors.Is(err, ErrKeyExists) {
 		t.Fatalf("expected ErrKeyExists, got %v", err)
+	}
+}
+
+func TestService_Create_KeyPatternMismatch(t *testing.T) {
+	envs := newTestEnvs()
+	folderGroupID := uuid.New()
+	folders := newTestFolderGroup(folderGroupID, envs)
+	for _, folder := range folders {
+		folder.KeyPattern = `^[A-Z][A-Z0-9_]*$`
+	}
+
+	svc := NewService(
+		&stubSecretRepo{},
+		&stubFolderRepo{listByGroupID: func(context.Context, uuid.UUID) ([]*folderdomain.Folder, error) {
+			return folders, nil
+		}},
+		&stubEnvRepo{},
+		testCipher(t),
+	)
+	_, err := svc.Create(context.Background(), CreateInput{SecretList: []CreateItemInput{{
+		FolderGroupID: folderGroupID,
+		Key:           "db-password",
+		Values:        []ValueItemInput{{EnvID: envs[0].ID, Value: "value"}},
+	}}}, "operator")
+	if !errors.Is(err, ErrKeyPatternMismatch) {
+		t.Fatalf("Create() error = %v, want ErrKeyPatternMismatch", err)
+	}
+}
+
+func TestService_Create_InconsistentFolderKeyPattern(t *testing.T) {
+	envs := newTestEnvs()
+	folderGroupID := uuid.New()
+	folders := newTestFolderGroup(folderGroupID, envs)
+	folders[0].KeyPattern = `^[A-Z]+$`
+	folders[1].KeyPattern = `^[a-z]+$`
+
+	svc := NewService(
+		&stubSecretRepo{},
+		&stubFolderRepo{listByGroupID: func(context.Context, uuid.UUID) ([]*folderdomain.Folder, error) {
+			return folders, nil
+		}},
+		&stubEnvRepo{},
+		testCipher(t),
+	)
+	_, err := svc.Create(context.Background(), CreateInput{SecretList: []CreateItemInput{{
+		FolderGroupID: folderGroupID,
+		Key:           "VALID",
+		Values:        []ValueItemInput{{EnvID: envs[0].ID, Value: "value"}},
+	}}}, "operator")
+	if !errors.Is(err, ErrFolderPatternInvalid) {
+		t.Fatalf("Create() error = %v, want ErrFolderPatternInvalid", err)
 	}
 }
 

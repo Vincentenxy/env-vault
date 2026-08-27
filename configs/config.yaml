@@ -11,7 +11,7 @@ auth:
 
 security:
   # 开发环境允许使用配置文件中的密钥，生产环境必须设置为 false
-  allow_config_key_fallback: false
+  allow_config_key_fallback: true
   # secret value 加密私钥（AES-256-GCM，32 字节 base64 编码，测试环境使用）
   encryption_key: "Pk6V+TnUEZO6R8WOklCSrI/iM4QKHc55VQQrrptmVfk="
   # 主密钥未就绪时按请求方法和精确路径放行
@@ -28,8 +28,8 @@ security:
 
 
 database:
-  host: "192.168.1.110"
-#  host: "127.0.0.1"
+#  host: "192.168.1.110"
+  host: "127.0.0.1"
   port: 5432
   user: "env_vault"
   password: "123456"
@@ -44,8 +44,8 @@ redis:
   enabled: true
   mode: "single"
   addrs:
-#    - "127.0.0.1:6379"
-    - "192.168.1.110:6379"
+    - "127.0.0.1:6379"
+#    - "192.168.1.110:6379"
   password: "123456"
   db: 1
   key_prefix: "env_vault"

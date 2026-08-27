@@ -3,6 +3,7 @@ package folder
 
 import (
 	"context"
+	"regexp"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,6 +28,7 @@ type Folder struct {
 	Remark         string
 	Type           string
 	Manager        string
+	KeyPattern     string // Secret key 完整匹配表达式，空字符串表示关闭格式校验
 	ManagerName    string
 	SecretCount    int64
 	FolderCount    *int64
@@ -51,9 +53,10 @@ type ListFilter struct {
 type Repository interface {
 	// CreateBatch 批量创建文件夹（每个环境各一条，group_id 全环境共享）
 	CreateBatch(ctx context.Context, folders []*Folder) error
-	// UpdateByGroupID 按 group_id 全环境同步更新 name/remark/manager（返回受影响行数）
+	// UpdateByGroupID 按 group_id 全环境同步更新 name/remark/manager/key_pattern（返回受影响行数）
 	// manager 为空时保留原值，兼容未提交管理员字段的调用方。
-	UpdateByGroupID(ctx context.Context, groupID uuid.UUID, name, remark, manager, updateBy string, updateAt time.Time) (int64, error)
+	// keyPattern 为 nil 时保留原值，非 nil 时允许使用空字符串关闭校验
+	UpdateByGroupID(ctx context.Context, groupID uuid.UUID, name, remark, manager string, keyPattern *string, updateBy string, updateAt time.Time) (int64, error)
 	// DeleteByGroupID 按 group_id 软删除全环境下的记录（所有层级），返回受影响行数
 	DeleteByGroupID(ctx context.Context, groupID uuid.UUID, deleteBy string) (int64, error)
 	// GetByID 按 ID 查询文件夹（不含已删除）— Detail 接口：返回某环境下的具体记录
@@ -74,4 +77,30 @@ type Repository interface {
 	ListSubGroupIDsByParentFolderID(ctx context.Context, parentFolderID uuid.UUID) ([]uuid.UUID, error)
 	// ListByGroupIDs 按 group_id 集合分页查询每 group_id 一条代表记录（屏蔽环境层级），用于顶级与子级 List 接口的最终步骤
 	ListByGroupIDs(ctx context.Context, groupIDs []uuid.UUID, filter ListFilter) ([]*Folder, int64, error)
+}
+
+// ValidateKeyPattern 校验 Folder 的 Secret key 表达式是否可以编译
+func ValidateKeyPattern(pattern string) error {
+	if pattern == "" {
+		return nil
+	}
+	_, err := compileFullKeyPattern(pattern)
+	return err
+}
+
+// MatchKeyPattern 使用 Folder 表达式完整匹配 Secret key
+func MatchKeyPattern(pattern, key string) (bool, error) {
+	if pattern == "" {
+		return true, nil
+	}
+	compiled, err := compileFullKeyPattern(pattern)
+	if err != nil {
+		return false, err
+	}
+	return compiled.MatchString(key), nil
+}
+
+// compileFullKeyPattern 在用户表达式外增加文本边界，避免未写锚点时发生子串匹配
+func compileFullKeyPattern(pattern string) (*regexp.Regexp, error) {
+	return regexp.Compile(`\A(` + pattern + `)\z`)
 }

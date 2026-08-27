@@ -94,11 +94,11 @@ func TestFolderHandler_Create_TopLevel(t *testing.T) {
 			if operator != "u-1" {
 				t.Fatalf("operator not propagated: %q", operator)
 			}
-			if in.ProjectID != projectID || in.Code != "global" || in.Type != "common" {
+			if in.ProjectID != projectID || in.Code != "global" || in.Type != "common" || in.KeyPattern != `^[A-Z][A-Z0-9_]*$` {
 				t.Fatalf("input not passed: %+v", in)
 			}
 			return []*folderdomain.Folder{
-				{ID: uuid.New(), Code: "global", Name: "全局目录", EnvID: envID, Type: "common"},
+				{ID: uuid.New(), Code: "global", Name: "全局目录", EnvID: envID, Type: "common", KeyPattern: in.KeyPattern},
 			}, nil
 		},
 		createSubFn: func(ctx context.Context, in folderapp.CreateSubInput, operator string) ([]*folderdomain.Folder, error) {
@@ -109,6 +109,7 @@ func TestFolderHandler_Create_TopLevel(t *testing.T) {
 	r := newFolderTestEngine(svc, testUser())
 	w := doJSONP(t, r, http.MethodPost, "/api/v1/folder/create", map[string]any{
 		"projectId": projectID, "code": "global", "name": "全局目录", "type": "common",
+		"keyPattern": `^[A-Z][A-Z0-9_]*$`,
 	})
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
@@ -125,6 +126,9 @@ func TestFolderHandler_Create_TopLevel(t *testing.T) {
 	first := list[0].(map[string]any)
 	if first["code"].(string) != "global" || first["envId"].(string) != envID.String() {
 		t.Fatalf("unexpected response data: %+v", first)
+	}
+	if first["keyPattern"] != `^[A-Z][A-Z0-9_]*$` {
+		t.Fatalf("unexpected keyPattern: %+v", first)
 	}
 	if !createTopCalled {
 		t.Fatal("svc.CreateTop not called")
@@ -223,12 +227,15 @@ func TestFolderHandler_Update_Success(t *testing.T) {
 			if in.GroupID != groupID || in.Name != "new-name" || in.Remark != "r" || in.Manager != "manager-new" {
 				t.Fatalf("input not passed: %+v", in)
 			}
+			if in.KeyPattern == nil || *in.KeyPattern != "" {
+				t.Fatalf("empty keyPattern must be passed through: %+v", in.KeyPattern)
+			}
 			return nil
 		},
 	}
 	r := newFolderTestEngine(svc, testUser())
 	w := doJSONP(t, r, http.MethodPost, "/api/v1/folder/update", map[string]any{
-		"groupId": groupID, "name": "new-name", "remark": "r", "manager": "manager-new",
+		"groupId": groupID, "name": "new-name", "remark": "r", "manager": "manager-new", "keyPattern": "",
 	})
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
@@ -294,7 +301,7 @@ func TestFolderHandler_Detail_Success(t *testing.T) {
 	id := uuid.New()
 	parentID := uuid.New()
 	want := &folderdomain.Folder{
-		ID: id, Code: "ob_efficient_cfg", Name: "OB高效配置", ParentFolderID: &parentID, Type: "common",
+		ID: id, Code: "ob_efficient_cfg", Name: "OB高效配置", ParentFolderID: &parentID, Type: "common", KeyPattern: `^[a-z]+$`,
 	}
 	svc := &stubFolderService{
 		getByID: func(ctx context.Context, gid uuid.UUID) (*folderdomain.Folder, error) {
@@ -313,6 +320,9 @@ func TestFolderHandler_Detail_Success(t *testing.T) {
 	data := body["data"].(map[string]any)
 	if data["id"].(string) != id.String() || data["parentFolderId"].(string) != parentID.String() {
 		t.Fatalf("unexpected response data: %+v", data)
+	}
+	if data["keyPattern"] != `^[a-z]+$` {
+		t.Fatalf("unexpected keyPattern: %+v", data)
 	}
 }
 

@@ -265,6 +265,7 @@ func (s *Service) cloneResources(
 				Remark:         sourceFolder.Remark,
 				Type:           sourceFolder.Type,
 				Manager:        sourceFolder.Manager,
+				KeyPattern:     sourceFolder.KeyPattern,
 				CreateBy:       operator,
 				UpdateBy:       operator,
 				CreateAt:       now,

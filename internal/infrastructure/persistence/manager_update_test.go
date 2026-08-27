@@ -46,7 +46,7 @@ func TestManagerIsIncludedInResourceUpdates(t *testing.T) {
 			name: "folder",
 			update: func(db *gorm.DB) error {
 				_, err := folderrepo.NewRepository(db).UpdateByGroupID(
-					context.Background(), uuid.New(), "folder", "", manager, "operator", now,
+					context.Background(), uuid.New(), "folder", "", manager, nil, "operator", now,
 				)
 				return err
 			},

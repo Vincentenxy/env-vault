@@ -15,7 +15,7 @@ import (
 // stubFolderRepo 内存实现的文件夹 Repository，便于 application 层单测
 type stubFolderRepo struct {
 	createBatch                     func(ctx context.Context, folders []*folderdomain.Folder) error
-	updateByGroupID                 func(ctx context.Context, groupID uuid.UUID, name, remark, manager, updateBy string, updateAt time.Time) (int64, error)
+	updateByGroupID                 func(ctx context.Context, groupID uuid.UUID, name, remark, manager string, keyPattern *string, updateBy string, updateAt time.Time) (int64, error)
 	deleteByGroupID                 func(ctx context.Context, groupID uuid.UUID, deleteBy string) (int64, error)
 	getByID                         func(ctx context.Context, id uuid.UUID) (*folderdomain.Folder, error)
 	getByGroupID                    func(ctx context.Context, groupID uuid.UUID) (*folderdomain.Folder, error)
@@ -34,9 +34,9 @@ func (s *stubFolderRepo) CreateBatch(ctx context.Context, folders []*folderdomai
 	}
 	return nil
 }
-func (s *stubFolderRepo) UpdateByGroupID(ctx context.Context, groupID uuid.UUID, name, remark, manager, updateBy string, updateAt time.Time) (int64, error) {
+func (s *stubFolderRepo) UpdateByGroupID(ctx context.Context, groupID uuid.UUID, name, remark, manager string, keyPattern *string, updateBy string, updateAt time.Time) (int64, error) {
 	if s.updateByGroupID != nil {
-		return s.updateByGroupID(ctx, groupID, name, remark, manager, updateBy, updateAt)
+		return s.updateByGroupID(ctx, groupID, name, remark, manager, keyPattern, updateBy, updateAt)
 	}
 	return 1, nil
 }
@@ -177,6 +177,9 @@ func TestService_CreateTop_Success_AllEnvs(t *testing.T) {
 				if f.EnvID != envs[i].ID || f.Code != "global" || f.ParentFolderID != nil {
 					t.Fatalf("unexpected folder[%d]: %+v", i, f)
 				}
+				if f.KeyPattern != `^[A-Z][A-Z0-9_]*$` {
+					t.Fatalf("key pattern not propagated: %q", f.KeyPattern)
+				}
 				if f.ID == uuid.Nil {
 					t.Fatal("ID should be generated")
 				}
@@ -195,6 +198,7 @@ func TestService_CreateTop_Success_AllEnvs(t *testing.T) {
 	svc := NewService(folderRepo, envRepo)
 	got, err := svc.CreateTop(context.Background(), CreateTopInput{
 		ProjectID: projectID, Code: "global", Name: "全局目录", Type: folderdomain.TypeCommon,
+		KeyPattern: `^[A-Z][A-Z0-9_]*$`,
 	}, "operator-1")
 	if err != nil {
 		t.Fatalf("expected nil err, got %v", err)
@@ -458,15 +462,19 @@ func TestService_CreateSub_GroupsMissingInEnv(t *testing.T) {
 
 func TestService_Update_Success(t *testing.T) {
 	groupID := uuid.New()
+	keyPattern := `^[a-z][a-z0-9-]*$`
 	called := false
 	folderRepo := &stubFolderRepo{
-		updateByGroupID: func(ctx context.Context, gid uuid.UUID, name, remark, manager, updateBy string, updateAt time.Time) (int64, error) {
+		updateByGroupID: func(ctx context.Context, gid uuid.UUID, name, remark, manager string, keyPattern *string, updateBy string, updateAt time.Time) (int64, error) {
 			called = true
 			if gid != groupID || name != "new-name" || remark != "new-remark" {
 				t.Fatalf("update args wrong: gid=%v name=%s remark=%s", gid, name, remark)
 			}
 			if manager != "manager-new" {
 				t.Fatalf("manager not propagated: %q", manager)
+			}
+			if keyPattern == nil || *keyPattern != `^[a-z][a-z0-9-]*$` {
+				t.Fatalf("key pattern not propagated: %v", keyPattern)
 			}
 			if updateBy != "operator" {
 				t.Fatalf("updateBy not set: %s", updateBy)
@@ -477,6 +485,7 @@ func TestService_Update_Success(t *testing.T) {
 	svc := NewService(folderRepo, &stubEnvRepo{})
 	if err := svc.Update(context.Background(), UpdateInput{
 		GroupID: groupID, Name: "new-name", Remark: "new-remark", Manager: " manager-new ",
+		KeyPattern: &keyPattern,
 	}, "operator"); err != nil {
 		t.Fatalf("expected nil err, got %v", err)
 	}
@@ -485,9 +494,20 @@ func TestService_Update_Success(t *testing.T) {
 	}
 }
 
+func TestService_KeyPattern_Invalid(t *testing.T) {
+	svc := NewService(&stubFolderRepo{}, &stubEnvRepo{})
+	if _, err := svc.CreateTop(context.Background(), CreateTopInput{KeyPattern: "["}, "operator"); !errors.Is(err, ErrInvalidKeyPattern) {
+		t.Fatalf("CreateTop() error = %v, want ErrInvalidKeyPattern", err)
+	}
+	invalid := "["
+	if err := svc.Update(context.Background(), UpdateInput{GroupID: uuid.New(), KeyPattern: &invalid}, "operator"); !errors.Is(err, ErrInvalidKeyPattern) {
+		t.Fatalf("Update() error = %v, want ErrInvalidKeyPattern", err)
+	}
+}
+
 func TestService_Update_NotFound(t *testing.T) {
 	folderRepo := &stubFolderRepo{
-		updateByGroupID: func(ctx context.Context, gid uuid.UUID, name, remark, manager, updateBy string, updateAt time.Time) (int64, error) {
+		updateByGroupID: func(ctx context.Context, gid uuid.UUID, name, remark, manager string, keyPattern *string, updateBy string, updateAt time.Time) (int64, error) {
 			return 0, nil
 		},
 	}

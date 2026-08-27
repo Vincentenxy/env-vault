@@ -34,6 +34,7 @@ type FolderDTO struct {
 	Remark         string     `json:"remark"`
 	Type           string     `json:"type"`
 	Manager        string     `json:"manager"`
+	KeyPattern     string     `json:"keyPattern"`
 	ManagerName    string     `json:"managerName"`
 	SecretCount    int64      `json:"secretCount"`
 	FolderCount    *int64     `json:"folderCount"`
@@ -54,14 +55,16 @@ type CreateFolderRequest struct {
 	Remark         string     `json:"remark"`
 	Type           string     `json:"type"` // common/customer
 	Manager        string     `json:"manager,omitempty"`
+	KeyPattern     string     `json:"keyPattern,omitempty"`
 }
 
 // UpdateFolderRequest 更新文件夹请求（按 group_id 全环境同步）
 type UpdateFolderRequest struct {
-	GroupID uuid.UUID `json:"groupId"`
-	Name    string    `json:"name"`
-	Remark  string    `json:"remark"`
-	Manager string    `json:"manager,omitempty"`
+	GroupID    uuid.UUID `json:"groupId"`
+	Name       string    `json:"name"`
+	Remark     string    `json:"remark"`
+	Manager    string    `json:"manager,omitempty"`
+	KeyPattern *string   `json:"keyPattern,omitempty"`
 }
 
 // DeleteFolderRequest 删除文件夹请求（按 group_id 软删除全环境记录）
@@ -120,12 +123,13 @@ func (h *FolderHandler) Create(c *gin.Context) {
 	if req.ParentFolderID == nil || *req.ParentFolderID == uuid.Nil {
 		// 创建接口1：项目下创建顶级目录，默认在所有环境创建
 		folders, err = h.svc.CreateTop(c, folderapp.CreateTopInput{
-			ProjectID: req.ProjectID,
-			Code:      req.Code,
-			Name:      req.Name,
-			Remark:    req.Remark,
-			Type:      req.Type,
-			Manager:   req.Manager,
+			ProjectID:  req.ProjectID,
+			Code:       req.Code,
+			Name:       req.Name,
+			Remark:     req.Remark,
+			Type:       req.Type,
+			Manager:    req.Manager,
+			KeyPattern: req.KeyPattern,
 		}, operator)
 	} else {
 		// 创建接口2：在 groups 目录下创建二级目录
@@ -136,6 +140,7 @@ func (h *FolderHandler) Create(c *gin.Context) {
 			Remark:         req.Remark,
 			Type:           req.Type,
 			Manager:        req.Manager,
+			KeyPattern:     req.KeyPattern,
 		}, operator)
 	}
 	h.respondError(c, err)
@@ -164,10 +169,11 @@ func (h *FolderHandler) Update(c *gin.Context) {
 	}
 
 	err := h.svc.Update(c, folderapp.UpdateInput{
-		GroupID: req.GroupID,
-		Name:    req.Name,
-		Remark:  req.Remark,
-		Manager: req.Manager,
+		GroupID:    req.GroupID,
+		Name:       req.Name,
+		Remark:     req.Remark,
+		Manager:    req.Manager,
+		KeyPattern: req.KeyPattern,
 	}, operator(c))
 	h.respondError(c, err)
 	if err != nil {
@@ -297,7 +303,8 @@ func (h *FolderHandler) respondError(c *gin.Context, err error) {
 		errors.Is(err, folderapp.ErrCommonCodeInvalid),
 		errors.Is(err, folderapp.ErrParentNotAllowed),
 		errors.Is(err, folderapp.ErrNoEnvironment),
-		errors.Is(err, folderapp.ErrGroupsNotFound):
+		errors.Is(err, folderapp.ErrGroupsNotFound),
+		errors.Is(err, folderapp.ErrInvalidKeyPattern):
 		// 通用业务错误：统一 code=-1，msg 由 service 给出
 		response.Error(c, err.Error())
 	default:
@@ -317,6 +324,7 @@ func toFolderDTO(f *folderdomain.Folder) *FolderDTO {
 		Remark:         f.Remark,
 		Type:           f.Type,
 		Manager:        f.Manager,
+		KeyPattern:     f.KeyPattern,
 		ManagerName:    f.ManagerName,
 		SecretCount:    f.SecretCount,
 		FolderCount:    f.FolderCount,

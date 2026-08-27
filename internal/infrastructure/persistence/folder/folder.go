@@ -24,6 +24,7 @@ type folderPO struct {
 	Remark         string     `gorm:"column:remark"`
 	Type           string     `gorm:"column:type"`
 	Manager        string     `gorm:"column:manager"`
+	KeyPattern     string     `gorm:"column:key_pattern"`
 	SecretCount    int64      `gorm:"column:secret_count;->"`
 	FolderCount    *int64     `gorm:"column:folder_count;->"`
 	IsDeleted      bool       `gorm:"column:is_deleted"`
@@ -81,8 +82,8 @@ func (r *Repository) ListByEnvID(ctx context.Context, envID uuid.UUID) ([]*folde
 	return folders, nil
 }
 
-// UpdateByGroupID 按 group_id 全环境同步更新 name/remark/manager。
-func (r *Repository) UpdateByGroupID(ctx context.Context, groupID uuid.UUID, name, remark, manager, updateBy string, updateAt time.Time) (int64, error) {
+// UpdateByGroupID 按 group_id 全环境同步更新 name/remark/manager/key_pattern
+func (r *Repository) UpdateByGroupID(ctx context.Context, groupID uuid.UUID, name, remark, manager string, keyPattern *string, updateBy string, updateAt time.Time) (int64, error) {
 	updates := map[string]any{
 		"name":      name,
 		"remark":    remark,
@@ -91,6 +92,9 @@ func (r *Repository) UpdateByGroupID(ctx context.Context, groupID uuid.UUID, nam
 	}
 	if manager != "" {
 		updates["manager"] = manager
+	}
+	if keyPattern != nil {
+		updates["key_pattern"] = *keyPattern
 	}
 
 	result := r.db.WithContext(ctx).
@@ -352,6 +356,7 @@ func toPO(f *folderdomain.Folder) *folderPO {
 		Remark:         f.Remark,
 		Type:           f.Type,
 		Manager:        f.Manager,
+		KeyPattern:     f.KeyPattern,
 		IsDeleted:      f.IsDeleted,
 		DeleteAt:       f.DeleteAt,
 		DeleteBy:       f.DeleteBy,
@@ -374,6 +379,7 @@ func toDomain(po *folderPO) *folderdomain.Folder {
 		Remark:         po.Remark,
 		Type:           po.Type,
 		Manager:        po.Manager,
+		KeyPattern:     po.KeyPattern,
 		SecretCount:    po.SecretCount,
 		FolderCount:    po.FolderCount,
 		IsDeleted:      po.IsDeleted,

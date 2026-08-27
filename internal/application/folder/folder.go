@@ -27,16 +27,18 @@ var (
 	ErrParentNotAllowed  = errors.New("parent folder must be top-level groups")
 	ErrNoEnvironment     = errors.New("no environment found under project")
 	ErrGroupsNotFound    = errors.New("groups folder not found under environment")
+	ErrInvalidKeyPattern = errors.New("invalid folder key pattern")
 )
 
 // CreateTopInput 创建顶级文件夹入参（项目下所有环境各创建一条）
 type CreateTopInput struct {
-	ProjectID uuid.UUID
-	Code      string
-	Name      string
-	Remark    string
-	Type      string
-	Manager   string
+	ProjectID  uuid.UUID
+	Code       string
+	Name       string
+	Remark     string
+	Type       string
+	Manager    string
+	KeyPattern string
 }
 
 // CreateSubInput 创建二级文件夹入参（在 groups 目录下创建，全环境展开）
@@ -47,14 +49,16 @@ type CreateSubInput struct {
 	Remark         string
 	Type           string
 	Manager        string
+	KeyPattern     string
 }
 
 // UpdateInput 批量更新文件夹入参（按 group_id 全环境同步）
 type UpdateInput struct {
-	GroupID uuid.UUID
-	Name    string
-	Remark  string
-	Manager string
+	GroupID    uuid.UUID
+	Name       string
+	Remark     string
+	Manager    string
+	KeyPattern *string
 }
 
 // DeleteInput 删除文件夹入参（按 group_id，软删除全环境记录）
@@ -106,6 +110,9 @@ var _ IService = (*Service)(nil)
 // CreateTop 创建顶级文件夹：项目下所有环境各创建一条，全环境共享同一 group_id
 // 入参必填性校验已在 handler 层完成，service 仅负责业务编排。
 func (s *Service) CreateTop(ctx context.Context, in CreateTopInput, operator string) ([]*folderdomain.Folder, error) {
+	if err := folderdomain.ValidateKeyPattern(in.KeyPattern); err != nil {
+		return nil, ErrInvalidKeyPattern
+	}
 	envs, err := s.projectEnvs(ctx, in.ProjectID)
 	if err != nil {
 		return nil, err
@@ -135,18 +142,19 @@ func (s *Service) CreateTop(ctx context.Context, in CreateTopInput, operator str
 	folders := make([]*folderdomain.Folder, 0, len(envs))
 	for _, e := range envs {
 		folders = append(folders, &folderdomain.Folder{
-			ID:       uuid.New(),
-			GroupID:  groupID,
-			Code:     in.Code,
-			Name:     in.Name,
-			EnvID:    e.ID,
-			Remark:   in.Remark,
-			Type:     in.Type,
-			Manager:  manager,
-			CreateBy: operator,
-			UpdateBy: operator,
-			CreateAt: now,
-			UpdateAt: now,
+			ID:         uuid.New(),
+			GroupID:    groupID,
+			Code:       in.Code,
+			Name:       in.Name,
+			EnvID:      e.ID,
+			Remark:     in.Remark,
+			Type:       in.Type,
+			Manager:    manager,
+			KeyPattern: in.KeyPattern,
+			CreateBy:   operator,
+			UpdateBy:   operator,
+			CreateAt:   now,
+			UpdateAt:   now,
 		})
 	}
 	if err := s.repo.CreateBatch(ctx, folders); err != nil {
@@ -160,6 +168,9 @@ func (s *Service) CreateTop(ctx context.Context, in CreateTopInput, operator str
 // 子 folder 与父 folder 分属不同业务实体，子 folder 自有独立的 group_id
 // 入参必填性校验已在 handler 层完成，service 仅负责业务编排。
 func (s *Service) CreateSub(ctx context.Context, in CreateSubInput, operator string) ([]*folderdomain.Folder, error) {
+	if err := folderdomain.ValidateKeyPattern(in.KeyPattern); err != nil {
+		return nil, ErrInvalidKeyPattern
+	}
 	// 上级必须是顶级 groups 目录
 	parent, err := s.repo.GetByID(ctx, in.ParentFolderID)
 	if err != nil {
@@ -225,6 +236,7 @@ func (s *Service) CreateSub(ctx context.Context, in CreateSubInput, operator str
 			Remark:         in.Remark,
 			Type:           in.Type,
 			Manager:        manager,
+			KeyPattern:     in.KeyPattern,
 			CreateBy:       operator,
 			UpdateBy:       operator,
 			CreateAt:       now,
@@ -240,8 +252,13 @@ func (s *Service) CreateSub(ctx context.Context, in CreateSubInput, operator str
 
 // Update 批量更新文件夹（按 group_id 全环境同步）
 func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) error {
+	if in.KeyPattern != nil {
+		if err := folderdomain.ValidateKeyPattern(*in.KeyPattern); err != nil {
+			return ErrInvalidKeyPattern
+		}
+	}
 	affected, err := s.repo.UpdateByGroupID(
-		ctx, in.GroupID, in.Name, in.Remark, strings.TrimSpace(in.Manager), operator, time.Now(),
+		ctx, in.GroupID, in.Name, in.Remark, strings.TrimSpace(in.Manager), in.KeyPattern, operator, time.Now(),
 	)
 	if err != nil {
 		return err

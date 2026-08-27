@@ -232,7 +232,7 @@ func TestService_Create_ClonesFoldersAndEmptySecrets(t *testing.T) {
 			}
 			return []*folderdomain.Folder{
 				{ID: topFolderID, GroupID: topGroupID, Code: "groups", Name: "分组", EnvID: envID, Type: folderdomain.TypeCommon},
-				{ID: childFolderID, GroupID: childGroupID, Code: "app", Name: "应用", EnvID: envID, ParentFolderID: &topFolderID, Type: folderdomain.TypeCommon},
+				{ID: childFolderID, GroupID: childGroupID, Code: "app", Name: "应用", EnvID: envID, ParentFolderID: &topFolderID, Type: folderdomain.TypeCommon, KeyPattern: `^[A-Z][A-Z0-9_]*$`},
 			}, nil
 		},
 		createBatch: func(ctx context.Context, folders []*folderdomain.Folder) error {
@@ -283,6 +283,9 @@ func TestService_Create_ClonesFoldersAndEmptySecrets(t *testing.T) {
 	if len(createdEnvironments) != 2 || len(createdFolders) != 4 || len(createdSecrets) != 2 || len(createdHistories) != 2 {
 		t.Fatalf("unexpected clone counts: environments=%d folders=%d secrets=%d histories=%d",
 			len(createdEnvironments), len(createdFolders), len(createdSecrets), len(createdHistories))
+	}
+	if createdFolders[1].KeyPattern != `^[A-Z][A-Z0-9_]*$` || createdFolders[3].KeyPattern != `^[A-Z][A-Z0-9_]*$` {
+		t.Fatalf("folder key pattern was not preserved: %+v", createdFolders)
 	}
 	for _, secret := range createdSecrets {
 		if secret.GroupID != secretGroupID || secret.Version != 1 || secret.ValueType != "string" {

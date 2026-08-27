@@ -28,6 +28,8 @@ var (
 	ErrFolderNotFound       = errors.New("folder not found")
 	ErrEnvNotFound          = errors.New("env not found under folder")
 	ErrKeyExists            = errors.New("secret key already exists under folder")
+	ErrKeyPatternMismatch   = errors.New("secret key does not match folder key pattern")
+	ErrFolderPatternInvalid = errors.New("folder key pattern is invalid or inconsistent")
 	ErrDecrypt              = errors.New("decrypt secret value failed")
 	ErrSecretNotUnderGroup  = errors.New("secret not under group")
 	ErrSecretNotUnderFolder = ErrSecretNotUnderGroup
@@ -266,6 +268,19 @@ func (s *Service) createOne(ctx context.Context, item CreateItemInput, operator 
 	}
 	if len(folders) == 0 {
 		return nil, ErrFolderNotFound
+	}
+	keyPattern := folders[0].KeyPattern
+	for _, folder := range folders[1:] {
+		if folder.KeyPattern != keyPattern {
+			return nil, ErrFolderPatternInvalid
+		}
+	}
+	matched, err := folderdomain.MatchKeyPattern(keyPattern, item.Key)
+	if err != nil {
+		return nil, ErrFolderPatternInvalid
+	}
+	if !matched {
+		return nil, ErrKeyPatternMismatch
 	}
 
 	// envID -> folderID / envCode 映射（该环境下 folder 的具体 id 与 code，env.code 不可更新故可直接冗余落库）

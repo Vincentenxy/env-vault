@@ -329,6 +329,7 @@ CREATE TABLE IF NOT EXISTS folder_info (
     remark           text        NOT NULL DEFAULT '',      -- 备注
     type             text        NOT NULL,                 -- 目录类型：common-通用目录 / customer-用户目录
     manager          text        NOT NULL DEFAULT '',      -- 管理员用户 ID
+    key_pattern      text        NOT NULL DEFAULT '',      -- Secret key 完整匹配表达式，空字符串表示关闭格式校验
     is_deleted       boolean     NOT NULL DEFAULT false,
     delete_at        timestamptz,
     delete_by        text        NOT NULL DEFAULT '',
@@ -337,6 +338,10 @@ CREATE TABLE IF NOT EXISTS folder_info (
     create_at        timestamptz NOT NULL DEFAULT now(),
     update_at        timestamptz NOT NULL DEFAULT now()
 );
+
+-- 已存在的 folder_info 表使用以下语句补充字段
+ALTER TABLE folder_info
+    ADD COLUMN IF NOT EXISTS key_pattern text NOT NULL DEFAULT '';
 
 -- 按业务组查询/批量更新/批量删除（屏蔽环境层级）
 CREATE INDEX IF NOT EXISTS idx_folder_info_group ON folder_info (group_id);

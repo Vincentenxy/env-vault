@@ -455,6 +455,8 @@ func (h *SecretHandler) respondError(c *gin.Context, err error) {
 		errors.Is(err, secretapp.ErrFolderNotFound),
 		errors.Is(err, secretapp.ErrEnvNotFound),
 		errors.Is(err, secretapp.ErrKeyExists),
+		errors.Is(err, secretapp.ErrKeyPatternMismatch),
+		errors.Is(err, secretapp.ErrFolderPatternInvalid),
 		errors.Is(err, secretapp.ErrDecrypt),
 		errors.Is(err, secretapp.ErrSecretNotUnderGroup),
 		errors.Is(err, secretapp.ErrVersionConflict):
