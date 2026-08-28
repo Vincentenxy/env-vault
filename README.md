@@ -68,7 +68,32 @@ EnvVault 本地认证使用独立 RSA 密钥签发 RS256 JWT，用户密码使�
 go run ./cmd/auth keygen --out-dir .local/auth
 ```
 
-命令生成 `jwt-private.pem` 和 `jwt-public.pem`，且拒绝覆盖已有文件。`.local/` 已被 Git 忽略；生产部署应把私钥放入 Kubernetes Secret，并通过挂载文件或环境变量注入。所有实例必须使用同一套密钥，不能在每次启动时重新生成。
+该命令默认生成 3072 位 RSA 密钥，私钥使用 PKCS#8 PEM 格式，公钥使用 PKIX PEM 格式。生成结果为 `jwt-private.pem` 和 `jwt-public.pem`，私钥权限为 `0600`，公钥权限为 `0644`，且拒绝覆盖已有文件。需要指定其他位数时可以使用 `--bits`，但不能低于 2048 位：
+
+```bash
+go run ./cmd/auth keygen --out-dir .local/auth --bits 4096
+```
+
+可以使用 OpenSSL 检查文件格式和私钥完整性，命令成功且没有错误输出即表示校验通过：
+
+```bash
+openssl pkey -in .local/auth/jwt-private.pem -check -noout
+openssl pkey -pubin -in .local/auth/jwt-public.pem -noout
+```
+
+没有 Go 环境时，也可以直接使用 OpenSSL 生成等价的密钥文件。以下命令会覆盖同名文件，执行前必须确认目标目录中没有仍在使用的密钥：
+
+```bash
+mkdir -p .local/auth
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 \
+  -out .local/auth/jwt-private.pem
+openssl pkey -in .local/auth/jwt-private.pem -pubout \
+  -out .local/auth/jwt-public.pem
+chmod 600 .local/auth/jwt-private.pem
+chmod 644 .local/auth/jwt-public.pem
+```
+
+`.local/` 已被 Git 忽略；生产部署应把私钥放入 Kubernetes Secret，并通过挂载文件或环境变量注入。所有实例必须使用同一套密钥，不能在每次启动时重新生成。重新生成密钥后，旧私钥签发的 JWT 将无法通过新公钥验证。
 
 默认开发配置读取：
 
@@ -89,12 +114,37 @@ CREATE UNIQUE INDEX IF NOT EXISTS uk_user_info_username_active
     WHERE is_deleted = false AND username <> '';
 ```
 
-通过环境变量向离线工具提供密码，避免把明文密码作为命令行参数传递：
+通过环境变量向离线工具提供密码，避免把明文密码作为命令行参数传递。根据当前操作系统和 Shell 选择对应命令。
+
+Windows PowerShell：
 
 ```powershell
 $env:ENV_VAULT_PASSWORD = '<待设置密码>'
 $passwordHash = go run ./cmd/auth hash-password
 Remove-Item Env:ENV_VAULT_PASSWORD
+$passwordHash
+```
+
+macOS `zsh`：
+
+```zsh
+read -s "ENV_VAULT_PASSWORD?请输入密码: "
+echo
+export ENV_VAULT_PASSWORD
+passwordHash="$(go run ./cmd/auth hash-password)"
+unset ENV_VAULT_PASSWORD
+printf '%s\n' "$passwordHash"
+```
+
+Linux `bash`：
+
+```bash
+read -rsp '请输入密码: ' ENV_VAULT_PASSWORD
+echo
+export ENV_VAULT_PASSWORD
+passwordHash="$(go run ./cmd/auth hash-password)"
+unset ENV_VAULT_PASSWORD
+printf '%s\n' "$passwordHash"
 ```
 
 将输出的完整 PHC 字符串写入目标用户，不要修改字符串中的 `$`：

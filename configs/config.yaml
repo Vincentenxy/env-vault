@@ -17,9 +17,9 @@ auth:
     access_token_ttl: 2h
   # 公司认证接入后填写真实 issuer/audience 并启用；公钥不用于签发本地 JWT
   company:
-    enabled: false
-    issuer: company-auth
-    audience: env-vault
+    enabled: true
+    issuer: https://eiam.qiuer.net/auth/oidc/62F295C3C382499EA2124E6C8B080B8E
+    audience: ZmEyMjBjNWFhNmI2NDhlOWE4NzYwNjkyNjQ5ZWQ4NTg
     key_id: ""
     public_key: MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAj4uJ5IOD52X+qQwKa/rfctviCqrKTQWFsEKUDo9EDAH5KUziS/1O5qWe3zhtfCBGAEcCnELW3bpQHaSgghazVVXesdnGqIDQZSbMuemt7UXLsp72qDppR/x94o67srTo9Z3Wz0MsrR3/dxArFZuYGW7v8z8BK1UFLLSgA+LJu0YEcrhgVMiMtugOcjZ5NbRGXpo4fFbnIMtslr6xhOpA7zB8ycUjomHZlbakbYQU7tnHuj3Oyoe9BNUEueSVyPTiK3rwUaOl1EAJ8oBd380xVi01yLRriIIQPmCY2r9/RZJ8mUFFn6DlsF3rg5aPuVGHkCJIXAYrOdiruNcEcOn8FwIDAQAB
 
@@ -42,8 +42,8 @@ security:
 
 
 database:
-  host: "192.168.1.110"
-#  host: "127.0.0.1"
+#  host: "192.168.1.110"
+  host: "127.0.0.1"
   port: 5432
   user: "env_vault"
   password: "123456"
@@ -58,8 +58,8 @@ redis:
   enabled: true
   mode: "single"
   addrs:
-#    - "127.0.0.1:6379"
-    - "192.168.1.110:6379"
+    - "127.0.0.1:6379"
+#    - "192.168.1.110:6379"
   password: "123456"
   db: 1
   key_prefix: "env_vault"
@@ -70,3 +70,5 @@ redis:
   dial_timeout: "5s"
   read_timeout: "3s"
   write_timeout: "3s"
+
+
