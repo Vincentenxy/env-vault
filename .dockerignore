@@ -30,6 +30,9 @@ Thumbs.db
 *.md
 design/
 
+# ---- 运行配置（包含本地凭证，只通过 K8s ConfigMap/Secret 注入） ----
+configs/
+
 # ---- 日志与临时文件 ----
 *.log
 tmp/

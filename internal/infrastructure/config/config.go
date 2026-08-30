@@ -64,6 +64,7 @@ type CompanyAuthConfig struct {
 type SecurityConfig struct {
 	EncryptionKey          string                  `mapstructure:"encryption_key"`            // secret value 加密私钥（AES-256-GCM，32 字节 base64 编码）
 	AllowConfigKeyFallback bool                    `mapstructure:"allow_config_key_fallback"` // 是否允许使用配置文件中的开发密钥
+	MasterKeyPeerToken     string                  `mapstructure:"master_key_peer_token"`     // 集群内部主密钥传输令牌，生产环境通过环境变量注入
 	ReadyAllowlist         []ReadyAllowRouteConfig `mapstructure:"ready_allowlist"`           // 主密钥未就绪时允许访问的接口
 }
 

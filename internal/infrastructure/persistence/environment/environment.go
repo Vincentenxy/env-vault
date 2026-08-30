@@ -68,7 +68,7 @@ func (r *Repository) CreateBatch(ctx context.Context, environments []*envdomain.
 // Update 更新环境（按 ID）
 func (r *Repository) Update(ctx context.Context, e *envdomain.Environment) error {
 	po := toPO(e)
-	return r.db.WithContext(ctx).
+	return persistence.TxDB(ctx, r.db).WithContext(ctx).
 		Model(&environmentPO{}).
 		Where("id = ? AND is_deleted = false", po.ID).
 		Updates(map[string]any{
@@ -84,7 +84,7 @@ func (r *Repository) Update(ctx context.Context, e *envdomain.Environment) error
 // Delete 软删除环境（按 ID）
 func (r *Repository) Delete(ctx context.Context, id uuid.UUID, deleteBy string) error {
 	now := time.Now()
-	return r.db.WithContext(ctx).
+	return persistence.TxDB(ctx, r.db).WithContext(ctx).
 		Model(&environmentPO{}).
 		Where("id = ? AND is_deleted = false", id).
 		Updates(map[string]any{
@@ -99,7 +99,7 @@ func (r *Repository) Delete(ctx context.Context, id uuid.UUID, deleteBy string) 
 // GetByID 按 ID 查询环境（不含已删除）
 func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*envdomain.Environment, error) {
 	var po environmentPO
-	err := r.db.WithContext(ctx).
+	err := persistence.TxDB(ctx, r.db).WithContext(ctx).
 		Where("id = ? AND is_deleted = false", id).
 		First(&po).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -114,7 +114,7 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*envdomain.Envi
 // GetByProjectCode 按项目 + 编码查询环境（不含已删除）
 func (r *Repository) GetByProjectCode(ctx context.Context, projectID uuid.UUID, code string) (*envdomain.Environment, error) {
 	var po environmentPO
-	err := r.db.WithContext(ctx).
+	err := persistence.TxDB(ctx, r.db).WithContext(ctx).
 		Where("project_id = ? AND code = ? AND is_deleted = false", projectID, code).
 		First(&po).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -129,7 +129,7 @@ func (r *Repository) GetByProjectCode(ctx context.Context, projectID uuid.UUID, 
 // List 查询项目下全部环境（不含已删除，按排序号升序，不分页）
 func (r *Repository) List(ctx context.Context, projectID uuid.UUID) ([]*envdomain.Environment, error) {
 	var pos []environmentPO
-	err := r.db.WithContext(ctx).
+	err := persistence.TxDB(ctx, r.db).WithContext(ctx).
 		Where("project_id = ? AND is_deleted = false", projectID).
 		Order("order_no ASC").
 		Order("create_at DESC").

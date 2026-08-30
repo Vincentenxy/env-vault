@@ -101,7 +101,7 @@ func (h *TenantHandler) Create(c *gin.Context) {
 		return
 	}
 
-	t, err := h.svc.Create(c, tenantapp.CreateInput{
+	t, err := h.svc.Create(withHTTPAuditContext(c), tenantapp.CreateInput{
 		Code:    req.Code,
 		Name:    req.Name,
 		Remark:  req.Remark,
@@ -127,7 +127,7 @@ func (h *TenantHandler) Update(c *gin.Context) {
 		return
 	}
 
-	t, err := h.svc.Update(c, tenantapp.UpdateInput{
+	t, err := h.svc.Update(withHTTPAuditContext(c), tenantapp.UpdateInput{
 		ID:      req.ID,
 		Name:    req.Name,
 		Remark:  req.Remark,
@@ -153,7 +153,7 @@ func (h *TenantHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	err := h.svc.Delete(c, req.ID, operator(c))
+	err := h.svc.Delete(withHTTPAuditContext(c), req.ID, operator(c))
 	h.respondError(c, err)
 	if err != nil {
 		return
@@ -174,7 +174,7 @@ func (h *TenantHandler) Detail(c *gin.Context) {
 		return
 	}
 
-	t, err := h.svc.GetByID(c, req.ID)
+	t, err := h.svc.GetByID(withHTTPAuditContext(c), req.ID)
 	h.respondError(c, err)
 	if err != nil {
 		return
@@ -191,7 +191,7 @@ func (h *TenantHandler) List(c *gin.Context) {
 	}
 	req.Normalize()
 
-	tenants, total, err := h.svc.List(c, tenantapp.ListInput{
+	tenants, total, err := h.svc.List(withHTTPAuditContext(c), tenantapp.ListInput{
 		Code:     req.Code,
 		Name:     req.Name,
 		PageNum:  req.PageNum,
@@ -214,7 +214,7 @@ func (h *TenantHandler) List(c *gin.Context) {
 
 // WithOrgProject 查询租户下的组织和项目；当前返回全部，后续按用户权限过滤。
 func (h *TenantHandler) WithOrgProject(c *gin.Context) {
-	tenants, err := h.svc.ListWithOrgProjects(c, tenantapp.WithOrgProjectsInput{UserID: operator(c)})
+	tenants, err := h.svc.ListWithOrgProjects(withHTTPAuditContext(c), tenantapp.WithOrgProjectsInput{UserID: operator(c)})
 	h.respondError(c, err)
 	if err != nil {
 		return

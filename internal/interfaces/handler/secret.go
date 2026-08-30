@@ -173,7 +173,7 @@ func (h *SecretHandler) Create(c *gin.Context) {
 		})
 	}
 
-	created, err := h.svc.Create(c, secretapp.CreateInput{SecretList: items, BatchID: uuid.New()}, operator(c))
+	created, err := h.svc.Create(withHTTPAuditContext(c), secretapp.CreateInput{SecretList: items, BatchID: uuid.New()}, operator(c))
 	h.respondError(c, err)
 	if err != nil {
 		return
@@ -248,7 +248,7 @@ func (h *SecretHandler) Update(c *gin.Context) {
 	}
 
 	batchID := uuid.New()
-	err := h.svc.Update(c, secretapp.UpdateInput{
+	err := h.svc.Update(withHTTPAuditContext(c), secretapp.UpdateInput{
 		BatchID:   batchID,
 		CommitMsg: req.CommitMsg,
 		Secrets:   items,
@@ -269,7 +269,7 @@ func (h *SecretHandler) History(c *gin.Context) {
 	}
 	req.Normalize()
 
-	result, err := h.svc.History(c, secretapp.HistoryInput{
+	result, err := h.svc.History(withHTTPAuditContext(c), secretapp.HistoryInput{
 		SecretID: req.SecretID,
 		BatchID:  req.BatchID,
 		GroupID:  req.GroupID,
@@ -329,7 +329,7 @@ func (h *SecretHandler) BatchHistory(c *gin.Context) {
 		return
 	}
 
-	result, err := h.svc.History(c, secretapp.HistoryInput{
+	result, err := h.svc.History(withHTTPAuditContext(c), secretapp.HistoryInput{
 		BatchID: req.BatchID,
 		EnvList: req.EnvList,
 		UserID:  operator(c),
@@ -393,7 +393,7 @@ func (h *SecretHandler) List(c *gin.Context) {
 		return
 	}
 
-	views, err := h.svc.List(c, secretapp.ListInput{
+	views, err := h.svc.List(withHTTPAuditContext(c), secretapp.ListInput{
 		FolderGroupID: req.FolderGroupID,
 		ProjectID:     req.ProjectID,
 		FolderCode:    req.FolderCode,
@@ -420,7 +420,7 @@ func (h *SecretHandler) Detail(c *gin.Context) {
 		return
 	}
 
-	view, err := h.svc.GetByGroup(c, req.GroupID)
+	view, err := h.svc.GetByGroup(withHTTPAuditContext(c), req.GroupID)
 	h.respondError(c, err)
 	if err != nil {
 		return
@@ -436,7 +436,7 @@ func (h *SecretHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	err := h.svc.Delete(c, req.GroupID, operator(c))
+	err := h.svc.Delete(withHTTPAuditContext(c), req.GroupID, operator(c))
 	h.respondError(c, err)
 	if err != nil {
 		return

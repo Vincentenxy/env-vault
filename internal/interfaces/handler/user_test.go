@@ -17,11 +17,13 @@ import (
 )
 
 type stubUserService struct {
-	updateFn     func(ctx context.Context, in userapp.UpdateInput) (*userdomain.User, error)
-	listFn       func(ctx context.Context, in userapp.ListInput) ([]*userdomain.User, error)
-	allocateFn   func(ctx context.Context, in userapp.AllocateInput) (int, error)
-	getProfileFn func(ctx context.Context, userID string) (*userdomain.User, error)
-	isBlockedFn  func(ctx context.Context, userID string) (bool, error)
+	updateFn           func(ctx context.Context, in userapp.UpdateInput) (*userdomain.User, error)
+	listFn             func(ctx context.Context, in userapp.ListInput) ([]*userdomain.User, error)
+	manageListFn       func(ctx context.Context, in userapp.ManagementListInput) ([]*userdomain.ManagementUser, int64, error)
+	allocateFn         func(ctx context.Context, in userapp.AllocateInput) (int, error)
+	getProfileFn       func(ctx context.Context, userID string) (*userdomain.User, error)
+	getProfileDetailFn func(ctx context.Context, userID string) (*userdomain.Profile, error)
+	isBlockedFn        func(ctx context.Context, userID string) (bool, error)
 }
 
 func (s *stubUserService) Allocate(ctx context.Context, in userapp.AllocateInput) (int, error) {
@@ -45,11 +47,32 @@ func (s *stubUserService) List(ctx context.Context, in userapp.ListInput) ([]*us
 	return nil, nil
 }
 
+func (s *stubUserService) ListManagement(ctx context.Context, in userapp.ManagementListInput) ([]*userdomain.ManagementUser, int64, error) {
+	if s.manageListFn != nil {
+		return s.manageListFn(ctx, in)
+	}
+	return nil, 0, nil
+}
+
 func (s *stubUserService) GetProfile(ctx context.Context, userID string) (*userdomain.User, error) {
 	if s.getProfileFn != nil {
 		return s.getProfileFn(ctx, userID)
 	}
 	return nil, nil
+}
+
+func (s *stubUserService) GetProfileDetail(ctx context.Context, userID string) (*userdomain.Profile, error) {
+	if s.getProfileDetailFn != nil {
+		return s.getProfileDetailFn(ctx, userID)
+	}
+	if s.getProfileFn == nil {
+		return nil, nil
+	}
+	user, err := s.getProfileFn(ctx, userID)
+	if err != nil || user == nil {
+		return nil, err
+	}
+	return &userdomain.Profile{User: *user}, nil
 }
 
 func (s *stubUserService) GetNickname(ctx context.Context, userID string) (string, error) {
@@ -80,6 +103,7 @@ func newUserTestEngine(svc userapp.IService, authUser *userctx.User) *gin.Engine
 	r.GET("/api/v1/auth/me", h.Me)
 	r.POST("/api/v1/user/update", h.Update)
 	r.POST("/api/v1/user/list", h.List)
+	r.POST("/api/v1/user/manage/list", h.ManageList)
 	r.POST("/api/v1/user/allocate", h.Allocate)
 	return r
 }
@@ -87,15 +111,21 @@ func newUserTestEngine(svc userapp.IService, authUser *userctx.User) *gin.Engine
 func TestUserHandler_Me_UsesJWTUserIDAndOmitsSensitiveFields(t *testing.T) {
 	internalID, tenantID, orgID := uuid.New(), uuid.New(), uuid.New()
 	now := time.Now().UTC().Truncate(time.Second)
-	svc := &stubUserService{getProfileFn: func(_ context.Context, userID string) (*userdomain.User, error) {
+	projectID := uuid.New()
+	svc := &stubUserService{getProfileDetailFn: func(_ context.Context, userID string) (*userdomain.Profile, error) {
 		if userID != "jwt-user-id" {
 			t.Fatalf("expected JWT user id, got %q", userID)
 		}
-		return &userdomain.User{
-			ID: internalID, UserID: userID, Nickname: "Tester", Username: "tester",
-			PasswordHash: "secret-hash", Email: "tester@example.com", Phone: "13800000000",
-			TenantID: tenantID, OrgID: orgID, CreateBy: "system", UpdateBy: userID,
-			CreateAt: now, UpdateAt: now,
+		return &userdomain.Profile{
+			User: userdomain.User{
+				ID: internalID, UserID: userID, Nickname: "Tester", Username: "tester",
+				PasswordHash: "secret-hash", Email: "tester@example.com", Phone: "13800000000",
+				TenantID: tenantID, OrgID: orgID, CreateBy: "system", UpdateBy: userID,
+				CreateAt: now, UpdateAt: now,
+			},
+			TenantName: "平台中心",
+			OrgName:    "研发部门",
+			Projects:   []userdomain.ProfileProject{{ID: projectID, Name: "EnvVault"}},
 		}, nil
 	}}
 
@@ -112,6 +142,14 @@ func TestUserHandler_Me_UsesJWTUserIDAndOmitsSensitiveFields(t *testing.T) {
 	if data["id"] != internalID.String() || data["userId"] != "jwt-user-id" || data["nickname"] != "Tester" {
 		t.Fatalf("unexpected user data: %+v", data)
 	}
+	projects := data["projectList"].([]any)
+	if data["tenantName"] != "平台中心" || data["orgName"] != "研发部门" || len(projects) != 1 {
+		t.Fatalf("unexpected resource relations: %+v", data)
+	}
+	project := projects[0].(map[string]any)
+	if project["id"] != projectID.String() || project["name"] != "EnvVault" {
+		t.Fatalf("unexpected project: %+v", project)
+	}
 	for _, sensitive := range []string{"passwordHash", "isDeleted", "deleteAt", "deleteBy", "jwt"} {
 		if _, exists := data[sensitive]; exists {
 			t.Fatalf("sensitive field %q leaked: %+v", sensitive, data)
@@ -120,7 +158,7 @@ func TestUserHandler_Me_UsesJWTUserIDAndOmitsSensitiveFields(t *testing.T) {
 }
 
 func TestUserHandler_Me_RequiresAuthentication(t *testing.T) {
-	svc := &stubUserService{getProfileFn: func(context.Context, string) (*userdomain.User, error) {
+	svc := &stubUserService{getProfileDetailFn: func(context.Context, string) (*userdomain.Profile, error) {
 		t.Fatal("service must not be called without an authenticated user")
 		return nil, nil
 	}}
@@ -136,7 +174,7 @@ func TestUserHandler_Me_RequiresAuthentication(t *testing.T) {
 }
 
 func TestUserHandler_Me_UserNotFound(t *testing.T) {
-	svc := &stubUserService{getProfileFn: func(context.Context, string) (*userdomain.User, error) {
+	svc := &stubUserService{getProfileDetailFn: func(context.Context, string) (*userdomain.Profile, error) {
 		return nil, userapp.ErrNotFound
 	}}
 	r := newUserTestEngine(svc, &userctx.User{UserID: "missing-user"})
@@ -150,6 +188,7 @@ func TestUserHandler_Me_UserNotFound(t *testing.T) {
 func TestUserHandler_List_ReturnsOnlyPublicFields(t *testing.T) {
 	tenantID, orgID, projectID := uuid.New(), uuid.New(), uuid.New()
 	internalID := uuid.New()
+	expireAt := time.Now().Add(7 * 24 * time.Hour).UTC().Truncate(time.Second)
 	svc := &stubUserService{listFn: func(_ context.Context, in userapp.ListInput) ([]*userdomain.User, error) {
 		if in.TenantID != tenantID || in.OrgID != orgID || in.ProjectID != projectID || !in.Undistributed {
 			t.Fatalf("list input not passed: %+v", in)
@@ -158,6 +197,10 @@ func TestUserHandler_List_ReturnsOnlyPublicFields(t *testing.T) {
 			ID: internalID, UserID: "external-1", Nickname: "User One",
 			Username: "login-name", PasswordHash: "password-hash", Email: "private@example.com", Phone: "13800000000",
 			IsBlocked: true,
+			ProjectRelation: &userdomain.ProjectRelation{
+				MemberType: userdomain.ProjectMemberExternal,
+				ExpireAt:   &expireAt,
+			},
 		}}, nil
 	}}
 
@@ -177,9 +220,13 @@ func TestUserHandler_List_ReturnsOnlyPublicFields(t *testing.T) {
 		t.Fatalf("expected one user, got %+v", list)
 	}
 	item := list[0].(map[string]any)
-	if len(item) != 4 || item["id"] != internalID.String() || item["userId"] != "external-1" ||
+	if len(item) != 5 || item["id"] != internalID.String() || item["userId"] != "external-1" ||
 		item["nickname"] != "User One" || item["isBlocked"] != true {
 		t.Fatalf("unexpected public user data: %+v", item)
+	}
+	relation := item["projectRelation"].(map[string]any)
+	if relation["memberType"] != "external" || relation["expireAt"] != expireAt.Format(time.RFC3339) {
+		t.Fatalf("unexpected project relation: %+v", relation)
 	}
 	for _, sensitive := range []string{"username", "passwordHash", "email", "phone", "tenantId", "orgId"} {
 		if _, exists := item[sensitive]; exists {
@@ -222,6 +269,75 @@ func TestUserHandler_List_InvalidBody(t *testing.T) {
 	body := decodeBody(t, w)
 	if body["code"].(float64) != -1 {
 		t.Fatalf("unexpected response: %s", w.Body.String())
+	}
+}
+
+func TestUserHandler_ManageList_ReturnsPagedNonSensitiveFields(t *testing.T) {
+	tenantID, orgID, internalID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC().Truncate(time.Second)
+	svc := &stubUserService{manageListFn: func(_ context.Context, in userapp.ManagementListInput) ([]*userdomain.ManagementUser, int64, error) {
+		if in.TenantID != tenantID || in.Keyword != "tester" || in.PageNum != 2 || in.PageSize != 10 {
+			t.Fatalf("unexpected management list input: %+v", in)
+		}
+		return []*userdomain.ManagementUser{{
+			User: userdomain.User{
+				ID: internalID, UserID: "external-1", Nickname: "Tester", Username: "tester",
+				PasswordHash: "must-not-leak", Email: "tester@example.com", Phone: "13800000000",
+				TenantID: tenantID, OrgID: orgID, IsBlocked: true, CreateAt: now, UpdateAt: now,
+			},
+			TenantName: "Tenant One", OrgName: "Organization One",
+		}}, 21, nil
+	}}
+	r := newUserTestEngine(svc, &userctx.User{UserID: "operator"})
+	w := doJSON(t, r, http.MethodPost, "/api/v1/user/manage/list", map[string]any{
+		"tenantId": tenantID, "keyword": "tester", "pageNum": 2, "pageSize": 10,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := decodeBody(t, w)
+	data := body["data"].(map[string]any)
+	if data["total"] != float64(21) {
+		t.Fatalf("unexpected total: %+v", data)
+	}
+	item := data["list"].([]any)[0].(map[string]any)
+	if item["id"] != internalID.String() || item["tenantName"] != "Tenant One" ||
+		item["orgName"] != "Organization One" || item["isBlocked"] != true {
+		t.Fatalf("unexpected management item: %+v", item)
+	}
+	for _, sensitive := range []string{"passwordHash", "isDeleted", "deleteAt", "deleteBy"} {
+		if _, exists := item[sensitive]; exists {
+			t.Fatalf("sensitive field %q leaked: %+v", sensitive, item)
+		}
+	}
+}
+
+func TestUserHandler_ManageList_NormalizesPagination(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     map[string]any
+		wantPage int
+		wantSize int
+	}{
+		{name: "defaults", body: map[string]any{}, wantPage: 1, wantSize: 20},
+		{name: "negative page", body: map[string]any{"pageNum": -1, "pageSize": 10}, wantPage: 1, wantSize: 10},
+		{name: "zero size", body: map[string]any{"pageNum": 3, "pageSize": 0}, wantPage: 3, wantSize: 20},
+		{name: "size over maximum", body: map[string]any{"pageNum": 2, "pageSize": 1000}, wantPage: 2, wantSize: 200},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &stubUserService{manageListFn: func(_ context.Context, in userapp.ManagementListInput) ([]*userdomain.ManagementUser, int64, error) {
+				if in.PageNum != tt.wantPage || in.PageSize != tt.wantSize {
+					t.Fatalf("service received pageNum=%d pageSize=%d, want %d/%d", in.PageNum, in.PageSize, tt.wantPage, tt.wantSize)
+				}
+				return []*userdomain.ManagementUser{}, 0, nil
+			}}
+			r := newUserTestEngine(svc, &userctx.User{UserID: "operator"})
+			w := doJSON(t, r, http.MethodPost, "/api/v1/user/manage/list", tt.body)
+			if w.Code != http.StatusOK {
+				t.Fatalf("unexpected status=%d body=%s", w.Code, w.Body.String())
+			}
+		})
 	}
 }
 

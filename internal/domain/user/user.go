@@ -27,6 +27,22 @@ type User struct {
 	UpdateBy     string
 	CreateAt     time.Time
 	UpdateAt     time.Time
+	// ProjectRelation 仅在按 projectId 查询项目成员时返回。
+	ProjectRelation *ProjectRelation
+}
+
+// ProjectMemberType 用户与当前查询项目的成员关系类型。
+type ProjectMemberType string
+
+const (
+	ProjectMemberInternal ProjectMemberType = "internal"
+	ProjectMemberExternal ProjectMemberType = "external"
+)
+
+// ProjectRelation 用户与当前查询项目的有效关系。
+type ProjectRelation struct {
+	MemberType ProjectMemberType
+	ExpireAt   *time.Time
 }
 
 // AllocationType 用户归属资源类型。
@@ -66,6 +82,47 @@ type ListFilter struct {
 	Undistributed bool
 }
 
+// ManagementListFilter 用户管理页面分页筛选条件。
+type ManagementListFilter struct {
+	TenantID uuid.UUID
+	Keyword  string
+	PageNum  int
+	PageSize int
+}
+
+// ManagementUser 用户管理列表项，附带所属租户和组织的展示名称。
+type ManagementUser struct {
+	User
+	TenantName string
+	OrgName    string
+}
+
+// ProfileProject 当前用户已分配项目的展示摘要。
+type ProfileProject struct {
+	ID   uuid.UUID
+	Name string
+}
+
+// ProfileRelations 当前用户资料页需要实时查询的资源归属信息。
+type ProfileRelations struct {
+	TenantName string
+	OrgName    string
+	Projects   []ProfileProject
+}
+
+// Profile 当前用户基础资料及其资源归属。
+type Profile struct {
+	User
+	TenantName string
+	OrgName    string
+	Projects   []ProfileProject
+}
+
+// ProfileRelationReader 查询不适合写入用户缓存的实时资源归属。
+type ProfileRelationReader interface {
+	GetProfileRelations(ctx context.Context, userID uuid.UUID) (*ProfileRelations, error)
+}
+
 // Repository 用户信息仓储接口。
 type Repository interface {
 	// UpdateByUserID 按外部用户 ID 更新已存在的用户。
@@ -78,6 +135,8 @@ type Repository interface {
 	UpdatePasswordHashByUsername(ctx context.Context, username, passwordHash, operator string) error
 	// List 查询未删除用户，只返回列表展示所需的 id/userId/nickname 字段。
 	List(ctx context.Context, filter ListFilter) ([]*User, error)
+	// ListManagement 分页查询用户管理列表，不返回密码哈希等认证敏感信息。
+	ListManagement(ctx context.Context, filter ManagementListFilter) ([]*ManagementUser, int64, error)
 	// ListAll 查询全部未删除用户，用于启动时预热缓存。
 	ListAll(ctx context.Context) ([]*User, error)
 	// Allocate 在单个事务内批量更新用户归属及项目成员关系。

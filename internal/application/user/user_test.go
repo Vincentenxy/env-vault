@@ -8,20 +8,53 @@ import (
 
 	"github.com/google/uuid"
 
+	auditdomain "env-vault/internal/domain/audit"
 	orgdomain "env-vault/internal/domain/organization"
 	projectdomain "env-vault/internal/domain/project"
 	tenantdomain "env-vault/internal/domain/tenant"
 	userdomain "env-vault/internal/domain/user"
 )
 
+type auditTxMarker struct{}
+
+type stubAuditRecorder struct {
+	record func(context.Context, *auditdomain.Event) error
+}
+
+func (s *stubAuditRecorder) Record(ctx context.Context, event *auditdomain.Event) error {
+	if s.record != nil {
+		return s.record(ctx, event)
+	}
+	return nil
+}
+
+func (s *stubAuditRecorder) RecordBatch(ctx context.Context, events []*auditdomain.Event) error {
+	for _, event := range events {
+		if err := s.Record(ctx, event); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type stubUserRepo struct {
-	updateByUserID     func(ctx context.Context, user *userdomain.User) error
-	getByUserID        func(ctx context.Context, userID string) (*userdomain.User, error)
-	getByUsername      func(ctx context.Context, username string) (*userdomain.User, error)
-	updatePasswordHash func(ctx context.Context, username, passwordHash, operator string) error
-	list               func(ctx context.Context, filter userdomain.ListFilter) ([]*userdomain.User, error)
-	listAll            func(ctx context.Context) ([]*userdomain.User, error)
-	allocate           func(ctx context.Context, change userdomain.AllocationChange) ([]*userdomain.User, []string, error)
+	updateByUserID      func(ctx context.Context, user *userdomain.User) error
+	getByUserID         func(ctx context.Context, userID string) (*userdomain.User, error)
+	getByUsername       func(ctx context.Context, username string) (*userdomain.User, error)
+	updatePasswordHash  func(ctx context.Context, username, passwordHash, operator string) error
+	list                func(ctx context.Context, filter userdomain.ListFilter) ([]*userdomain.User, error)
+	listManagement      func(ctx context.Context, filter userdomain.ManagementListFilter) ([]*userdomain.ManagementUser, int64, error)
+	getProfileRelations func(ctx context.Context, userID uuid.UUID) (*userdomain.ProfileRelations, error)
+	listAll             func(ctx context.Context) ([]*userdomain.User, error)
+	allocate            func(ctx context.Context, change userdomain.AllocationChange) ([]*userdomain.User, []string, error)
+	withTx              func(ctx context.Context, fn func(context.Context) error) error
+}
+
+func (s *stubUserRepo) WithTx(ctx context.Context, fn func(context.Context) error) error {
+	if s.withTx != nil {
+		return s.withTx(ctx, fn)
+	}
+	return fn(ctx)
 }
 
 func (s *stubUserRepo) UpdateByUserID(ctx context.Context, user *userdomain.User) error {
@@ -59,6 +92,20 @@ func (s *stubUserRepo) List(ctx context.Context, filter userdomain.ListFilter) (
 	return nil, nil
 }
 
+func (s *stubUserRepo) ListManagement(ctx context.Context, filter userdomain.ManagementListFilter) ([]*userdomain.ManagementUser, int64, error) {
+	if s.listManagement != nil {
+		return s.listManagement(ctx, filter)
+	}
+	return nil, 0, nil
+}
+
+func (s *stubUserRepo) GetProfileRelations(ctx context.Context, userID uuid.UUID) (*userdomain.ProfileRelations, error) {
+	if s.getProfileRelations != nil {
+		return s.getProfileRelations(ctx, userID)
+	}
+	return &userdomain.ProfileRelations{}, nil
+}
+
 func (s *stubUserRepo) ListAll(ctx context.Context) ([]*userdomain.User, error) {
 	if s.listAll != nil {
 		return s.listAll(ctx)
@@ -71,6 +118,40 @@ func (s *stubUserRepo) Allocate(ctx context.Context, change userdomain.Allocatio
 		return s.allocate(ctx, change)
 	}
 	return nil, nil, nil
+}
+
+func TestServiceUpdateRecordsAuditInsideTransaction(t *testing.T) {
+	user := &userdomain.User{
+		ID: uuid.New(), UserID: "u-1", Nickname: "Before", Username: "vince",
+		TenantID: uuid.New(), OrgID: uuid.New(),
+	}
+	repo := &stubUserRepo{
+		getByUserID:   func(context.Context, string) (*userdomain.User, error) { return user, nil },
+		getByUsername: func(context.Context, string) (*userdomain.User, error) { return user, nil },
+		withTx: func(ctx context.Context, fn func(context.Context) error) error {
+			return fn(context.WithValue(ctx, auditTxMarker{}, true))
+		},
+	}
+	recorder := &stubAuditRecorder{record: func(ctx context.Context, event *auditdomain.Event) error {
+		if marked, _ := ctx.Value(auditTxMarker{}).(bool); !marked {
+			t.Fatal("user update audit was not written in business transaction")
+		}
+		if event.ActionCode != userActionUpdate || event.ResourceID != "u-1" || event.ResultCode != auditdomain.ResultSuccess {
+			t.Fatalf("unexpected audit event: %+v", event)
+		}
+		if len(event.ChangeDetail) != 1 || event.ChangeDetail[0].Field != "nickname" {
+			t.Fatalf("unexpected changes: %+v", event.ChangeDetail)
+		}
+		return nil
+	}}
+	svc := NewService(repo, nil, nil).WithAuditRecorder(recorder)
+	updated, err := svc.Update(context.Background(), UpdateInput{
+		UserID: "u-1", Nickname: "After", Username: "vince",
+		TenantID: user.TenantID, OrgID: user.OrgID,
+	})
+	if err != nil || updated.Nickname != "After" {
+		t.Fatalf("Update() user=%+v err=%v", updated, err)
+	}
 }
 
 type stubProfileCache struct {
@@ -246,6 +327,24 @@ func TestService_List_AppliesFilterPriority(t *testing.T) {
 	}
 }
 
+func TestService_ListManagement_PassesNormalizedQueryToRepository(t *testing.T) {
+	tenantID := uuid.New()
+	want := &userdomain.ManagementUser{User: userdomain.User{ID: uuid.New(), UserID: "u-1"}}
+	repo := &stubUserRepo{listManagement: func(_ context.Context, filter userdomain.ManagementListFilter) ([]*userdomain.ManagementUser, int64, error) {
+		if filter.TenantID != tenantID || filter.Keyword != "tester" || filter.PageNum != 3 || filter.PageSize != 50 {
+			t.Fatalf("unexpected management filter: %+v", filter)
+		}
+		return []*userdomain.ManagementUser{want}, 101, nil
+	}}
+
+	items, total, err := NewService(repo, nil, nil).ListManagement(context.Background(), ManagementListInput{
+		TenantID: tenantID, Keyword: "  tester  ", PageNum: 3, PageSize: 50,
+	})
+	if err != nil || total != 101 || len(items) != 1 || items[0] != want {
+		t.Fatalf("unexpected result items=%+v total=%d err=%v", items, total, err)
+	}
+}
+
 func TestService_AllocateProject_ResolvesHierarchyAndRefreshesCache(t *testing.T) {
 	tenantID, orgID, projectID := uuid.New(), uuid.New(), uuid.New()
 	updated := &userdomain.User{ID: uuid.New(), UserID: "u-1", TenantID: tenantID, OrgID: orgID}
@@ -363,6 +462,37 @@ func TestService_GetProfile_ValidatesAndHandlesMissingUser(t *testing.T) {
 	}
 	if _, err := svc.GetProfile(context.Background(), "missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestService_GetProfileDetail_AddsCurrentResourceRelations(t *testing.T) {
+	user := testDomainUser("u-1")
+	projectID := uuid.New()
+	repo := &stubUserRepo{
+		getByUserID: func(context.Context, string) (*userdomain.User, error) {
+			return user, nil
+		},
+		getProfileRelations: func(_ context.Context, userID uuid.UUID) (*userdomain.ProfileRelations, error) {
+			if userID != user.ID {
+				t.Fatalf("internal user id = %s", userID)
+			}
+			return &userdomain.ProfileRelations{
+				TenantName: "平台中心",
+				OrgName:    "研发部门",
+				Projects:   []userdomain.ProfileProject{{ID: projectID, Name: "EnvVault"}},
+			}, nil
+		},
+	}
+
+	profile, err := NewService(repo, nil, nil).GetProfileDetail(context.Background(), "u-1")
+	if err != nil {
+		t.Fatalf("GetProfileDetail() error = %v", err)
+	}
+	if profile.UserID != "u-1" || profile.TenantName != "平台中心" || profile.OrgName != "研发部门" {
+		t.Fatalf("unexpected profile: %+v", profile)
+	}
+	if len(profile.Projects) != 1 || profile.Projects[0].ID != projectID || profile.Projects[0].Name != "EnvVault" {
+		t.Fatalf("unexpected projects: %+v", profile.Projects)
 	}
 }
 

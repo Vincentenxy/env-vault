@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	tenantdomain "env-vault/internal/domain/tenant"
+	"env-vault/internal/infrastructure/persistence"
 )
 
 // tenantPO tenant_info 表持久化对象（数据库列名下划线）
@@ -45,16 +46,22 @@ func NewRepository(db *gorm.DB) *Repository {
 	return &Repository{db: db}
 }
 
+func (r *Repository) WithTx(ctx context.Context, fn func(context.Context) error) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return fn(persistence.WithTx(ctx, tx))
+	})
+}
+
 // Create 创建租户
 func (r *Repository) Create(ctx context.Context, t *tenantdomain.Tenant) error {
 	po := toPO(t)
-	return r.db.WithContext(ctx).Create(po).Error
+	return persistence.TxDB(ctx, r.db).WithContext(ctx).Create(po).Error
 }
 
 // Update 更新租户（按 ID）
 func (r *Repository) Update(ctx context.Context, t *tenantdomain.Tenant) error {
 	po := toPO(t)
-	return r.db.WithContext(ctx).
+	return persistence.TxDB(ctx, r.db).WithContext(ctx).
 		Model(&tenantPO{}).
 		Where("id = ? AND is_deleted = false", po.ID).
 		Updates(map[string]any{
@@ -69,7 +76,7 @@ func (r *Repository) Update(ctx context.Context, t *tenantdomain.Tenant) error {
 // Delete 软删除租户（按 ID）
 func (r *Repository) Delete(ctx context.Context, id uuid.UUID, deleteBy string) error {
 	now := time.Now()
-	return r.db.WithContext(ctx).
+	return persistence.TxDB(ctx, r.db).WithContext(ctx).
 		Model(&tenantPO{}).
 		Where("id = ? AND is_deleted = false", id).
 		Updates(map[string]any{
@@ -84,7 +91,7 @@ func (r *Repository) Delete(ctx context.Context, id uuid.UUID, deleteBy string) 
 // GetByID 按 ID 查询租户（不含已删除）
 func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*tenantdomain.Tenant, error) {
 	var po tenantPO
-	err := withCounts(r.db.WithContext(ctx)).
+	err := withCounts(persistence.TxDB(ctx, r.db).WithContext(ctx)).
 		Where("id = ? AND is_deleted = false", id).
 		Take(&po).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -99,7 +106,7 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*tenantdomain.T
 // GetByCode 按编码查询租户（不含已删除）
 func (r *Repository) GetByCode(ctx context.Context, code string) (*tenantdomain.Tenant, error) {
 	var po tenantPO
-	err := r.db.WithContext(ctx).
+	err := persistence.TxDB(ctx, r.db).WithContext(ctx).
 		Where("code = ? AND is_deleted = false", code).
 		First(&po).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -113,7 +120,7 @@ func (r *Repository) GetByCode(ctx context.Context, code string) (*tenantdomain.
 
 // List 分页查询租户列表（不含已删除）
 func (r *Repository) List(ctx context.Context, filter tenantdomain.ListFilter) ([]*tenantdomain.Tenant, int64, error) {
-	query := r.db.WithContext(ctx).Model(&tenantPO{}).Where("is_deleted = false")
+	query := persistence.TxDB(ctx, r.db).WithContext(ctx).Model(&tenantPO{}).Where("is_deleted = false")
 
 	if filter.Code != "" {
 		query = query.Where("code ILIKE ?", "%"+filter.Code+"%")
@@ -146,7 +153,7 @@ func (r *Repository) List(ctx context.Context, filter tenantdomain.ListFilter) (
 
 // ListAccessible 查询当前用户可访问的未删除租户；权限未启用时返回全部租户。
 func (r *Repository) ListAccessible(ctx context.Context, filter tenantdomain.AccessibleFilter) ([]*tenantdomain.Tenant, error) {
-	query := r.db.WithContext(ctx).
+	query := persistence.TxDB(ctx, r.db).WithContext(ctx).
 		Table("tenant_info AS t").
 		Select("DISTINCT t.*").
 		Where("t.is_deleted = false")

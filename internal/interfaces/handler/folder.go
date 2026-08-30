@@ -122,7 +122,7 @@ func (h *FolderHandler) Create(c *gin.Context) {
 	var err error
 	if req.ParentFolderID == nil || *req.ParentFolderID == uuid.Nil {
 		// 创建接口1：项目下创建顶级目录，默认在所有环境创建
-		folders, err = h.svc.CreateTop(c, folderapp.CreateTopInput{
+		folders, err = h.svc.CreateTop(withHTTPAuditContext(c), folderapp.CreateTopInput{
 			ProjectID:  req.ProjectID,
 			Code:       req.Code,
 			Name:       req.Name,
@@ -133,7 +133,7 @@ func (h *FolderHandler) Create(c *gin.Context) {
 		}, operator)
 	} else {
 		// 创建接口2：在 groups 目录下创建二级目录
-		folders, err = h.svc.CreateSub(c, folderapp.CreateSubInput{
+		folders, err = h.svc.CreateSub(withHTTPAuditContext(c), folderapp.CreateSubInput{
 			ParentFolderID: *req.ParentFolderID,
 			Code:           req.Code,
 			Name:           req.Name,
@@ -168,7 +168,7 @@ func (h *FolderHandler) Update(c *gin.Context) {
 		return
 	}
 
-	err := h.svc.Update(c, folderapp.UpdateInput{
+	err := h.svc.Update(withHTTPAuditContext(c), folderapp.UpdateInput{
 		GroupID:    req.GroupID,
 		Name:       req.Name,
 		Remark:     req.Remark,
@@ -195,7 +195,7 @@ func (h *FolderHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	err := h.svc.Delete(c, folderapp.DeleteInput{
+	err := h.svc.Delete(withHTTPAuditContext(c), folderapp.DeleteInput{
 		GroupID: req.GroupID,
 	}, operator(c))
 	h.respondError(c, err)
@@ -218,7 +218,7 @@ func (h *FolderHandler) Detail(c *gin.Context) {
 		return
 	}
 
-	f, err := h.svc.GetByID(c, req.ID)
+	f, err := h.svc.GetByID(withHTTPAuditContext(c), req.ID)
 	h.respondError(c, err)
 	if err != nil {
 		return
@@ -248,7 +248,7 @@ func (h *FolderHandler) List(c *gin.Context) {
 	}
 	req.Normalize()
 
-	folders, total, err := h.svc.List(c, folderapp.ListInput{
+	folders, total, err := h.svc.List(withHTTPAuditContext(c), folderapp.ListInput{
 		ProjectID:      req.ProjectID,
 		ParentFolderID: req.ParentFolderID,
 		Code:           req.Code,

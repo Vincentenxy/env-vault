@@ -224,7 +224,8 @@ func (r *Repository) UpdateRemarkByGroupID(ctx context.Context, groupID uuid.UUI
 // fn 返回 nil 则提交事务；返回 error 则回滚。
 func (r *Repository) WithTx(ctx context.Context, fn func(ctx context.Context) error) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		txCtx := context.WithValue(ctx, txKey{}, tx)
+		txCtx := persistence.WithTx(ctx, tx)
+		txCtx = context.WithValue(txCtx, txKey{}, tx)
 		return fn(txCtx)
 	})
 }

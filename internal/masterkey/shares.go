@@ -165,6 +165,12 @@ func (m *Manager) RestoreShares(tokens []string) error {
 
 // SubmitShare 校验并累计一份分片，达到阈值时立即恢复并激活主密钥
 func (m *Manager) SubmitShare(token string) error {
+	return m.SubmitShareWithCommit(token, nil)
+}
+
+// SubmitShareWithCommit 在持有状态锁时先执行 commit，再提交新的分片状态。
+// commit 失败时恢复调用前状态，供审计写入与内存状态保持一致。
+func (m *Manager) SubmitShareWithCommit(token string, commit func(Status) error) error {
 	share, err := decodeShareToken(token)
 	if err != nil {
 		return err
@@ -176,6 +182,19 @@ func (m *Manager) SubmitShare(token string) error {
 	if m.cipher != nil {
 		return ErrAlreadyActivated
 	}
+	previousShareSetID := m.shareSetID
+	previousPendingShares := clonePendingShares(m.pendingShares)
+	restore := func() {
+		m.clearPendingSharesLocked()
+		m.shareSetID = previousShareSetID
+		m.pendingShares = previousPendingShares
+		previousPendingShares = nil
+	}
+	clearPrevious := func() {
+		clearPendingShareMap(previousPendingShares)
+		previousPendingShares = nil
+	}
+	defer clearPrevious()
 
 	keySetID := share.keySetID.String()
 	if m.shareSetID == "" {
@@ -189,6 +208,13 @@ func (m *Manager) SubmitShare(token string) error {
 	}
 	m.pendingShares[share.index] = bytes.Clone(share.data)
 	if len(m.pendingShares) < RequiredShares {
+		if commit != nil {
+			if err := commit(Status{Ready: false, Source: SourceUnknown, SubmittedShares: len(m.pendingShares)}); err != nil {
+				restore()
+				return err
+			}
+		}
+		clearPrevious()
 		return nil
 	}
 
@@ -198,20 +224,51 @@ func (m *Manager) SubmitShare(token string) error {
 	}
 	key, err := shamir.Combine(parts)
 	if err != nil {
+		restore()
 		return fmt.Errorf("combine master key shares: %w", ErrInvalidShare)
 	}
 	defer clear(key)
 	if len(key) != masterKeySize {
+		restore()
 		return fmt.Errorf("%w: recovered key must be %d bytes", ErrInvalidShare, masterKeySize)
 	}
 	cipher, err := crypto.New(base64.StdEncoding.EncodeToString(key))
 	if err != nil {
+		restore()
 		return fmt.Errorf("activate master key: %w", err)
 	}
+	if commit != nil {
+		if err := commit(Status{Ready: true, Source: SourceShares, SubmittedShares: 0}); err != nil {
+			restore()
+			return err
+		}
+	}
 	m.cipher = cipher
+	// 分片恢复也需要保留一份内存中的主密钥，供集群内部密钥传输使用。
+	// 原始 key 会在函数返回前由 defer clear 清理，因此这里保存独立副本。
+	m.masterKey = bytes.Clone(key)
 	m.source = SourceShares
 	m.clearPendingSharesLocked()
+	clearPrevious()
 	return nil
+}
+
+func clonePendingShares(source map[byte][]byte) map[byte][]byte {
+	if len(source) == 0 {
+		return nil
+	}
+	cloned := make(map[byte][]byte, len(source))
+	for index, share := range source {
+		cloned[index] = bytes.Clone(share)
+	}
+	return cloned
+}
+
+func clearPendingShareMap(shares map[byte][]byte) {
+	for index, share := range shares {
+		clear(share)
+		delete(shares, index)
+	}
 }
 
 // encodeShareToken 将系统生成的原始分片编码为可传输的版本化 Token

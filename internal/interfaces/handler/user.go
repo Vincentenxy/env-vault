@@ -9,6 +9,7 @@ import (
 
 	userapp "env-vault/internal/application/user"
 	userdomain "env-vault/internal/domain/user"
+	"env-vault/pkg/page"
 	"env-vault/pkg/response"
 	"env-vault/pkg/userctx"
 )
@@ -41,6 +42,13 @@ type UserListRequest struct {
 	Undistributed bool      `json:"undistributed"`
 }
 
+// UserManagementListRequest 用户管理页面分页查询请求。
+type UserManagementListRequest struct {
+	TenantID uuid.UUID `json:"tenantId"`
+	Keyword  string    `json:"keyword"`
+	page.Request
+}
+
 // UserAllocateRequest 用户批量分配请求。
 type UserAllocateRequest struct {
 	Type       string    `json:"type"`
@@ -51,10 +59,34 @@ type UserAllocateRequest struct {
 
 // UserListItemDTO 用户列表项，只包含公开展示字段。
 type UserListItemDTO struct {
-	ID        uuid.UUID `json:"id"`
-	UserID    string    `json:"userId"`
-	Nickname  string    `json:"nickname"`
-	IsBlocked bool      `json:"isBlocked"`
+	ID              uuid.UUID           `json:"id"`
+	UserID          string              `json:"userId"`
+	Nickname        string              `json:"nickname"`
+	IsBlocked       bool                `json:"isBlocked"`
+	ProjectRelation *ProjectRelationDTO `json:"projectRelation,omitempty"`
+}
+
+// ProjectRelationDTO 用户与当前查询项目的关系。
+type ProjectRelationDTO struct {
+	MemberType userdomain.ProjectMemberType `json:"memberType"`
+	ExpireAt   *time.Time                   `json:"expireAt"`
+}
+
+// UserManagementListItemDTO 用户管理列表项，不包含密码哈希等认证敏感字段。
+type UserManagementListItemDTO struct {
+	ID         uuid.UUID `json:"id"`
+	UserID     string    `json:"userId"`
+	Nickname   string    `json:"nickname"`
+	Username   string    `json:"username"`
+	Email      string    `json:"email"`
+	Phone      string    `json:"phone"`
+	TenantID   uuid.UUID `json:"tenantId"`
+	TenantName string    `json:"tenantName"`
+	OrgID      uuid.UUID `json:"orgId"`
+	OrgName    string    `json:"orgName"`
+	IsBlocked  bool      `json:"isBlocked"`
+	CreateAt   time.Time `json:"createAt"`
+	UpdateAt   time.Time `json:"updateAt"`
 }
 
 // UserAllocateResponse 用户批量分配结果。
@@ -79,13 +111,27 @@ type UserDTO struct {
 	UpdateAt  time.Time `json:"updateAt"`
 }
 
+// UserProfileProjectDTO 当前用户已分配项目的展示摘要。
+type UserProfileProjectDTO struct {
+	ID   uuid.UUID `json:"id"`
+	Name string    `json:"name"`
+}
+
+// UserProfileDTO 当前用户资料及其资源归属。
+type UserProfileDTO struct {
+	UserDTO
+	TenantName  string                  `json:"tenantName"`
+	OrgName     string                  `json:"orgName"`
+	ProjectList []UserProfileProjectDTO `json:"projectList"`
+}
+
 // Me 获取当前认证用户资料。
 // @Summary 获取当前用户信息
 // @Description 从 JWT 获取当前用户标识，并返回数据库中的用户资料，不包含密码等敏感信息
 // @Tags auth
 // @Produce json
 // @Security BearerAuth
-// @Success 200 {object} response.Response{data=UserDTO}
+// @Success 200 {object} response.Response{data=UserProfileDTO}
 // @Failure 401 {object} response.Response
 // @Router /api/v1/auth/me [get]
 func (h *UserHandler) Me(c *gin.Context) {
@@ -95,12 +141,12 @@ func (h *UserHandler) Me(c *gin.Context) {
 		return
 	}
 
-	user, err := h.svc.GetProfile(c, authUser.UserID)
+	profile, err := h.svc.GetProfileDetail(withHTTPAuditContext(c), authUser.UserID)
 	h.respondError(c, err)
 	if err != nil {
 		return
 	}
-	response.Success(c, toUserDTO(user))
+	response.Success(c, toUserProfileDTO(profile))
 }
 
 // List 查询用户列表。
@@ -111,7 +157,7 @@ func (h *UserHandler) List(c *gin.Context) {
 		return
 	}
 
-	users, err := h.svc.List(c, userapp.ListInput{
+	users, err := h.svc.List(withHTTPAuditContext(c), userapp.ListInput{
 		TenantID:      req.TenantID,
 		OrgID:         req.OrgID,
 		ProjectID:     req.ProjectID,
@@ -124,14 +170,57 @@ func (h *UserHandler) List(c *gin.Context) {
 
 	list := make([]UserListItemDTO, 0, len(users))
 	for _, user := range users {
-		list = append(list, UserListItemDTO{
+		item := UserListItemDTO{
 			ID:        user.ID,
 			UserID:    user.UserID,
 			Nickname:  user.Nickname,
 			IsBlocked: user.IsBlocked,
-		})
+		}
+		if user.ProjectRelation != nil {
+			item.ProjectRelation = &ProjectRelationDTO{
+				MemberType: user.ProjectRelation.MemberType,
+				ExpireAt:   user.ProjectRelation.ExpireAt,
+			}
+		}
+		list = append(list, item)
 	}
 	response.Success(c, list)
+}
+
+// ManageList 分页查询用户管理列表。
+// TODO(permission): 权限中心接入后，此接口必须由 user:manage 后端授权中间件保护。
+// @Summary 查询用户管理列表
+// @Tags user
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param request body UserManagementListRequest true "用户管理查询条件"
+// @Success 200 {object} response.Response{data=page.Response[UserManagementListItemDTO]}
+// @Router /api/v1/user/manage/list [post]
+func (h *UserHandler) ManageList(c *gin.Context) {
+	var req UserManagementListRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, err)
+		return
+	}
+	req.Normalize()
+
+	users, total, err := h.svc.ListManagement(withHTTPAuditContext(c), userapp.ManagementListInput{
+		TenantID: req.TenantID,
+		Keyword:  req.Keyword,
+		PageNum:  req.PageNum,
+		PageSize: req.PageSize,
+	})
+	h.respondError(c, err)
+	if err != nil {
+		return
+	}
+
+	list := make([]UserManagementListItemDTO, 0, len(users))
+	for _, user := range users {
+		list = append(list, toUserManagementListItemDTO(user))
+	}
+	response.Success(c, page.Response[UserManagementListItemDTO]{Total: total, List: list})
 }
 
 // Allocate 批量分配或移除用户的租户、组织、项目归属。
@@ -142,7 +231,7 @@ func (h *UserHandler) Allocate(c *gin.Context) {
 		return
 	}
 
-	affected, err := h.svc.Allocate(c, userapp.AllocateInput{
+	affected, err := h.svc.Allocate(withHTTPAuditContext(c), userapp.AllocateInput{
 		Type: req.Type, Operation: req.Operate, ResourceID: req.ResourceID,
 		UserIDs: req.UserIDList, Operator: operator(c),
 	})
@@ -171,7 +260,7 @@ func (h *UserHandler) Update(c *gin.Context) {
 		return
 	}
 
-	user, err := h.svc.Update(c, userapp.UpdateInput{
+	user, err := h.svc.Update(withHTTPAuditContext(c), userapp.UpdateInput{
 		UserID:   authUser.UserID,
 		Nickname: req.Nickname,
 		Username: req.Username,
@@ -219,5 +308,27 @@ func toUserDTO(user *userdomain.User) *UserDTO {
 		UpdateBy:  user.UpdateBy,
 		CreateAt:  user.CreateAt,
 		UpdateAt:  user.UpdateAt,
+	}
+}
+
+func toUserProfileDTO(profile *userdomain.Profile) *UserProfileDTO {
+	projects := make([]UserProfileProjectDTO, 0, len(profile.Projects))
+	for _, project := range profile.Projects {
+		projects = append(projects, UserProfileProjectDTO{ID: project.ID, Name: project.Name})
+	}
+	return &UserProfileDTO{
+		UserDTO:     *toUserDTO(&profile.User),
+		TenantName:  profile.TenantName,
+		OrgName:     profile.OrgName,
+		ProjectList: projects,
+	}
+}
+
+func toUserManagementListItemDTO(user *userdomain.ManagementUser) UserManagementListItemDTO {
+	return UserManagementListItemDTO{
+		ID: user.ID, UserID: user.UserID, Nickname: user.Nickname, Username: user.Username,
+		Email: user.Email, Phone: user.Phone, TenantID: user.TenantID, TenantName: user.TenantName,
+		OrgID: user.OrgID, OrgName: user.OrgName, IsBlocked: user.IsBlocked,
+		CreateAt: user.CreateAt, UpdateAt: user.UpdateAt,
 	}
 }

@@ -77,7 +77,8 @@ type ListOrgRequest struct {
 
 // WithProjectResponse 组织项目树响应。
 type WithProjectResponse struct {
-	OrgList []OrganizationWithProjectsDTO `json:"orgList"`
+	OrgList                  []OrganizationWithProjectsDTO `json:"orgList"`
+	CollaborationProjectList []CollaborationProjectDTO     `json:"collaborationProjectList"`
 }
 
 // OrganizationWithProjectsDTO 组织及其项目摘要。
@@ -95,6 +96,13 @@ type ProjectSummaryDTO struct {
 	Manager string    `json:"manager"`
 }
 
+// CollaborationProjectDTO 跨组织协作项目摘要，不暴露所属组织。
+type CollaborationProjectDTO struct {
+	ID       uuid.UUID  `json:"id"`
+	Name     string     `json:"name"`
+	ExpireAt *time.Time `json:"expireAt"`
+}
+
 // Create 创建组织
 func (h *OrganizationHandler) Create(c *gin.Context) {
 	var req CreateOrgRequest
@@ -108,7 +116,7 @@ func (h *OrganizationHandler) Create(c *gin.Context) {
 		return
 	}
 
-	o, err := h.svc.Create(c, orgapp.CreateInput{
+	o, err := h.svc.Create(withHTTPAuditContext(c), orgapp.CreateInput{
 		Code:     req.Code,
 		Name:     req.Name,
 		Remark:   req.Remark,
@@ -135,7 +143,7 @@ func (h *OrganizationHandler) Update(c *gin.Context) {
 		return
 	}
 
-	o, err := h.svc.Update(c, orgapp.UpdateInput{
+	o, err := h.svc.Update(withHTTPAuditContext(c), orgapp.UpdateInput{
 		ID:      req.ID,
 		Name:    req.Name,
 		Remark:  req.Remark,
@@ -161,7 +169,7 @@ func (h *OrganizationHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	err := h.svc.Delete(c, req.ID, operator(c))
+	err := h.svc.Delete(withHTTPAuditContext(c), req.ID, operator(c))
 	h.respondError(c, err)
 	if err != nil {
 		return
@@ -182,7 +190,7 @@ func (h *OrganizationHandler) Detail(c *gin.Context) {
 		return
 	}
 
-	o, err := h.svc.GetByID(c, req.ID)
+	o, err := h.svc.GetByID(withHTTPAuditContext(c), req.ID)
 	h.respondError(c, err)
 	if err != nil {
 		return
@@ -199,7 +207,7 @@ func (h *OrganizationHandler) List(c *gin.Context) {
 	}
 	req.Normalize()
 
-	orgs, total, err := h.svc.List(c, orgapp.ListInput{
+	orgs, total, err := h.svc.List(withHTTPAuditContext(c), orgapp.ListInput{
 		Code:     req.Code,
 		Name:     req.Name,
 		TenantID: req.TenantID,
@@ -223,14 +231,14 @@ func (h *OrganizationHandler) List(c *gin.Context) {
 
 // WithProject 返回全部组织及组织下的项目。
 func (h *OrganizationHandler) WithProject(c *gin.Context) {
-	orgs, err := h.svc.ListWithProjects(c, orgapp.WithProjectsInput{UserID: operator(c)})
+	result, err := h.svc.ListWithProjects(withHTTPAuditContext(c), orgapp.WithProjectsInput{UserID: operator(c)})
 	h.respondError(c, err)
 	if err != nil {
 		return
 	}
 
-	orgList := make([]OrganizationWithProjectsDTO, 0, len(orgs))
-	for _, org := range orgs {
+	orgList := make([]OrganizationWithProjectsDTO, 0, len(result.Organizations))
+	for _, org := range result.Organizations {
 		projects := make([]ProjectSummaryDTO, 0, len(org.ProjectList))
 		for _, project := range org.ProjectList {
 			projects = append(projects, ProjectSummaryDTO{ID: project.ID, Name: project.Name, Manager: project.Manager})
@@ -242,7 +250,18 @@ func (h *OrganizationHandler) WithProject(c *gin.Context) {
 			ProjectList: projects,
 		})
 	}
-	response.Success(c, WithProjectResponse{OrgList: orgList})
+	collaborationProjects := make([]CollaborationProjectDTO, 0, len(result.CollaborationProjects))
+	for _, project := range result.CollaborationProjects {
+		collaborationProjects = append(collaborationProjects, CollaborationProjectDTO{
+			ID:       project.ID,
+			Name:     project.Name,
+			ExpireAt: project.ExpireAt,
+		})
+	}
+	response.Success(c, WithProjectResponse{
+		OrgList:                  orgList,
+		CollaborationProjectList: collaborationProjects,
+	})
 }
 
 // respondError 应用层错误统一映射为业务错误码

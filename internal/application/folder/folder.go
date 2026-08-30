@@ -13,6 +13,8 @@ import (
 	"github.com/google/uuid"
 
 	app "env-vault/internal/application"
+	auditapp "env-vault/internal/application/audit"
+	auditdomain "env-vault/internal/domain/audit"
 	envdomain "env-vault/internal/domain/environment"
 	folderdomain "env-vault/internal/domain/folder"
 )
@@ -90,9 +92,15 @@ type IService interface {
 
 // Service 文件夹应用服务实现（依赖文件夹仓储与环境仓储做跨环境编排）
 type Service struct {
-	repo         folderdomain.Repository
-	envRepo      envdomain.Repository
-	nameResolver app.NicknameResolver
+	repo          folderdomain.Repository
+	envRepo       envdomain.Repository
+	nameResolver  app.NicknameResolver
+	auditRecorder auditdomain.Recorder
+}
+
+func (s *Service) WithAuditRecorder(recorder auditdomain.Recorder) *Service {
+	s.auditRecorder = recorder
+	return s
 }
 
 // NewService 创建文件夹应用服务
@@ -110,6 +118,22 @@ var _ IService = (*Service)(nil)
 // CreateTop 创建顶级文件夹：项目下所有环境各创建一条，全环境共享同一 group_id
 // 入参必填性校验已在 handler 层完成，service 仅负责业务编排。
 func (s *Service) CreateTop(ctx context.Context, in CreateTopInput, operator string) ([]*folderdomain.Folder, error) {
+	transactor, _ := s.repo.(auditapp.Transactor)
+	return auditapp.RunWrite(ctx, s.auditRecorder, transactor, false,
+		func(writeCtx context.Context) ([]*folderdomain.Folder, *auditdomain.Event, error) {
+			folders, err := s.createTop(writeCtx, in, operator)
+			if err != nil {
+				return nil, nil, err
+			}
+			return folders, folderEvent("folder.create", auditdomain.ResultSuccess, folders[0], uuid.Nil, "", in.ProjectID.String(), operator, folderChanges(nil, folders[0]), map[string]any{"environmentCount": len(folders)}), nil
+		},
+		func(operationErr error) *auditdomain.Event {
+			return folderFailure(folderEvent("folder.create", auditdomain.ResultFailure, nil, uuid.Nil, in.Name, in.ProjectID.String(), operator, nil, nil), operationErr)
+		},
+	)
+}
+
+func (s *Service) createTop(ctx context.Context, in CreateTopInput, operator string) ([]*folderdomain.Folder, error) {
 	if err := folderdomain.ValidateKeyPattern(in.KeyPattern); err != nil {
 		return nil, ErrInvalidKeyPattern
 	}
@@ -168,6 +192,30 @@ func (s *Service) CreateTop(ctx context.Context, in CreateTopInput, operator str
 // 子 folder 与父 folder 分属不同业务实体，子 folder 自有独立的 group_id
 // 入参必填性校验已在 handler 层完成，service 仅负责业务编排。
 func (s *Service) CreateSub(ctx context.Context, in CreateSubInput, operator string) ([]*folderdomain.Folder, error) {
+	transactor, _ := s.repo.(auditapp.Transactor)
+	return auditapp.RunWrite(ctx, s.auditRecorder, transactor, false,
+		func(writeCtx context.Context) ([]*folderdomain.Folder, *auditdomain.Event, error) {
+			folders, err := s.createSub(writeCtx, in, operator)
+			if err != nil {
+				return nil, nil, err
+			}
+			projectID := ""
+			if len(folders) > 0 {
+				if environment, envErr := s.envRepo.GetByID(writeCtx, folders[0].EnvID); envErr != nil {
+					return nil, nil, envErr
+				} else if environment != nil {
+					projectID = environment.ProjectID.String()
+				}
+			}
+			return folders, folderEvent("folder.create", auditdomain.ResultSuccess, folders[0], uuid.Nil, "", projectID, operator, folderChanges(nil, folders[0]), map[string]any{"environmentCount": len(folders)}), nil
+		},
+		func(operationErr error) *auditdomain.Event {
+			return folderFailure(folderEvent("folder.create", auditdomain.ResultFailure, nil, uuid.Nil, in.Name, "", operator, nil, nil), operationErr)
+		},
+	)
+}
+
+func (s *Service) createSub(ctx context.Context, in CreateSubInput, operator string) ([]*folderdomain.Folder, error) {
 	if err := folderdomain.ValidateKeyPattern(in.KeyPattern); err != nil {
 		return nil, ErrInvalidKeyPattern
 	}
@@ -252,6 +300,46 @@ func (s *Service) CreateSub(ctx context.Context, in CreateSubInput, operator str
 
 // Update 批量更新文件夹（按 group_id 全环境同步）
 func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) error {
+	if s.auditRecorder == nil {
+		return s.update(ctx, in, operator)
+	}
+	transactor, _ := s.repo.(auditapp.Transactor)
+	_, err := auditapp.RunWrite(ctx, s.auditRecorder, transactor, false,
+		func(writeCtx context.Context) (struct{}, *auditdomain.Event, error) {
+			before, err := s.repo.GetByGroupID(writeCtx, in.GroupID)
+			if err != nil {
+				return struct{}{}, nil, err
+			}
+			if before == nil {
+				return struct{}{}, nil, ErrNotFound
+			}
+			projectID := ""
+			if environment, envErr := s.envRepo.GetByID(writeCtx, before.EnvID); envErr != nil {
+				return struct{}{}, nil, envErr
+			} else if environment != nil {
+				projectID = environment.ProjectID.String()
+			}
+			if err := s.update(writeCtx, in, operator); err != nil {
+				return struct{}{}, nil, err
+			}
+			after := *before
+			after.Name, after.Remark = in.Name, in.Remark
+			if manager := strings.TrimSpace(in.Manager); manager != "" {
+				after.Manager = manager
+			}
+			if in.KeyPattern != nil {
+				after.KeyPattern = *in.KeyPattern
+			}
+			return struct{}{}, folderEvent("folder.update", auditdomain.ResultSuccess, &after, in.GroupID, in.Name, projectID, operator, folderChanges(before, &after), nil), nil
+		},
+		func(operationErr error) *auditdomain.Event {
+			return folderFailure(folderEvent("folder.update", auditdomain.ResultFailure, nil, in.GroupID, in.Name, "", operator, nil, nil), operationErr)
+		},
+	)
+	return err
+}
+
+func (s *Service) update(ctx context.Context, in UpdateInput, operator string) error {
 	if in.KeyPattern != nil {
 		if err := folderdomain.ValidateKeyPattern(*in.KeyPattern); err != nil {
 			return ErrInvalidKeyPattern
@@ -271,6 +359,35 @@ func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) e
 
 // Delete 删除文件夹：按 group_id 软删除全环境记录
 func (s *Service) Delete(ctx context.Context, in DeleteInput, operator string) error {
+	transactor, _ := s.repo.(auditapp.Transactor)
+	_, err := auditapp.RunWrite(ctx, s.auditRecorder, transactor, false,
+		func(writeCtx context.Context) (struct{}, *auditdomain.Event, error) {
+			existing, err := s.repo.GetByGroupID(writeCtx, in.GroupID)
+			if err != nil {
+				return struct{}{}, nil, err
+			}
+			if existing == nil {
+				return struct{}{}, nil, ErrNotFound
+			}
+			projectID := ""
+			if environment, envErr := s.envRepo.GetByID(writeCtx, existing.EnvID); envErr != nil {
+				return struct{}{}, nil, envErr
+			} else if environment != nil {
+				projectID = environment.ProjectID.String()
+			}
+			if err := s.delete(writeCtx, in, operator); err != nil {
+				return struct{}{}, nil, err
+			}
+			return struct{}{}, folderEvent("folder.delete", auditdomain.ResultSuccess, existing, in.GroupID, "", projectID, operator, nil, nil), nil
+		},
+		func(operationErr error) *auditdomain.Event {
+			return folderFailure(folderEvent("folder.delete", auditdomain.ResultFailure, nil, in.GroupID, "", "", operator, nil, nil), operationErr)
+		},
+	)
+	return err
+}
+
+func (s *Service) delete(ctx context.Context, in DeleteInput, operator string) error {
 	// 先确认存在再删除（与其它资源删除语义一致）
 	existing, err := s.repo.GetByGroupID(ctx, in.GroupID)
 	if err != nil {
@@ -286,15 +403,32 @@ func (s *Service) Delete(ctx context.Context, in DeleteInput, operator string) e
 
 // GetByID 按 ID 查询文件夹
 func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*folderdomain.Folder, error) {
-	f, err := s.repo.GetByID(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if f == nil {
-		return nil, ErrNotFound
-	}
-	s.enrichFolders(ctx, []*folderdomain.Folder{f})
-	return f, nil
+	return auditapp.RunRead(ctx, s.auditRecorder,
+		func(readCtx context.Context) (*folderdomain.Folder, error) {
+			f, err := s.repo.GetByID(readCtx, id)
+			if err != nil {
+				return nil, err
+			}
+			if f == nil {
+				return nil, ErrNotFound
+			}
+			s.enrichFolders(readCtx, []*folderdomain.Folder{f})
+			return f, nil
+		},
+		func(f *folderdomain.Folder, operationErr error) *auditdomain.Event {
+			projectID := ""
+			if f != nil {
+				if environment, err := s.envRepo.GetByID(ctx, f.EnvID); err == nil && environment != nil {
+					projectID = environment.ProjectID.String()
+				}
+			}
+			event := folderEvent("folder.read", auditdomain.ResultSuccess, f, id, "", projectID, "", nil, nil)
+			if operationErr != nil {
+				return folderFailure(event, operationErr)
+			}
+			return event
+		},
+	)
 }
 
 // List 分页查询文件夹列表（按 group_id 聚合，屏蔽环境层级）
@@ -302,6 +436,27 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*folderdomain.Fold
 //   - in.ParentFolderID 非空：查询该 parent 下的子目录
 //   - in.ParentFolderID 为空：按 in.ProjectID 查询项目下顶级目录
 func (s *Service) List(ctx context.Context, in ListInput) ([]*folderdomain.Folder, int64, error) {
+	type listResult struct {
+		items []*folderdomain.Folder
+		total int64
+	}
+	result, err := auditapp.RunRead(ctx, s.auditRecorder,
+		func(readCtx context.Context) (listResult, error) {
+			items, total, err := s.list(readCtx, in)
+			return listResult{items: items, total: total}, err
+		},
+		func(result listResult, operationErr error) *auditdomain.Event {
+			event := folderEvent("folder.list", auditdomain.ResultSuccess, nil, uuid.Nil, "", in.ProjectID.String(), "", nil, map[string]any{"resultCount": len(result.items), "pageNum": in.PageNum, "pageSize": in.PageSize})
+			if operationErr != nil {
+				return folderFailure(event, operationErr)
+			}
+			return event
+		},
+	)
+	return result.items, result.total, err
+}
+
+func (s *Service) list(ctx context.Context, in ListInput) ([]*folderdomain.Folder, int64, error) {
 	var groupIDs []uuid.UUID
 	if in.ParentFolderID != nil && *in.ParentFolderID != uuid.Nil {
 		// 子目录查询

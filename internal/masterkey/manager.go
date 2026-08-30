@@ -2,6 +2,8 @@
 package masterkey
 
 import (
+	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"sync"
@@ -49,6 +51,7 @@ type Status struct {
 type Manager struct {
 	mu            sync.RWMutex    // 保护激活状态和待恢复分片的并发读写
 	cipher        Cryptor         // 激活后创建的 AES-256-GCM 加解密器
+	masterKey     []byte          // 激活后的主密钥，仅保存在当前进程内存中，供内部密钥引导使用
 	source        Source          // 成功激活当前加解密器的密钥来源
 	shareSetID    string          // 第一份合法分片确定的恢复批次
 	pendingShares map[byte][]byte // 激活前暂存在当前进程内存中的不同分片
@@ -89,14 +92,21 @@ func (m *Manager) Activate(keyBase64 string, source Source) error {
 		return ErrAlreadyActivated
 	}
 
-	// crypto.New 同时完成 Base64 解码和 32 字节 AES 密钥长度校验
-	cipher, err := crypto.New(keyBase64)
+	key, err := decodeMasterKey(keyBase64)
+	if err != nil {
+		return err
+	}
+	defer clear(key)
+
+	// crypto.New 同时完成 Base64 解码和 32 字节 AES 密钥长度校验；使用规范化后的编码，兼容首尾空白输入。
+	cipher, err := crypto.New(base64.StdEncoding.EncodeToString(key))
 	if err != nil {
 		return fmt.Errorf("activate master key: %w", err)
 	}
 
 	// cipher 和来源在同一个写锁内提交，对外只会看到完整状态
 	m.cipher = cipher
+	m.masterKey = bytes.Clone(key)
 	m.source = source
 	m.clearPendingSharesLocked()
 	return nil

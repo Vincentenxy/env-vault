@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 
+	auditapp "env-vault/internal/application/audit"
+	auditdomain "env-vault/internal/domain/audit"
 	envdomain "env-vault/internal/domain/environment"
 	folderdomain "env-vault/internal/domain/folder"
 	secretdomain "env-vault/internal/domain/secret"
@@ -27,10 +29,6 @@ var (
 const orderNoStep = 10
 
 const initialHistoryCommitMsg = "initial version"
-
-type transactionRunner interface {
-	WithTx(ctx context.Context, fn func(context.Context) error) error
-}
 
 type folderStructureRepository interface {
 	CreateBatch(ctx context.Context, folders []*folderdomain.Folder) error
@@ -88,10 +86,16 @@ type IService interface {
 
 // Service 环境应用服务实现
 type Service struct {
-	repo       envdomain.Repository
-	folderRepo folderStructureRepository
-	secretRepo secretStructureRepository
-	cipher     secretCryptor
+	repo          envdomain.Repository
+	folderRepo    folderStructureRepository
+	secretRepo    secretStructureRepository
+	cipher        secretCryptor
+	auditRecorder auditdomain.Recorder
+}
+
+func (s *Service) WithAuditRecorder(recorder auditdomain.Recorder) *Service {
+	s.auditRecorder = recorder
+	return s
 }
 
 // Option 环境应用服务配置项
@@ -120,6 +124,33 @@ var _ IService = (*Service)(nil)
 
 // Create 批量创建环境，项目已有环境时同步复制文件夹和 Secret 结构
 func (s *Service) Create(ctx context.Context, in CreateInput, operator string) ([]*envdomain.Environment, error) {
+	transactor, _ := s.repo.(auditapp.Transactor)
+	return auditapp.RunWriteBatch(ctx, s.auditRecorder, transactor, true,
+		func(writeCtx context.Context) ([]*envdomain.Environment, []*auditdomain.Event, error) {
+			environments, err := s.create(writeCtx, in, operator)
+			if err != nil {
+				return nil, nil, err
+			}
+			events := make([]*auditdomain.Event, 0, len(environments))
+			for _, environment := range environments {
+				events = append(events, environmentEvent("environment.create", auditdomain.ResultSuccess, environment, uuid.Nil, "", in.ProjectID.String(), operator, environmentChanges(nil, environment), nil))
+			}
+			return environments, events, nil
+		},
+		func(operationErr error) []*auditdomain.Event {
+			events := make([]*auditdomain.Event, 0, len(in.Environments))
+			for _, item := range in.Environments {
+				events = append(events, environmentFailure(environmentEvent("environment.create", auditdomain.ResultFailure, nil, uuid.Nil, item.Name, in.ProjectID.String(), operator, nil, nil), operationErr))
+			}
+			if len(events) == 0 {
+				events = append(events, environmentFailure(environmentEvent("environment.create", auditdomain.ResultFailure, nil, uuid.Nil, "", in.ProjectID.String(), operator, nil, nil), operationErr))
+			}
+			return events
+		},
+	)
+}
+
+func (s *Service) create(ctx context.Context, in CreateInput, operator string) ([]*envdomain.Environment, error) {
 	if in.ProjectID == uuid.Nil {
 		return nil, ErrInvalidParam
 	}
@@ -195,19 +226,15 @@ func (s *Service) Create(ctx context.Context, in CreateInput, operator string) (
 		return environments, nil
 	}
 
-	txRunner, ok := s.repo.(transactionRunner)
-	if !ok || s.folderRepo == nil || s.secretRepo == nil || s.cipher == nil {
+	if s.folderRepo == nil || s.secretRepo == nil || s.cipher == nil {
 		return nil, ErrCloneUnavailable
 	}
 
 	batchID := uuid.New()
-	err = txRunner.WithTx(ctx, func(txCtx context.Context) error {
-		if err := s.repo.CreateBatch(txCtx, environments); err != nil {
-			return err
-		}
-		return s.cloneResources(txCtx, existingEnvironments[0], environments, batchID, operator, now)
-	})
-	if err != nil {
+	if err := s.repo.CreateBatch(ctx, environments); err != nil {
+		return nil, err
+	}
+	if err := s.cloneResources(ctx, existingEnvironments[0], environments, batchID, operator, now); err != nil {
 		return nil, err
 	}
 	return environments, nil
@@ -338,6 +365,26 @@ func (s *Service) cloneResources(
 
 // Update 更新环境
 func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) (*envdomain.Environment, error) {
+	transactor, _ := s.repo.(auditapp.Transactor)
+	return auditapp.RunWrite(ctx, s.auditRecorder, transactor, false,
+		func(writeCtx context.Context) (*envdomain.Environment, *auditdomain.Event, error) {
+			before, err := s.repo.GetByID(writeCtx, in.ID)
+			if err != nil {
+				return nil, nil, err
+			}
+			updated, err := s.update(writeCtx, in, operator)
+			if err != nil {
+				return nil, nil, err
+			}
+			return updated, environmentEvent("environment.update", auditdomain.ResultSuccess, updated, in.ID, in.Name, updated.ProjectID.String(), operator, environmentChanges(before, updated), nil), nil
+		},
+		func(operationErr error) *auditdomain.Event {
+			return environmentFailure(environmentEvent("environment.update", auditdomain.ResultFailure, nil, in.ID, in.Name, "", operator, nil, nil), operationErr)
+		},
+	)
+}
+
+func (s *Service) update(ctx context.Context, in UpdateInput, operator string) (*envdomain.Environment, error) {
 	if in.ID == uuid.Nil || in.Name == "" {
 		return nil, ErrInvalidParam
 	}
@@ -367,6 +414,26 @@ func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) (
 
 // Delete 软删除环境
 func (s *Service) Delete(ctx context.Context, id uuid.UUID, operator string) error {
+	transactor, _ := s.repo.(auditapp.Transactor)
+	_, err := auditapp.RunWrite(ctx, s.auditRecorder, transactor, false,
+		func(writeCtx context.Context) (struct{}, *auditdomain.Event, error) {
+			environment, err := s.repo.GetByID(writeCtx, id)
+			if err != nil {
+				return struct{}{}, nil, err
+			}
+			if err := s.delete(writeCtx, id, operator); err != nil {
+				return struct{}{}, nil, err
+			}
+			return struct{}{}, environmentEvent("environment.delete", auditdomain.ResultSuccess, environment, id, "", environment.ProjectID.String(), operator, nil, nil), nil
+		},
+		func(operationErr error) *auditdomain.Event {
+			return environmentFailure(environmentEvent("environment.delete", auditdomain.ResultFailure, nil, id, "", "", operator, nil, nil), operationErr)
+		},
+	)
+	return err
+}
+
+func (s *Service) delete(ctx context.Context, id uuid.UUID, operator string) error {
 	if id == uuid.Nil {
 		return ErrInvalidParam
 	}
@@ -384,24 +451,45 @@ func (s *Service) Delete(ctx context.Context, id uuid.UUID, operator string) err
 
 // GetByID 按 ID 查询环境
 func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*envdomain.Environment, error) {
-	if id == uuid.Nil {
-		return nil, ErrInvalidParam
-	}
-
-	e, err := s.repo.GetByID(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if e == nil {
-		return nil, ErrNotFound
-	}
-	return e, nil
+	return auditapp.RunRead(ctx, s.auditRecorder,
+		func(readCtx context.Context) (*envdomain.Environment, error) {
+			if id == uuid.Nil {
+				return nil, ErrInvalidParam
+			}
+			e, err := s.repo.GetByID(readCtx, id)
+			if err != nil {
+				return nil, err
+			}
+			if e == nil {
+				return nil, ErrNotFound
+			}
+			return e, nil
+		},
+		func(e *envdomain.Environment, operationErr error) *auditdomain.Event {
+			event := environmentEvent("environment.read", auditdomain.ResultSuccess, e, id, "", "", "", nil, nil)
+			if operationErr != nil {
+				return environmentFailure(event, operationErr)
+			}
+			return event
+		},
+	)
 }
 
 // List 查询项目下全部环境（按排序号升序，不分页）
 func (s *Service) List(ctx context.Context, in ListInput) ([]*envdomain.Environment, error) {
-	if in.ProjectID == uuid.Nil {
-		return nil, ErrInvalidParam
-	}
-	return s.repo.List(ctx, in.ProjectID)
+	return auditapp.RunRead(ctx, s.auditRecorder,
+		func(readCtx context.Context) ([]*envdomain.Environment, error) {
+			if in.ProjectID == uuid.Nil {
+				return nil, ErrInvalidParam
+			}
+			return s.repo.List(readCtx, in.ProjectID)
+		},
+		func(result []*envdomain.Environment, operationErr error) *auditdomain.Event {
+			event := environmentEvent("environment.list", auditdomain.ResultSuccess, nil, uuid.Nil, "", in.ProjectID.String(), "", nil, map[string]any{"resultCount": len(result)})
+			if operationErr != nil {
+				return environmentFailure(event, operationErr)
+			}
+			return event
+		},
+	)
 }

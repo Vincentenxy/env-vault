@@ -12,6 +12,8 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
+	auditapp "env-vault/internal/application/audit"
+	auditdomain "env-vault/internal/domain/audit"
 	orgdomain "env-vault/internal/domain/organization"
 	projectdomain "env-vault/internal/domain/project"
 	tenantdomain "env-vault/internal/domain/tenant"
@@ -47,6 +49,14 @@ type ListInput struct {
 	Undistributed bool
 }
 
+// ManagementListInput 用户管理页面分页查询入参。
+type ManagementListInput struct {
+	TenantID uuid.UUID
+	Keyword  string
+	PageNum  int
+	PageSize int
+}
+
 // AllocateInput 用户批量分配请求。
 type AllocateInput struct {
 	Type       string
@@ -77,8 +87,10 @@ type ResponsibilityChecker interface {
 type IService interface {
 	Update(ctx context.Context, in UpdateInput) (*userdomain.User, error)
 	List(ctx context.Context, in ListInput) ([]*userdomain.User, error)
+	ListManagement(ctx context.Context, in ManagementListInput) ([]*userdomain.ManagementUser, int64, error)
 	Allocate(ctx context.Context, in AllocateInput) (int, error)
 	GetProfile(ctx context.Context, userID string) (*userdomain.User, error)
+	GetProfileDetail(ctx context.Context, userID string) (*userdomain.Profile, error)
 	GetNickname(ctx context.Context, userID string) (string, error)
 	IsBlocked(ctx context.Context, userID string) (bool, error)
 	WarmUp(ctx context.Context) (int, error)
@@ -93,8 +105,16 @@ type Service struct {
 	tenantRepo            tenantReader
 	orgRepo               organizationReader
 	projectRepo           projectReader
+	profileRelations      userdomain.ProfileRelationReader
 	responsibilityChecker ResponsibilityChecker
 	refreshMu             sync.Mutex
+	auditRecorder         auditdomain.Recorder
+}
+
+// WithAuditRecorder enables resource member-allocation auditing.
+func (s *Service) WithAuditRecorder(recorder auditdomain.Recorder) *Service {
+	s.auditRecorder = recorder
+	return s
 }
 
 // Option 用户服务可选依赖。
@@ -121,7 +141,11 @@ func WithResponsibilityChecker(checker ResponsibilityChecker) Option {
 
 // NewService 创建用户应用服务。
 func NewService(repo userdomain.Repository, profileCache userdomain.ProfileCache, nameCache userdomain.NameCache, options ...Option) *Service {
-	svc := &Service{repo: repo, profileCache: profileCache, nameCache: nameCache}
+	profileRelations, _ := repo.(userdomain.ProfileRelationReader)
+	svc := &Service{
+		repo: repo, profileCache: profileCache, nameCache: nameCache,
+		profileRelations: profileRelations,
+	}
 	for _, option := range options {
 		option(svc)
 	}
@@ -134,6 +158,21 @@ var _ IService = (*Service)(nil)
 // TODO(user-list-cache): 用户新增/删除及项目绑定/解绑接口落地后，增加按筛选维度的 Redis 缓存，
 // 并由这些写接口统一调用缓存失效方法，避免返回过期的用户归属或项目成员数据。
 func (s *Service) List(ctx context.Context, in ListInput) ([]*userdomain.User, error) {
+	return auditapp.RunRead(ctx, s.auditRecorder,
+		func(readCtx context.Context) ([]*userdomain.User, error) {
+			return s.list(readCtx, in)
+		},
+		func(users []*userdomain.User, err error) *auditdomain.Event {
+			result := auditdomain.ResultSuccess
+			if err != nil {
+				result = auditdomain.ResultFailure
+			}
+			return userListEvent(in, result, len(users), err)
+		},
+	)
+}
+
+func (s *Service) list(ctx context.Context, in ListInput) ([]*userdomain.User, error) {
 	filter := userdomain.ListFilter{}
 	switch {
 	case in.ProjectID != uuid.Nil:
@@ -148,18 +187,77 @@ func (s *Service) List(ctx context.Context, in ListInput) ([]*userdomain.User, e
 	return s.repo.List(ctx, filter)
 }
 
+// ListManagement 查询用户管理分页列表。分页参数已由 Handler 归一化。
+func (s *Service) ListManagement(ctx context.Context, in ManagementListInput) ([]*userdomain.ManagementUser, int64, error) {
+	type listResult struct {
+		items []*userdomain.ManagementUser
+		total int64
+	}
+	in.Keyword = strings.TrimSpace(in.Keyword)
+	result, err := auditapp.RunRead(ctx, s.auditRecorder,
+		func(readCtx context.Context) (listResult, error) {
+			items, total, listErr := s.repo.ListManagement(readCtx, userdomain.ManagementListFilter{
+				TenantID: in.TenantID,
+				Keyword:  in.Keyword,
+				PageNum:  in.PageNum,
+				PageSize: in.PageSize,
+			})
+			return listResult{items: items, total: total}, listErr
+		},
+		func(result listResult, operationErr error) *auditdomain.Event {
+			return userManagementListEvent(in, auditdomain.ResultSuccess, len(result.items), operationErr)
+		},
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	return result.items, result.total, nil
+}
+
 // Allocate 批量分配或移除用户的租户、组织、项目归属。
 func (s *Service) Allocate(ctx context.Context, in AllocateInput) (int, error) {
+	type allocationResult struct {
+		affected int
+		users    []*userdomain.User
+	}
+	if s.auditRecorder == nil {
+		affected, users, err := s.allocate(ctx, in)
+		if err == nil {
+			s.refreshAllocatedUserCaches(ctx, users)
+		}
+		return affected, err
+	}
+	transactor, _ := s.repo.(auditapp.Transactor)
+	result, err := auditapp.RunWrite(ctx, s.auditRecorder, transactor, true,
+		func(writeCtx context.Context) (allocationResult, *auditdomain.Event, error) {
+			affected, users, err := s.allocate(writeCtx, in)
+			if err != nil {
+				return allocationResult{}, nil, err
+			}
+			return allocationResult{affected: affected, users: users}, allocationEvent(in, auditdomain.ResultSuccess, affected), nil
+		},
+		func(operationErr error) *auditdomain.Event {
+			return allocationFailure(allocationEvent(in, auditdomain.ResultFailure, 0), operationErr)
+		},
+	)
+	if err != nil {
+		return 0, err
+	}
+	s.refreshAllocatedUserCaches(ctx, result.users)
+	return result.affected, nil
+}
+
+func (s *Service) allocate(ctx context.Context, in AllocateInput) (int, []*userdomain.User, error) {
 	resourceType := userdomain.AllocationType(strings.TrimSpace(in.Type))
 	operation := userdomain.AllocationOperation(strings.TrimSpace(in.Operation))
 	operator := strings.TrimSpace(in.Operator)
 	userIDs := normalizeUserIDs(in.UserIDs)
 	if !validAllocationType(resourceType) || !validAllocationOperation(operation) ||
 		in.ResourceID == uuid.Nil || len(userIDs) == 0 || operator == "" {
-		return 0, ErrInvalidParam
+		return 0, nil, ErrInvalidParam
 	}
 	if s.tenantRepo == nil || s.orgRepo == nil || s.projectRepo == nil {
-		return 0, errors.New("user allocation repositories are not configured")
+		return 0, nil, errors.New("user allocation repositories are not configured")
 	}
 
 	change := userdomain.AllocationChange{
@@ -167,23 +265,26 @@ func (s *Service) Allocate(ctx context.Context, in AllocateInput) (int, error) {
 		UserIDs: userIDs, Operator: operator,
 	}
 	if err := s.resolveAllocationResource(ctx, &change); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 
 	if operation == userdomain.AllocationOperationRemove && s.responsibilityChecker != nil {
 		if err := s.responsibilityChecker.CheckRemoval(ctx, resourceType, in.ResourceID, userIDs); err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 	}
 
 	users, missing, err := s.repo.Allocate(ctx, change)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	if len(missing) > 0 {
-		return 0, fmt.Errorf("%w: %s", ErrNotFound, strings.Join(missing, ","))
+		return 0, nil, fmt.Errorf("%w: %s", ErrNotFound, strings.Join(missing, ","))
 	}
+	return len(users), users, nil
+}
 
+func (s *Service) refreshAllocatedUserCaches(ctx context.Context, users []*userdomain.User) {
 	for _, user := range users {
 		if s.profileCache != nil {
 			if err := s.profileCache.Set(ctx, user); err != nil {
@@ -191,7 +292,6 @@ func (s *Service) Allocate(ctx context.Context, in AllocateInput) (int, error) {
 			}
 		}
 	}
-	return len(users), nil
 }
 
 func (s *Service) resolveAllocationResource(ctx context.Context, change *userdomain.AllocationChange) error {
@@ -268,6 +368,69 @@ func validAllocationOperation(value userdomain.AllocationOperation) bool {
 
 // GetProfile 按 JWT 中的外部用户 ID 查询用户资料，使用 Redis 缓存并在未命中时回源数据库。
 func (s *Service) GetProfile(ctx context.Context, userID string) (*userdomain.User, error) {
+	return auditapp.RunRead(ctx, s.auditRecorder,
+		func(readCtx context.Context) (*userdomain.User, error) {
+			return s.getProfile(readCtx, userID)
+		},
+		func(user *userdomain.User, err error) *auditdomain.Event {
+			result := auditdomain.ResultSuccess
+			if err != nil {
+				result = auditdomain.ResultFailure
+			}
+			event := userEvent(userActionRead, result, user, userID, "", nil, nil)
+			if err != nil {
+				return userFailure(event, err)
+			}
+			return event
+		},
+	)
+}
+
+// GetProfileDetail 查询当前用户资料，并实时补充租户、组织和项目归属。
+func (s *Service) GetProfileDetail(ctx context.Context, userID string) (*userdomain.Profile, error) {
+	return auditapp.RunRead(ctx, s.auditRecorder,
+		func(readCtx context.Context) (*userdomain.Profile, error) {
+			user, err := s.getProfile(readCtx, userID)
+			if err != nil {
+				return nil, err
+			}
+			if s.profileRelations == nil {
+				return nil, errors.New("user profile relation reader is not configured")
+			}
+
+			relations, err := s.profileRelations.GetProfileRelations(readCtx, user.ID)
+			if err != nil {
+				return nil, err
+			}
+			if relations == nil {
+				relations = &userdomain.ProfileRelations{}
+			}
+			return &userdomain.Profile{
+				User:       *user,
+				TenantName: relations.TenantName,
+				OrgName:    relations.OrgName,
+				Projects:   relations.Projects,
+			}, nil
+		},
+		func(profile *userdomain.Profile, err error) *auditdomain.Event {
+			result := auditdomain.ResultSuccess
+			var user *userdomain.User
+			if profile != nil {
+				user = &profile.User
+			}
+			if err != nil {
+				result = auditdomain.ResultFailure
+			}
+			event := userEvent(userActionRead, result, user, userID, "", nil, nil)
+			if err != nil {
+				return userFailure(event, err)
+			}
+			return event
+		},
+	)
+}
+
+func (s *Service) getProfile(ctx context.Context, userID string) (*userdomain.User, error) {
 	userID = strings.TrimSpace(userID)
 	if userID == "" {
 		return nil, ErrInvalidParam
@@ -311,29 +474,59 @@ func (s *Service) Update(ctx context.Context, in UpdateInput) (*userdomain.User,
 	in.Username = strings.TrimSpace(in.Username)
 	in.Email = strings.TrimSpace(in.Email)
 	in.Phone = strings.TrimSpace(in.Phone)
-	if in.UserID == "" || in.Nickname == "" || in.Username == "" || in.TenantID == uuid.Nil || in.OrgID == uuid.Nil {
-		return nil, ErrInvalidParam
-	}
 
 	s.refreshMu.Lock()
 	defer s.refreshMu.Unlock()
 
-	current, err := s.repo.GetByUserID(ctx, in.UserID)
+	type updateResult struct {
+		before *userdomain.User
+		after  *userdomain.User
+	}
+	transactor, _ := s.repo.(auditapp.Transactor)
+	result, err := auditapp.RunWrite(ctx, s.auditRecorder, transactor, false,
+		func(writeCtx context.Context) (updateResult, *auditdomain.Event, error) {
+			before, after, updateErr := s.updatePersisted(writeCtx, in)
+			if updateErr != nil {
+				return updateResult{}, nil, updateErr
+			}
+			return updateResult{before: before, after: after}, userEvent(
+				userActionUpdate, auditdomain.ResultSuccess, after, in.UserID, in.UserID,
+				userChanges(before, after), nil,
+			), nil
+		},
+		func(operationErr error) *auditdomain.Event {
+			return userFailure(userEvent(userActionUpdate, auditdomain.ResultFailure, nil, in.UserID, in.UserID, nil, nil), operationErr)
+		},
+	)
 	if err != nil {
 		return nil, err
 	}
+	s.refreshUserCaches(ctx, result.after)
+	return result.after, nil
+}
+
+func (s *Service) updatePersisted(ctx context.Context, in UpdateInput) (*userdomain.User, *userdomain.User, error) {
+	if in.UserID == "" || in.Nickname == "" || in.Username == "" || in.TenantID == uuid.Nil || in.OrgID == uuid.Nil {
+		return nil, nil, ErrInvalidParam
+	}
+
+	current, err := s.repo.GetByUserID(ctx, in.UserID)
+	if err != nil {
+		return nil, nil, err
+	}
 	if current == nil {
-		return nil, ErrNotFound
+		return nil, nil, ErrNotFound
 	}
 
 	usernameOwner, err := s.repo.GetByUsername(ctx, in.Username)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if usernameOwner != nil && usernameOwner.ID != current.ID {
-		return nil, ErrUsernameExists
+		return nil, nil, ErrUsernameExists
 	}
 
+	before := *current
 	current.Nickname = in.Nickname
 	current.Username = in.Username
 	current.Email = in.Email
@@ -343,9 +536,15 @@ func (s *Service) Update(ctx context.Context, in UpdateInput) (*userdomain.User,
 	current.UpdateBy = in.UserID
 	current.UpdateAt = time.Now()
 	if err := s.repo.UpdateByUserID(ctx, current); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	return &before, current, nil
+}
 
+func (s *Service) refreshUserCaches(ctx context.Context, current *userdomain.User) {
+	if current == nil {
+		return
+	}
 	if s.nameCache != nil {
 		s.nameCache.Set(current.UserID, current.Nickname)
 	}
@@ -354,7 +553,6 @@ func (s *Service) Update(ctx context.Context, in UpdateInput) (*userdomain.User,
 			logger.Warn(ctx, "refresh user redis cache failed", zap.String("userId", current.UserID), zap.Error(err))
 		}
 	}
-	return current, nil
 }
 
 // GetNickname 按内存、Redis、数据库顺序查询用户姓名，后级命中时回填前级缓存。
@@ -370,7 +568,7 @@ func (s *Service) GetNickname(ctx context.Context, userID string) (string, error
 		}
 	}
 
-	user, err := s.GetProfile(ctx, userID)
+	user, err := s.getProfile(ctx, userID)
 	if err != nil {
 		return "", err
 	}

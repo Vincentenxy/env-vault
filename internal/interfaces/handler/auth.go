@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -21,6 +22,10 @@ const maxLoginRequestBodySize = 8 * 1024
 type AuthHandler struct {
 	svc     authapp.IService
 	limiter *loginLimiter
+}
+
+type loginFailureRecorder interface {
+	RecordFailure(ctx context.Context, in authapp.LoginInput, operationErr error) error
 }
 
 // NewAuthHandler 创建本地认证处理器
@@ -56,11 +61,17 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxLoginRequestBodySize)
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		if !h.recordRejected(c, req.Username, authapp.ErrInvalidRequest) {
+			return
+		}
 		response.BadRequest(c, errors.New("username and password are required"))
 		return
 	}
 	username := strings.TrimSpace(req.Username)
 	if username == "" || req.Password == "" || len(username) > 128 || len([]byte(req.Password)) > 1024 {
+		if !h.recordRejected(c, username, authapp.ErrInvalidRequest) {
+			return
+		}
 		response.BadRequest(c, errors.New("username or password format is invalid"))
 		return
 	}
@@ -68,11 +79,14 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	limitKey := c.ClientIP() + "\x00" + strings.ToLower(username)
 	if !h.limiter.Allow(limitKey) {
 		logger.Warn(c, "local login rate limited", zap.String("username", username))
+		if !h.recordRejected(c, username, authapp.ErrRateLimited) {
+			return
+		}
 		response.AbortWithHTTPStatusMessage(c, http.StatusTooManyRequests, "登录尝试过于频繁")
 		return
 	}
 
-	result, err := h.svc.Login(c, authapp.LoginInput{Username: username, Password: req.Password})
+	result, err := h.svc.Login(withHTTPAuditContext(c), authapp.LoginInput{Username: username, Password: req.Password})
 	req.Password = ""
 	if err != nil {
 		switch {
@@ -93,6 +107,19 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	logger.Info(c, "local login succeeded", zap.String("userId", result.User.UserID))
 	expiresIn := max(int64(time.Until(result.ExpiresAt).Seconds()), 0)
 	response.Success(c, LoginResponse{AccessToken: result.AccessToken, TokenType: "Bearer", ExpiresIn: expiresIn})
+}
+
+func (h *AuthHandler) recordRejected(c *gin.Context, username string, operationErr error) bool {
+	recorder, ok := h.svc.(loginFailureRecorder)
+	if !ok {
+		return true
+	}
+	if err := recorder.RecordFailure(withHTTPAuditContext(c), authapp.LoginInput{Username: username}, operationErr); err != nil {
+		logger.Error(c, "record rejected login audit failed", zap.Error(err))
+		response.AbortWithHTTPStatusMessage(c, http.StatusInternalServerError, "internal error")
+		return false
+	}
+	return true
 }
 
 type loginAttempt struct {

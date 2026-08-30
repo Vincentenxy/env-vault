@@ -97,7 +97,7 @@ func (h *ProjectHandler) Create(c *gin.Context) {
 		return
 	}
 
-	p, err := h.svc.Create(c, projapp.CreateInput{
+	p, err := h.svc.Create(withHTTPAuditContext(c), projapp.CreateInput{
 		Code:         req.Code,
 		Name:         req.Name,
 		Remark:       req.Remark,
@@ -138,7 +138,7 @@ func (h *ProjectHandler) Update(c *gin.Context) {
 		return
 	}
 
-	p, err := h.svc.Update(c, projapp.UpdateInput{
+	p, err := h.svc.Update(withHTTPAuditContext(c), projapp.UpdateInput{
 		ID:      req.ID,
 		Name:    req.Name,
 		Remark:  req.Remark,
@@ -164,7 +164,7 @@ func (h *ProjectHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	err := h.svc.Delete(c, req.ID, operator(c))
+	err := h.svc.Delete(withHTTPAuditContext(c), req.ID, operator(c))
 	h.respondError(c, err)
 	if err != nil {
 		return
@@ -185,7 +185,7 @@ func (h *ProjectHandler) Detail(c *gin.Context) {
 		return
 	}
 
-	p, err := h.svc.GetByID(c, req.ID)
+	p, err := h.svc.GetByID(withHTTPAuditContext(c), req.ID)
 	h.respondError(c, err)
 	if err != nil {
 		return
@@ -203,7 +203,7 @@ func (h *ProjectHandler) List(c *gin.Context) {
 
 	req.Normalize()
 
-	projects, total, err := h.svc.List(c, projapp.ListInput{
+	projects, total, err := h.svc.List(withHTTPAuditContext(c), projapp.ListInput{
 		Code:     req.Code,
 		Name:     req.Name,
 		OrgID:    req.OrgID,
@@ -234,7 +234,8 @@ func (h *ProjectHandler) respondError(c *gin.Context, err error) {
 	case errors.Is(err, projapp.ErrCodeExists),
 		errors.Is(err, projapp.ErrNotFound),
 		errors.Is(err, projapp.ErrInvalidParam),
-		errors.Is(err, projapp.ErrEnvironmentCodeDuplicated):
+		errors.Is(err, projapp.ErrEnvironmentCodeDuplicated),
+		errors.Is(err, projapp.ErrManagerNotOrganizationMember):
 		// 通用业务错误：统一 code=-1，msg 由 service 给出
 		response.Error(c, err.Error())
 	default:

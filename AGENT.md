@@ -212,6 +212,15 @@ response.Success(c, page.Response[TenantDTO]{ Total: total, List: items })
   - 无 context 场景：`logger.L().Info("msg", ...)`
 - 级别使用：Debug / Info / Warn / Error，生产环境（release 模式）输出 JSON 格式且仅 Info 及以上级别
 
+### 5.1 业务审计日志阶段性边界（已确认）
+
+- 审计查询当前只要求通过认证，资源级查看权限暂不在本项目内实现；后续必须接入独立权限管控系统，再按审计事件的 `scope_type` / `scope_id` 完成资源管理员和超管授权。禁止自行增加一套临时权限模型，也禁止将当前空的 `applyPermissionFilter` 误认为已经完成权限控制
+- 普通业务接口在 Handler 层发生 JSON 转换、参数绑定或必填项校验失败时不写业务审计；登录、JWT 认证、主密钥分片等安全边界仍按各模块安全策略记录失败尝试
+- 审计记录继续写入一年后的 `expire_at`，当前暂不实现保留期清理任务；后续清理任务必须分批执行并记录自身审计事件
+- 本项目暂不内置数据库 migration，审计表 DDL 由外部数据库变更系统维护；代码发布前必须先完成对应数据库变更
+- gRPC、SDK 和外部事件当前只保留统一审计模型，interceptor、adapter 和离线事件接收待相应能力开发时实现
+- 业务写入与成功审计必须保持同事务；审计写入失败时业务操作失败。Secret 明文和密文均不得写入审计记录
+
 ---
 
 ## 6. 部署规范

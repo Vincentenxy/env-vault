@@ -62,7 +62,7 @@ func (r *Repository) WithTx(ctx context.Context, fn func(context.Context) error)
 // Update 更新项目（按 ID）
 func (r *Repository) Update(ctx context.Context, p *projdomain.Project) error {
 	po := toPO(p)
-	return r.db.WithContext(ctx).
+	return persistence.TxDB(ctx, r.db).WithContext(ctx).
 		Model(&projectPO{}).
 		Where("id = ? AND is_deleted = false", po.ID).
 		Updates(map[string]any{
@@ -77,9 +77,21 @@ func (r *Repository) Update(ctx context.Context, p *projdomain.Project) error {
 // Delete 软删除项目（按 ID）
 func (r *Repository) Delete(ctx context.Context, id uuid.UUID, deleteBy string) error {
 	now := time.Now()
-	return r.db.WithContext(ctx).
+	db := persistence.TxDB(ctx, r.db).WithContext(ctx)
+	if err := db.
 		Model(&projectPO{}).
 		Where("id = ? AND is_deleted = false", id).
+		Updates(map[string]any{
+			"is_deleted": true,
+			"delete_at":  now,
+			"delete_by":  deleteBy,
+			"update_at":  now,
+			"update_by":  deleteBy,
+		}).Error; err != nil {
+		return err
+	}
+	return db.Table("project_user_relation").
+		Where("project_id = ? AND is_deleted = false", id).
 		Updates(map[string]any{
 			"is_deleted": true,
 			"delete_at":  now,
@@ -92,7 +104,7 @@ func (r *Repository) Delete(ctx context.Context, id uuid.UUID, deleteBy string) 
 // GetByID 按 ID 查询项目（不含已删除）
 func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*projdomain.Project, error) {
 	var po projectPO
-	err := withCounts(r.db.WithContext(ctx)).
+	err := withCounts(persistence.TxDB(ctx, r.db).WithContext(ctx)).
 		Where("id = ? AND is_deleted = false", id).
 		Take(&po).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -107,7 +119,7 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*projdomain.Pro
 // GetByOrgCode 按组织 + 编码查询项目（不含已删除）
 func (r *Repository) GetByOrgCode(ctx context.Context, orgID uuid.UUID, code string) (*projdomain.Project, error) {
 	var po projectPO
-	err := r.db.WithContext(ctx).
+	err := persistence.TxDB(ctx, r.db).WithContext(ctx).
 		Where("org_id = ? AND code = ? AND is_deleted = false", orgID, code).
 		First(&po).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -121,7 +133,7 @@ func (r *Repository) GetByOrgCode(ctx context.Context, orgID uuid.UUID, code str
 
 // List 分页查询项目列表（不含已删除）
 func (r *Repository) List(ctx context.Context, filter projdomain.ListFilter) ([]*projdomain.Project, int64, error) {
-	query := r.db.WithContext(ctx).Model(&projectPO{}).Where("is_deleted = false")
+	query := persistence.TxDB(ctx, r.db).WithContext(ctx).Model(&projectPO{}).Where("is_deleted = false")
 
 	if filter.OrgID != nil {
 		query = query.Where("org_id = ?", *filter.OrgID)
@@ -163,7 +175,9 @@ func withCounts(query *gorm.DB) *gorm.DB {
          JOIN folder_info AS f ON f.env_id = e.id AND f.is_deleted = false
          WHERE e.project_id = project_info.id AND e.is_deleted = false) AS folder_count,
         (SELECT COUNT(*) FROM project_user_relation AS pur
-         WHERE pur.project_id = project_info.id) AS member_count`)
+         WHERE pur.project_id = project_info.id
+           AND pur.is_deleted = false
+           AND (pur.expire_at IS NULL OR pur.expire_at > NOW())) AS member_count`)
 }
 
 // toPO 领域模型转持久化对象

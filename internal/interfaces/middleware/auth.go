@@ -12,6 +12,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 
+	auditdomain "env-vault/internal/domain/audit"
+	"env-vault/internal/interfaces/auditctx"
 	"env-vault/pkg/logger"
 	"env-vault/pkg/response"
 	"env-vault/pkg/userctx"
@@ -49,6 +51,16 @@ type parsedJWTProvider struct {
 //
 // 每个 Provider 的 PublicKey 支持 base64 DER 或 PEM 格式。
 func Auth(providers []JWTProvider, blockCheckers ...UserBlockChecker) (gin.HandlerFunc, error) {
+	var blockChecker UserBlockChecker
+	if len(blockCheckers) > 0 {
+		blockChecker = blockCheckers[0]
+	}
+	return AuthWithAudit(providers, blockChecker, nil)
+}
+
+// AuthWithAudit builds the JWT middleware and persists every rejected
+// authentication attempt without retaining token or credential material.
+func AuthWithAudit(providers []JWTProvider, blockChecker UserBlockChecker, auditRecorder auditdomain.Recorder) (gin.HandlerFunc, error) {
 	parsedProviders := make([]parsedJWTProvider, 0, len(providers))
 	for i, provider := range providers {
 		issuer := strings.TrimSpace(provider.Issuer)
@@ -69,15 +81,13 @@ func Auth(providers []JWTProvider, blockCheckers ...UserBlockChecker) (gin.Handl
 		return nil, errors.New("auth middleware init: no JWT provider configured")
 	}
 
-	var blockChecker UserBlockChecker
-	if len(blockCheckers) > 0 {
-		blockChecker = blockCheckers[0]
-	}
-
 	return func(c *gin.Context) {
 		tokenString, err := extractBearerToken(c.GetHeader("Authorization"))
 		if err != nil {
 			logger.Warn(c, "auth failed", zap.Error(err))
+			if !recordAuthFailure(c, auditRecorder, "missing_or_invalid_authorization", "authentication failed", "") {
+				return
+			}
 			response.AbortWithHTTPStatus(c, 401)
 			return
 		}
@@ -85,6 +95,9 @@ func Auth(providers []JWTProvider, blockCheckers ...UserBlockChecker) (gin.Handl
 		claims, err := verifyJWT(tokenString, parsedProviders)
 		if err != nil {
 			logger.Warn(c, "auth failed: invalid token", zap.Error(err))
+			if !recordAuthFailure(c, auditRecorder, "invalid_token", "authentication failed", "") {
+				return
+			}
 			response.AbortWithHTTPStatus(c, 401)
 			return
 		}
@@ -100,6 +113,9 @@ func Auth(providers []JWTProvider, blockCheckers ...UserBlockChecker) (gin.Handl
 		}
 		if user.UserID == "" {
 			logger.Warn(c, "auth failed: user ID claim is empty")
+			if !recordAuthFailure(c, auditRecorder, "missing_user_id", "authentication failed", "") {
+				return
+			}
 			response.AbortWithHTTPStatus(c, 401)
 			return
 		}
@@ -107,10 +123,16 @@ func Auth(providers []JWTProvider, blockCheckers ...UserBlockChecker) (gin.Handl
 			blocked, err := blockChecker.IsBlocked(c, user.UserID)
 			if err != nil {
 				logger.Error(c, "check user block status failed", zap.String("userId", user.UserID), zap.Error(err))
+				if !recordAuthFailure(c, auditRecorder, "block_check_failed", "internal error", user.UserID) {
+					return
+				}
 				response.AbortWithHTTPStatusMessage(c, 500, "internal error")
 				return
 			}
 			if blocked {
+				if !recordAuthFailure(c, auditRecorder, "user_blocked", "user is blocked", user.UserID) {
+					return
+				}
 				response.AbortWithHTTPStatusMessage(c, 403, "用户被锁定")
 				return
 			}
@@ -119,6 +141,33 @@ func Auth(providers []JWTProvider, blockCheckers ...UserBlockChecker) (gin.Handl
 
 		c.Next()
 	}, nil
+}
+
+func recordAuthFailure(c *gin.Context, recorder auditdomain.Recorder, failureCode, failureReason, userID string) bool {
+	if recorder == nil {
+		return true
+	}
+	route := c.FullPath()
+	if route == "" {
+		route = c.Request.URL.Path
+	}
+	event := &auditdomain.Event{
+		ActionCode: "auth.authorize", ResultCode: auditdomain.ResultFailure,
+		ActorType: auditdomain.ActorTypeAnonymous, ResourceType: "authentication",
+		ResourceID: c.Request.Method + " " + route, ResourceName: route,
+		ScopeType: "system", ScopeID: "system",
+		FailureCode: failureCode, FailureReason: failureReason,
+	}
+	if userID != "" {
+		event.ActorType = auditdomain.ActorTypeUser
+		event.CreateBy = userID
+	}
+	if err := recorder.Record(auditctx.HTTP(c), event); err != nil {
+		logger.Error(c, "record authentication failure audit failed", zap.Error(err))
+		response.AbortWithHTTPStatusMessage(c, 500, "internal error")
+		return false
+	}
+	return true
 }
 
 func verifyJWT(tokenString string, providers []parsedJWTProvider) (jwt.MapClaims, error) {

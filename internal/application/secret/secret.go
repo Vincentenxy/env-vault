@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	app "env-vault/internal/application"
+	auditdomain "env-vault/internal/domain/audit"
 	envdomain "env-vault/internal/domain/environment"
 	folderdomain "env-vault/internal/domain/folder"
 	secretdomain "env-vault/internal/domain/secret"
@@ -180,11 +181,12 @@ type valueCryptor interface {
 
 // Service 密钥应用服务实现（依赖密钥/文件夹/环境仓储与加解密器）
 type Service struct {
-	repo         secretdomain.Repository
-	folderRepo   folderdomain.Repository
-	envRepo      envdomain.Repository
-	cipher       valueCryptor
-	nameResolver app.NicknameResolver
+	repo          secretdomain.Repository
+	folderRepo    folderdomain.Repository
+	envRepo       envdomain.Repository
+	cipher        valueCryptor
+	nameResolver  app.NicknameResolver
+	auditRecorder auditdomain.Recorder
 }
 
 // NewService 创建密钥应用服务
@@ -196,22 +198,36 @@ func NewService(repo secretdomain.Repository, folderRepo folderdomain.Repository
 	return &Service{repo: repo, folderRepo: folderRepo, envRepo: envRepo, cipher: cipher, nameResolver: resolver}
 }
 
+// WithAuditRecorder enables mandatory audit recording for Secret use cases.
+func (s *Service) WithAuditRecorder(recorder auditdomain.Recorder) *Service {
+	s.auditRecorder = recorder
+	return s
+}
+
 // 确保 Service 满足 IService 编译期断言
 var _ IService = (*Service)(nil)
 
 // Create 批量创建 secrets：每个 secret 至少包含一个非空环境值，已提交的空环境仍创建实例以便后续更新。
-func (s *Service) Create(ctx context.Context, in CreateInput, operator string) ([]*secretdomain.Secret, error) {
-	if len(in.SecretList) == 0 {
-		return nil, ErrInvalidParam
-	}
-
+func (s *Service) Create(ctx context.Context, in CreateInput, operator string) (created []*secretdomain.Secret, resultErr error) {
 	batchID := in.BatchID
 	if batchID == uuid.Nil {
 		batchID = uuid.New()
 	}
+	defer func() {
+		if resultErr == nil {
+			return
+		}
+		if auditErr := s.recordCreateFailure(ctx, in, batchID, operator, resultErr); auditErr != nil {
+			resultErr = errors.Join(resultErr, auditErr)
+		}
+	}()
+	if len(in.SecretList) == 0 {
+		return nil, ErrInvalidParam
+	}
+
 	now := time.Now()
-	created := make([]*secretdomain.Secret, 0)
-	err := s.repo.WithTx(ctx, func(txCtx context.Context) error {
+	created = make([]*secretdomain.Secret, 0)
+	resultErr = s.repo.WithTx(ctx, func(txCtx context.Context) error {
 		for _, item := range in.SecretList {
 			batch, err := s.createOne(txCtx, item, operator, now)
 			if err != nil {
@@ -224,10 +240,13 @@ func (s *Service) Create(ctx context.Context, in CreateInput, operator string) (
 		for _, sec := range created {
 			histories = append(histories, newHistory(sec, batchID, initialCommitMsg, operator, now))
 		}
-		return s.repo.CreateHistoryBatch(txCtx, histories)
+		if err := s.repo.CreateHistoryBatch(txCtx, histories); err != nil {
+			return err
+		}
+		return s.recordCreateSuccess(txCtx, created, in, batchID, operator)
 	})
-	if err != nil {
-		return nil, err
+	if resultErr != nil {
+		return nil, resultErr
 	}
 	sort.Slice(created, func(i, j int) bool {
 		if created[i].Key != created[j].Key {
@@ -355,15 +374,23 @@ func (s *Service) createOne(ctx context.Context, item CreateItemInput, operator 
 //   - key 字段透传，不参与业务校验
 //
 // 入参必填性校验已在 handler 层完成，service 仅负责业务编排。
-func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) error {
-	if len(in.Secrets) == 0 {
-		return ErrInvalidParam
-	}
-
+func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) (resultErr error) {
 	batchID := in.BatchID
 	if batchID == uuid.Nil {
 		batchID = uuid.New()
 	}
+	defer func() {
+		if resultErr == nil {
+			return
+		}
+		if auditErr := s.recordUpdateFailure(ctx, in, batchID, operator, resultErr); auditErr != nil {
+			resultErr = errors.Join(resultErr, auditErr)
+		}
+	}()
+	if len(in.Secrets) == 0 {
+		return ErrInvalidParam
+	}
+
 	seenSecretIDs := make(map[uuid.UUID]struct{})
 	for _, item := range in.Secrets {
 		if item.GroupID == uuid.Nil || effectiveCommitMsg(item.CommitMsg, in.CommitMsg) == "" {
@@ -380,9 +407,10 @@ func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) e
 		}
 	}
 
-	return s.repo.WithTx(ctx, func(txCtx context.Context) error {
+	resultErr = s.repo.WithTx(ctx, func(txCtx context.Context) error {
 		now := time.Now()
 		histories := make([]*secretdomain.History, 0)
+		auditEvents := make([]*auditdomain.Event, 0, len(in.Secrets))
 		for _, item := range in.Secrets {
 			secrets, err := s.repo.ListByGroupID(txCtx, item.GroupID)
 			if err != nil {
@@ -397,10 +425,15 @@ func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) e
 				secretByID[sec.ID] = sec
 			}
 
-			if item.Remark != "" {
+			changes := make([]auditdomain.Change, 0, len(item.Values)+1)
+			versions := make(map[string]any)
+			if item.Remark != "" && item.Remark != secrets[0].Remark {
 				if _, err := s.repo.UpdateRemarkByGroupID(txCtx, item.GroupID, item.Remark, operator, now); err != nil {
 					return err
 				}
+				changes = append(changes, auditdomain.Change{
+					Field: "remark", Before: secrets[0].Remark, After: item.Remark, Redacted: false,
+				})
 			}
 
 			if len(item.Values) > 0 {
@@ -430,6 +463,13 @@ func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) e
 					updated.ValueCiphertext = ciphertext
 					updated.Version++
 					histories = append(histories, newHistory(&updated, batchID, effectiveCommitMsg(item.CommitMsg, in.CommitMsg), operator, now))
+					changes = append(changes, auditdomain.Change{
+						Field: "values." + sec.EnvCode, Changed: true, Redacted: true,
+					})
+					versions[sec.EnvCode] = map[string]any{
+						"before": sec.Version,
+						"after":  updated.Version,
+					}
 				}
 				if len(updates) > 0 {
 					if err := s.repo.UpdateValueByIDs(txCtx, updates, operator, now); err != nil {
@@ -437,28 +477,50 @@ func (s *Service) Update(ctx context.Context, in UpdateInput, operator string) e
 					}
 				}
 			}
+
+			scopeID := secrets[0].FolderID.String()
+			if s.auditRecorder != nil {
+				folder, err := s.folderRepo.GetByID(txCtx, secrets[0].FolderID)
+				if err != nil {
+					return err
+				}
+				if folder != nil && folder.GroupID != uuid.Nil {
+					scopeID = folder.GroupID.String()
+				}
+			}
+			auditEvents = append(auditEvents, newSecretAuditEvent(
+				auditActionUpdate, auditdomain.ResultSuccess, item.GroupID.String(), secrets[0].Key,
+				"folder", scopeID, &batchID, operator, changes,
+				map[string]any{
+					"changed":          len(changes) > 0,
+					"hasCommitMessage": true,
+					"versions":         versions,
+				},
+			))
 		}
-		if len(histories) == 0 {
-			return nil
+		if len(histories) > 0 {
+			if err := s.repo.CreateHistoryBatch(txCtx, histories); err != nil {
+				return err
+			}
 		}
-		return s.repo.CreateHistoryBatch(txCtx, histories)
+		return s.recordAudit(txCtx, auditEvents)
 	})
+	return resultErr
 }
 
 // History 按 secretId 分页、按 batchId 不分页，或按 groupId 对各环境分别分页查询历史。
 // EnvList 为空时查询全部环境；非空时只查询指定环境。
-func (s *Service) History(ctx context.Context, in HistoryInput) (*HistoryResult, error) {
+func (s *Service) History(ctx context.Context, in HistoryInput) (result *HistoryResult, resultErr error) {
 	var histories []*secretdomain.History
 	var total int64
-	var err error
 	in.EnvList = normalizeList(in.EnvList)
 	in.UserID = strings.TrimSpace(in.UserID)
 
 	switch {
 	case in.GroupID != uuid.Nil:
-		return s.historyByGroup(ctx, in)
+		result, resultErr = s.historyByGroup(ctx, in)
 	case in.SecretID != uuid.Nil:
-		histories, total, err = s.repo.ListHistoryBySecretID(ctx, secretdomain.HistoryPageFilter{
+		histories, total, resultErr = s.repo.ListHistoryBySecretID(ctx, secretdomain.HistoryPageFilter{
 			SecretID: in.SecretID,
 			EnvCodes: in.EnvList,
 			UserID:   in.UserID,
@@ -467,19 +529,34 @@ func (s *Service) History(ctx context.Context, in HistoryInput) (*HistoryResult,
 		})
 	case in.BatchID != uuid.Nil:
 		// 特殊情况：batchId 表示一次提交批次，需要完整返回该批次记录，不使用分页参数。
-		return s.historyByBatch(ctx, in)
+		result, resultErr = s.historyByBatch(ctx, in)
 	default:
-		return nil, ErrInvalidParam
+		resultErr = ErrInvalidParam
 	}
-	if err != nil {
-		return nil, err
+	if resultErr != nil {
+		if auditErr := s.recordHistoryAudit(ctx, in, nil, resultErr); auditErr != nil {
+			resultErr = errors.Join(resultErr, auditErr)
+		}
+		return nil, resultErr
 	}
 
-	views, err := s.toHistoryViews(ctx, histories, &sync.Map{})
-	if err != nil {
-		return nil, err
+	if result == nil {
+		var views []HistoryView
+		views, resultErr = s.toHistoryViews(ctx, histories, &sync.Map{})
+		if resultErr == nil {
+			result = &HistoryResult{Total: total, HistoryList: views}
+		}
 	}
-	return &HistoryResult{Total: total, HistoryList: views}, nil
+	if resultErr != nil {
+		if auditErr := s.recordHistoryAudit(ctx, in, nil, resultErr); auditErr != nil {
+			resultErr = errors.Join(resultErr, auditErr)
+		}
+		return nil, resultErr
+	}
+	if auditErr := s.recordHistoryAudit(ctx, in, result, nil); auditErr != nil {
+		return nil, auditErr
+	}
+	return result, nil
 }
 
 func (s *Service) historyByBatch(ctx context.Context, in HistoryInput) (*HistoryResult, error) {
@@ -626,7 +703,37 @@ func (s *Service) resolveNickname(ctx context.Context, names *sync.Map, userID s
 // List 查询 secrets 列表，支持两种查询模式：
 //  1. 旧模式：FolderGroupID 非空，按 folder 业务组查询其下全部 secrets。
 //  2. 新模式：按 ProjectID + FolderCode + EnvList 查询，KeyList 为空返回全部 key，非空按 key 精确过滤。
-func (s *Service) List(ctx context.Context, in ListInput) ([]SecretView, error) {
+func (s *Service) List(ctx context.Context, in ListInput) (views []SecretView, resultErr error) {
+	resourceID := in.FolderGroupID.String()
+	resourceName := ""
+	scopeType := "folder"
+	scopeID := resourceID
+	if in.FolderGroupID == uuid.Nil {
+		resourceID = in.ProjectID.String()
+		resourceName = strings.TrimSpace(in.FolderCode)
+		scopeType = "project"
+		scopeID = resourceID
+	}
+	defer func() {
+		detail := map[string]any{
+			"environmentFilterCount": len(in.EnvList),
+			"keyFilterCount":         len(in.KeyList),
+			"resultCount":            len(views),
+		}
+		auditErr := s.recordReadResult(
+			ctx, auditActionList, "secretCollection", resourceID, resourceName,
+			scopeType, scopeID, "", detail, resultErr,
+		)
+		if auditErr == nil {
+			return
+		}
+		if resultErr != nil {
+			resultErr = errors.Join(resultErr, auditErr)
+		} else {
+			resultErr = auditErr
+		}
+	}()
+
 	if in.FolderGroupID != uuid.Nil {
 		return s.ListByFolder(ctx, in.FolderGroupID)
 	}
@@ -697,7 +804,28 @@ func normalizeList(items []string) []string {
 }
 
 // GetByGroup 查询2：按 secret 业务组查询所有环境下的值信息（聚合视图）
-func (s *Service) GetByGroup(ctx context.Context, groupID uuid.UUID) (*SecretView, error) {
+func (s *Service) GetByGroup(ctx context.Context, groupID uuid.UUID) (view *SecretView, resultErr error) {
+	resourceID := ""
+	if groupID != uuid.Nil {
+		resourceID = groupID.String()
+	}
+	resourceName := ""
+	scopeID := ""
+	defer func() {
+		auditErr := s.recordReadResult(
+			ctx, auditActionRead, "secret", resourceID, resourceName,
+			"folder", scopeID, "", nil, resultErr,
+		)
+		if auditErr == nil {
+			return
+		}
+		if resultErr != nil {
+			resultErr = errors.Join(resultErr, auditErr)
+		} else {
+			resultErr = auditErr
+		}
+	}()
+
 	if groupID == uuid.Nil {
 		return nil, ErrInvalidParam
 	}
@@ -714,25 +842,67 @@ func (s *Service) GetByGroup(ctx context.Context, groupID uuid.UUID) (*SecretVie
 	if err != nil {
 		return nil, err
 	}
+	resourceName = views[0].Key
+	scopeID = secrets[0].FolderID.String()
+	if s.auditRecorder != nil {
+		folder, err := s.folderRepo.GetByID(ctx, secrets[0].FolderID)
+		if err != nil {
+			return nil, err
+		}
+		if folder != nil && folder.GroupID != uuid.Nil {
+			scopeID = folder.GroupID.String()
+		}
+	}
 	return &views[0], nil
 }
 
 // Delete 删除密钥：按 group_id 逻辑删除全部环境实例
-func (s *Service) Delete(ctx context.Context, groupID uuid.UUID, operator string) error {
+func (s *Service) Delete(ctx context.Context, groupID uuid.UUID, operator string) (resultErr error) {
+	resourceName := ""
+	defer func() {
+		if resultErr == nil {
+			return
+		}
+		if auditErr := s.recordDeleteFailure(ctx, groupID, resourceName, operator, resultErr); auditErr != nil {
+			resultErr = errors.Join(resultErr, auditErr)
+		}
+	}()
 	if groupID == uuid.Nil {
 		return ErrInvalidParam
 	}
 
-	secrets, err := s.repo.ListByGroupID(ctx, groupID)
-	if err != nil {
-		return err
-	}
-	if len(secrets) == 0 {
-		return ErrNotFound
-	}
+	resultErr = s.repo.WithTx(ctx, func(txCtx context.Context) error {
+		secrets, err := s.repo.ListByGroupID(txCtx, groupID)
+		if err != nil {
+			return err
+		}
+		if len(secrets) == 0 {
+			return ErrNotFound
+		}
+		resourceName = secrets[0].Key
 
-	_, err = s.repo.DeleteByGroupID(ctx, groupID, operator)
-	return err
+		scopeID := secrets[0].FolderID.String()
+		if s.auditRecorder != nil {
+			folder, err := s.folderRepo.GetByID(txCtx, secrets[0].FolderID)
+			if err != nil {
+				return err
+			}
+			if folder != nil && folder.GroupID != uuid.Nil {
+				scopeID = folder.GroupID.String()
+			}
+		}
+		if _, err := s.repo.DeleteByGroupID(txCtx, groupID, operator); err != nil {
+			return err
+		}
+		event := newSecretAuditEvent(
+			auditActionDelete, auditdomain.ResultSuccess, groupID.String(), resourceName,
+			"folder", scopeID, nil, operator,
+			[]auditdomain.Change{{Field: "isDeleted", Before: false, After: true, Redacted: false}},
+			map[string]any{"environmentCount": len(secrets)},
+		)
+		return s.recordAudit(txCtx, []*auditdomain.Event{event})
+	})
+	return resultErr
 }
 
 // buildViews 将若干环境实例按 group_id 聚合为 SecretView 列表（解密 value，env code 作为 values 的 key）

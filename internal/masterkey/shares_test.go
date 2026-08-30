@@ -149,6 +149,38 @@ func TestManagerSubmitShareIsConcurrencySafe(t *testing.T) {
 	}
 }
 
+func TestManagerSubmitShareWithCommitRollsBackOnAuditFailure(t *testing.T) {
+	tokens := createShareTokens(t, []byte("12345678901234567890123456789012"), uuid.New())
+	auditErr := errors.New("audit unavailable")
+	manager := NewManager()
+
+	if err := manager.SubmitShareWithCommit(tokens[0], func(Status) error { return auditErr }); !errors.Is(err, auditErr) {
+		t.Fatalf("first SubmitShareWithCommit() error=%v", err)
+	}
+	if status := manager.Status(); status.Ready || status.SubmittedShares != 0 {
+		t.Fatalf("first failed audit changed manager state: %+v", status)
+	}
+	if err := manager.SubmitShare(tokens[0]); err != nil {
+		t.Fatalf("resubmit first share: %v", err)
+	}
+	if err := manager.SubmitShare(tokens[1]); err != nil {
+		t.Fatalf("submit second share: %v", err)
+	}
+
+	if err := manager.SubmitShareWithCommit(tokens[2], func(Status) error { return auditErr }); !errors.Is(err, auditErr) {
+		t.Fatalf("activation SubmitShareWithCommit() error=%v", err)
+	}
+	if status := manager.Status(); status.Ready || status.SubmittedShares != 2 {
+		t.Fatalf("failed activation audit changed manager state: %+v", status)
+	}
+	if err := manager.SubmitShare(tokens[2]); err != nil {
+		t.Fatalf("resubmit activation share: %v", err)
+	}
+	if status := manager.Status(); !status.Ready || status.Source != SourceShares {
+		t.Fatalf("manager did not activate after successful resubmit: %+v", status)
+	}
+}
+
 func createShareTokens(t *testing.T, key []byte, keySetID uuid.UUID) []string {
 	t.Helper()
 	// 测试使用与生产恢复逻辑相同的 HashiCorp Shamir 实现

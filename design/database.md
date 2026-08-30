@@ -44,6 +44,7 @@ UPDATE tenant_info SET manager = create_by WHERE manager = '' AND create_by <> '
 UPDATE organization_info SET manager = create_by WHERE manager = '' AND create_by <> '';
 UPDATE project_info SET manager = create_by WHERE manager = '' AND create_by <> '';
 UPDATE folder_info SET manager = create_by WHERE manager = '' AND create_by <> '';
+```
 
 ---
 
@@ -228,22 +229,37 @@ CREATE INDEX IF NOT EXISTS idx_project_info_org_code ON project_info (org_id, co
 
 ## 表名：`project_user_relation`
 
-**说明**：项目与用户的多对多绑定关系表。`project_id` 关联 `project_info.id`；`user_id` 关联 `user_info.id`（系统内部 UUID），不是 `user_info.user_id` 中保存的外部用户标识。关联关系由代码层维护，不使用外键。
+**说明**：项目与用户的多对多绑定关系表，同时承载项目协作访问的有效期。`project_id` 关联 `project_info.id`；`user_id` 关联 `user_info.id`（系统内部 UUID），不是 `user_info.user_id` 中保存的外部用户标识。关联关系由代码层维护，不使用外键。
 
 ```sql
 CREATE TABLE IF NOT EXISTS project_user_relation (
-    id         uuid PRIMARY KEY, -- 应用层生成
-    project_id uuid NOT NULL, -- project_info.id
-    user_id    uuid NOT NULL  -- user_info.id（系统内部 UUID）
+    id         uuid        PRIMARY KEY,              -- 应用层生成
+    project_id uuid        NOT NULL,                 -- project_info.id
+    user_id    uuid        NOT NULL,                 -- user_info.id（系统内部 UUID）
+    expire_at  timestamptz,                          -- 访问到期时间，NULL 表示长期有效
+    is_deleted boolean     NOT NULL DEFAULT false,
+    delete_at  timestamptz,
+    delete_by  text        NOT NULL DEFAULT '',
+    create_by  text        NOT NULL DEFAULT '',
+    update_by  text        NOT NULL DEFAULT '',
+    create_at  timestamptz NOT NULL DEFAULT now(),
+    update_at  timestamptz NOT NULL DEFAULT now()
 );
 
--- 防止同一用户重复绑定同一项目，同时支持按项目查询用户
+-- 同一个未撤销关系只能保留一条；撤销后允许重新邀请并生成新记录
 CREATE UNIQUE INDEX IF NOT EXISTS uk_project_user_relation_project_user
-    ON project_user_relation (project_id, user_id);
+    ON project_user_relation (project_id, user_id)
+    WHERE is_deleted = false;
 
--- 支持按用户查询其绑定的全部项目
-CREATE INDEX IF NOT EXISTS idx_project_user_relation_user_project
-    ON project_user_relation (user_id, project_id);
+-- 支持按用户查询当前有效的普通项目和协作项目
+CREATE INDEX IF NOT EXISTS idx_project_user_relation_user_active
+    ON project_user_relation (user_id, project_id, expire_at)
+    WHERE is_deleted = false;
+
+-- 支持到期关系筛选以及后续到期通知/清理任务
+CREATE INDEX IF NOT EXISTS idx_project_user_relation_expire
+    ON project_user_relation (expire_at)
+    WHERE is_deleted = false AND expire_at IS NOT NULL;
 ```
 
 **索引说明**：
@@ -251,16 +267,52 @@ CREATE INDEX IF NOT EXISTS idx_project_user_relation_user_project
 | 索引名 | 字段 | 说明 |
 |--------|------|------|
 | `project_user_relation_pkey` | `id` | 主键索引，根据关系 ID 定位记录，由 PostgreSQL 自动创建 |
-| `uk_project_user_relation_project_user` | `project_id, user_id` | 防止重复绑定；其最左列同时支持按项目查询用户，无需额外创建 `project_id` 索引 |
-| `idx_project_user_relation_user_project` | `user_id, project_id` | 按用户查询其绑定项目，以及校验用户是否绑定指定项目 |
+| `uk_project_user_relation_project_user` | `project_id, user_id` | 防止同一个未撤销关系重复绑定；软删除后允许重新邀请 |
+| `idx_project_user_relation_user_active` | `user_id, project_id, expire_at` | 按用户查询未撤销关系，并结合 `expire_at` 判断是否仍有效 |
+| `idx_project_user_relation_expire` | `expire_at` | 支持到期筛选以及后续到期通知/清理任务 |
 
 **业务规则**（代码层校验）：
 
 - 新增绑定时由应用层生成 `id`。
 - 绑定前必须确认项目和用户存在且未删除。
-- 同一个 `project_id + user_id` 只能存在一条绑定记录，重复绑定按幂等成功处理。
-- 本表不保存软删除及审计字段，解除绑定时直接物理删除对应记录。
-- 删除项目或用户时，由应用层同步删除相关绑定记录。
+- `expire_at IS NULL` 表示长期有效；`expire_at > now()` 表示限时访问仍有效。
+- 查询项目、项目成员和访问关系时必须同时满足 `is_deleted = false`，以及 `expire_at IS NULL OR expire_at > now()`。
+- 到期只代表关系失效，不自动修改 `is_deleted`；只有用户主动关闭、撤销分享或上级资源删除时才执行软删除。
+- 同一个未撤销的 `project_id + user_id` 只能存在一条记录；对已到期但未撤销的关系续期时更新原记录的 `expire_at`。
+- 项目成员关系不修改 `user_info.tenant_id` 或 `user_info.org_id`。用户所属租户/组织表示其主归属，跨组织项目通过本表单独授权。
+- “协作项目”由项目所属组织与用户主归属组织不同推导，不额外保存协作标记，也不向前端暴露协作项目的所属组织信息。
+- 外部协作者不能担任项目管理员；项目管理员对应用户的主组织必须与 `project_info.org_id` 一致。该规则由项目 service 在创建和修改时校验。
+- 删除项目或用户时，由应用层软删除相关绑定记录。
+
+### 已有表升级 SQL
+
+生产数据库中的 `project_user_relation` 已存在时，执行以下增量 SQL。执行后再发布依赖新字段的应用版本。
+
+```sql
+ALTER TABLE project_user_relation
+    ADD COLUMN IF NOT EXISTS expire_at timestamptz,
+    ADD COLUMN IF NOT EXISTS is_deleted boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS delete_at timestamptz,
+    ADD COLUMN IF NOT EXISTS delete_by text NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS create_by text NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS update_by text NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS create_at timestamptz NOT NULL DEFAULT now(),
+    ADD COLUMN IF NOT EXISTS update_at timestamptz NOT NULL DEFAULT now();
+
+DROP INDEX IF EXISTS uk_project_user_relation_project_user;
+CREATE UNIQUE INDEX uk_project_user_relation_project_user
+    ON project_user_relation (project_id, user_id)
+    WHERE is_deleted = false;
+
+DROP INDEX IF EXISTS idx_project_user_relation_user_project;
+CREATE INDEX IF NOT EXISTS idx_project_user_relation_user_active
+    ON project_user_relation (user_id, project_id, expire_at)
+    WHERE is_deleted = false;
+
+CREATE INDEX IF NOT EXISTS idx_project_user_relation_expire
+    ON project_user_relation (expire_at)
+    WHERE is_deleted = false AND expire_at IS NOT NULL;
+```
 
 ---
 
@@ -500,3 +552,291 @@ CREATE INDEX IF NOT EXISTS idx_secret_info_history_group_created
 | 查询优先级 | 历史接口按 `secretId > batchId > groupId` 选择条件；当前仅实现 secretId 分页和 batchId 不分页查询，groupId 返回暂不支持错误 |
 
 **历史数据说明**：上线前已产生但未记录的历史 value 无法恢复。迁移时最多只能将 `secret_info` 当前值按当前 `version` 补为一条基线快照。
+
+---
+
+## 表名：`personal_secret_info`
+
+**说明**：用户个人密钥当前值表。每条记录归属于一个 `user_info` 用户，用于保存该用户个人持有、离职后需要由系统接管的工作凭据。该表不进入租户、组织、项目、环境、文件夹层级，也不与共享 `secret_info` 混用。
+
+`owner_id` 关联 `user_info.id`（系统内部 UUID），关联关系由代码层维护，不使用外键。密码值使用当前系统主密钥和 AES-256-GCM 加密，密文格式与 `secret_info.value_ciphertext` 完全一致，不引入第二套加密密钥。
+
+```sql
+CREATE TABLE IF NOT EXISTS personal_secret_info (
+    id               uuid        PRIMARY KEY,
+    owner_id         uuid        NOT NULL,                 -- user_info.id，个人密钥所有者的内部 UUID
+    name             text        NOT NULL,                 -- 凭据名称，如 GitLab、服务器账号
+    credential_type  text        NOT NULL DEFAULT 'password', -- 凭据类型，首期只使用 password
+    account          text        NOT NULL DEFAULT '',      -- 登录账号，作为列表元数据保存
+    login_url        text        NOT NULL DEFAULT '',      -- 登录地址，作为列表元数据保存
+    value_ciphertext text        NOT NULL DEFAULT '',      -- AES-256-GCM 加密后的密码值
+    remark           text        NOT NULL DEFAULT '',      -- 备注
+    version          integer     NOT NULL DEFAULT 1,       -- 当前版本号，实际内容变化时递增
+    is_deleted       boolean     NOT NULL DEFAULT false,
+    delete_at        timestamptz,
+    delete_by        text        NOT NULL DEFAULT '',
+    create_by        text        NOT NULL DEFAULT '',
+    update_by        text        NOT NULL DEFAULT '',
+    create_at        timestamptz NOT NULL DEFAULT now(),
+    update_at        timestamptz NOT NULL DEFAULT now()
+);
+
+-- 本人列表和超管接管列表均按所有者查询，并按名称稳定排序
+CREATE INDEX IF NOT EXISTS idx_personal_secret_info_owner_name
+    ON personal_secret_info (owner_id, name, id)
+    WHERE is_deleted = false;
+```
+
+**索引说明**：
+
+| 索引名 | 字段 | 说明 |
+|--------|------|------|
+| `idx_personal_secret_info_owner_name` | `owner_id, name, id` | 查询某个用户的全部有效个人密钥，并按名称和 ID 稳定排序 |
+
+**业务规则**（代码层校验，不落数据库约束）：
+
+| 规则 | 说明 |
+|------|------|
+| 所有权 | 创建时根据 JWT `staffuserid` 查询 `user_info.id` 并写入 `owner_id`；请求不得自行声明或修改所有者 |
+| 本人访问 | 普通接口始终追加 `owner_id = 当前用户内部 UUID`，其他普通用户和资源管理员不能查询该记录 |
+| 超管接管 | 只有具备系统超级管理员权限、目标用户 `is_blocked=true` 且完成三份主密钥分片验证后，才能通过独立接管接口访问 |
+| 本人列表显值 | 普通用户本人调用 list 时，由服务端批量解密并随每条记录返回 `value`，前端默认遮挡并在当前单元格内切换显隐；接口永远不返回 `value_ciphertext` |
+| 显值接口预留 | 保留 reveal 接口供后续切换为按需查询；当前 list 和 reveal 响应均禁止缓存，明文不得进入 Redis、日志、审计事件、URL 或前端持久化存储 |
+| 加密密钥 | 复用系统当前已经激活的 `masterkey.Manager`；不保存明文，不引入个人密钥专用主密钥 |
+| 类型预留 | `credential_type` 首期只使用 `password`；后续新增 token / recoveryCode 等类型时由代码层扩展 |
+| 版本递增 | name / credential_type / account / login_url / value / remark 任一实际变化时，当前版本递增并写入完整历史快照；无实际变化不产生新版本 |
+| 软删除 | 删除只修改当前表的软删除字段，历史快照继续保留；业务接口不提供历史删除能力 |
+| 离职顺序 | 用户应先锁定，完成个人密钥接管和外部密码轮换后再删除用户；存在未完成接管的个人密钥时不得提前删除用户 |
+
+---
+
+## 表名：`personal_secret_info_history`
+
+**说明**：用户个人密钥的不可变历史版本表。每次创建或实际更新个人密钥时，保存当时的完整字段快照；历史密码仍使用当前系统主密钥和 AES-256-GCM 加密。该表只追加、不更新、不删除，因此不包含 `update_at` / `update_by` / `delete_at` / `delete_by` / `is_deleted`。
+
+```sql
+CREATE TABLE IF NOT EXISTS personal_secret_info_history (
+    id                 uuid        PRIMARY KEY,
+    personal_secret_id uuid        NOT NULL,                 -- personal_secret_info.id
+    batch_id           uuid        NOT NULL,                 -- 一次 create/update 请求的批次 ID
+    owner_id           uuid        NOT NULL,                 -- 版本产生时的 user_info.id
+    name               text        NOT NULL,                 -- 版本产生时的凭据名称
+    credential_type    text        NOT NULL DEFAULT 'password',
+    account            text        NOT NULL DEFAULT '',      -- 版本产生时的登录账号
+    login_url          text        NOT NULL DEFAULT '',      -- 版本产生时的登录地址
+    value_ciphertext   text        NOT NULL DEFAULT '',      -- 该版本的 AES-256-GCM 密文
+    remark             text        NOT NULL DEFAULT '',      -- 版本产生时的备注
+    version            integer     NOT NULL,                 -- 对应当前表的版本号
+    commit_msg         text        NOT NULL DEFAULT '',      -- 本次版本变更说明
+    create_by          text        NOT NULL DEFAULT '',      -- 版本提交人外部用户 ID
+    create_at          timestamptz NOT NULL DEFAULT now()    -- 版本提交时间
+);
+
+-- 按个人密钥分页查询历史版本
+CREATE INDEX IF NOT EXISTS idx_personal_secret_info_history_secret_version
+    ON personal_secret_info_history (personal_secret_id, version DESC);
+-- 按一次创建或更新批次查询历史快照
+CREATE INDEX IF NOT EXISTS idx_personal_secret_info_history_batch
+    ON personal_secret_info_history (batch_id, create_at ASC);
+-- 预留按所有者查询个人密钥历史
+CREATE INDEX IF NOT EXISTS idx_personal_secret_info_history_owner_created
+    ON personal_secret_info_history (owner_id, create_at DESC);
+```
+
+**索引说明**：
+
+| 索引名 | 字段 | 说明 |
+|--------|------|------|
+| `idx_personal_secret_info_history_secret_version` | `personal_secret_id, version DESC` | 分页查询单个个人密钥的历史版本 |
+| `idx_personal_secret_info_history_batch` | `batch_id, create_at ASC` | 查询一次创建或更新产生的历史快照 |
+| `idx_personal_secret_info_history_owner_created` | `owner_id, create_at DESC` | 预留按用户查询全部个人密钥历史 |
+
+**业务规则**：
+
+| 规则 | 说明 |
+|------|------|
+| 初始版本 | 创建个人密钥时，在同一事务中写入当前记录和 `version=1` 的完整历史快照 |
+| 更新版本 | 更新前比较实际字段；发生变化时更新当前记录、递增版本并写入完整历史快照 |
+| 原子性 | 当前值创建或更新与历史快照写入必须使用同一 PostgreSQL 事务，任一步失败则整体回滚 |
+| 历史列表 | 历史列表只返回版本、变更说明、提交人和时间等元数据，不批量解密或返回历史密码 |
+| 历史显值 | 历史密码通过独立 history/reveal 接口按单个版本解密；本人访问仍校验所有权，超管访问仍要求有效接管授权 |
+| 提交人名称 | 接口响应中的提交人名称按规范返回 `createByName`，优先从现有用户姓名缓存解析，失败时返回空字符串 |
+| 加密与审计 | 历史明文、密文和主密钥分片均不得写入审计事件；审计仅记录资源 ID、版本、操作人、目标用户和结果 |
+
+---
+
+## 表名：`audit_event_log`（已确认）
+
+**说明**：全系统业务审计事件表，记录“谁在什么时间对什么资源执行了什么操作，以及操作结果”。该表是只追加历史表，业务代码只允许插入和查询，不提供更新、软删除或物理删除能力；超过一年保留期的数据仅允许由系统保留期任务清理。
+
+普通运行日志仍由 `pkg/logger` 输出；本表是可持久化、可按资源追溯的审计事实来源，不能使用普通日志替代。
+
+```sql
+CREATE TABLE IF NOT EXISTS audit_event_log (
+    id                  uuid        PRIMARY KEY,
+    event_source        text        NOT NULL DEFAULT 'server', -- 事件产生方：server / client / external / system；首期只写 server / system
+    source_event_id     uuid,                                -- 预留：客户端、SDK 或外部系统事件幂等 ID，首期不使用
+    source_occurred_at  timestamptz,                         -- 预留：事件源声明的发生时间，仅作辅助信息，不作为可信审计时间
+    entry_type          text        NOT NULL DEFAULT 'http', -- 服务入口：http / grpc / sdk / internal / job
+    caller_type         text        NOT NULL DEFAULT 'unknown', -- 调用方类型：web / sdk / service / cli / system / unknown
+    caller_name         text        NOT NULL DEFAULT '',     -- SDK、CLI 或调用服务名称；浏览器请求可为空
+    caller_version      text        NOT NULL DEFAULT '',     -- SDK、CLI 或调用服务版本
+    operation_name      text        NOT NULL DEFAULT '',     -- 技术入口：HTTP 路由模板、gRPC FullMethod、SDK 方法或任务名
+    action_code         text        NOT NULL,                -- 稳定动作编码，如 secret.update / auth.login / masterKey.share.submit
+    result_code         text        NOT NULL,                -- 结果：success / failure
+    actor_type          text        NOT NULL DEFAULT 'user', -- 操作主体：user / anonymous / service / system
+    resource_type       text        NOT NULL DEFAULT '',     -- 被操作资源类型，如 tenant / project / secret / masterKey
+    resource_id         text        NOT NULL DEFAULT '',     -- 被操作资源 ID；使用 text 兼容 UUID、外部用户 ID 和系统级资源
+    resource_name       text        NOT NULL DEFAULT '',     -- 资源名称快照；Secret 可记录 key，但禁止记录 value
+    scope_type          text        NOT NULL DEFAULT '',     -- 权限归属资源类型，如 tenant / org / project / folder / system
+    scope_id            text        NOT NULL DEFAULT '',     -- 权限归属资源 ID，供后续资源管理员权限过滤
+    batch_id            uuid,                                -- 可选业务批次 ID；同一次批量 Secret 操作共享
+    change_detail       jsonb       NOT NULL DEFAULT '[]'::jsonb, -- 字段变更数组；Secret value 只能标记 changed/redacted
+    event_detail        jsonb       NOT NULL DEFAULT '{}'::jsonb, -- 安全扩展信息，如影响数量、环境 ID；禁止放请求/响应体
+    failure_code        text        NOT NULL DEFAULT '',     -- 稳定失败编码，不写底层原始错误
+    failure_reason      text        NOT NULL DEFAULT '',     -- 可展示的安全失败原因
+    correlation_id      text        NOT NULL DEFAULT '',     -- 单次入口调用关联 ID，如 x-request-id、gRPC request-id 或 job run-id
+    trace_id            text        NOT NULL DEFAULT '',     -- 分布式追踪 trace ID；未接入追踪系统时可为空
+    protocol_status     text        NOT NULL DEFAULT '',     -- 协议结果码，如 HTTP 200、gRPC OK；内部任务可为空
+    protocol_detail     jsonb       NOT NULL DEFAULT '{}'::jsonb, -- 协议白名单上下文，禁止放 header/metadata/body
+    client_ip           text        NOT NULL DEFAULT '',     -- 调用端 IP 或 peer address；内部任务为空
+    user_agent          text        NOT NULL DEFAULT '',     -- 浏览器、SDK 或 gRPC User-Agent；内部任务为空
+    expire_at           timestamptz NOT NULL DEFAULT (now() + interval '1 year'), -- 到期清理时间
+    create_by           text        NOT NULL DEFAULT '',     -- 操作人外部用户 ID；匿名事件为空
+    create_by_name      text        NOT NULL DEFAULT '',     -- 操作人姓名快照
+    create_at           timestamptz NOT NULL DEFAULT now()   -- 服务端可信审计时间
+);
+
+-- 后续按某一个资源查询全部操作记录的主索引
+CREATE INDEX IF NOT EXISTS idx_audit_event_log_resource_created
+    ON audit_event_log (resource_type, resource_id, create_at DESC);
+-- 后续按权限归属资源过滤，供资源管理员查看
+CREATE INDEX IF NOT EXISTS idx_audit_event_log_scope_created
+    ON audit_event_log (scope_type, scope_id, create_at DESC);
+-- 按操作人查询审计记录
+CREATE INDEX IF NOT EXISTS idx_audit_event_log_creator_created
+    ON audit_event_log (create_by, create_at DESC);
+-- 按动作类型查询审计记录
+CREATE INDEX IF NOT EXISTS idx_audit_event_log_action_created
+    ON audit_event_log (action_code, create_at DESC);
+-- 全局审计列表按时间倒序查询
+CREATE INDEX IF NOT EXISTS idx_audit_event_log_created
+    ON audit_event_log (create_at DESC);
+-- 按单次入口调用关联其产生的全部资源事件
+CREATE INDEX IF NOT EXISTS idx_audit_event_log_correlation
+    ON audit_event_log (correlation_id);
+-- 按分布式 trace-id 关联跨 HTTP、gRPC 和服务调用的事件
+CREATE INDEX IF NOT EXISTS idx_audit_event_log_trace
+    ON audit_event_log (trace_id);
+-- 一年保留期批量清理
+CREATE INDEX IF NOT EXISTS idx_audit_event_log_expire
+    ON audit_event_log (expire_at);
+-- 预留客户端、SDK 或外部事件，防止同一个 sourceEventId 重复写入；NULL 的服务端事件不进入该索引
+CREATE UNIQUE INDEX IF NOT EXISTS uk_audit_event_log_source_event
+    ON audit_event_log (source_event_id)
+    WHERE source_event_id IS NOT NULL;
+```
+
+**索引说明**：
+
+| 索引名 | 字段 | 说明 |
+|--------|------|------|
+| `idx_audit_event_log_resource_created` | `resource_type, resource_id, create_at DESC` | 查询某个资源的完整操作历史 |
+| `idx_audit_event_log_scope_created` | `scope_type, scope_id, create_at DESC` | 后续按资源管理员权限范围过滤 |
+| `idx_audit_event_log_creator_created` | `create_by, create_at DESC` | 查询某个用户的全部操作 |
+| `idx_audit_event_log_action_created` | `action_code, create_at DESC` | 按动作编码筛选 |
+| `idx_audit_event_log_created` | `create_at DESC` | 超管查看全局时间线 |
+| `idx_audit_event_log_correlation` | `correlation_id` | 定位同一次 HTTP、gRPC、SDK 或任务调用产生的事件 |
+| `idx_audit_event_log_trace` | `trace_id` | 定位分布式调用链上的关联事件 |
+| `idx_audit_event_log_expire` | `expire_at` | 一年保留期清理扫描 |
+| `uk_audit_event_log_source_event` | `source_event_id` | 预留客户端、SDK 或外部事件幂等控制 |
+
+### 审计事件业务规则
+
+| 规则 | 说明 |
+|------|------|
+| 覆盖范围 | 除健康检查外，无论经 HTTP、gRPC、SDK 还是内部任务进入，均记录登录成功/失败/限流、认证和授权失败，以及已经进入 application service 的认证业务查询、创建、更新、删除、用户分配、Secret 历史读取、主密钥状态查询和分片提交；系统内部关键操作使用 `event_source=system` |
+| Handler 校验边界 | 普通业务接口在 Handler 层发生的 JSON 转换、参数绑定或必填项校验失败不写业务审计，因为请求尚未形成有效业务操作；登录、JWT 认证和主密钥分片等安全边界按各自安全策略记录失败尝试 |
+| 入口与调用方分离 | `entry_type` 表示服务实际接收调用的入口，`caller_type` 表示调用方。SDK 经 HTTP 调用时记录 `entry_type=http, caller_type=sdk`；SDK 经 gRPC 调用时记录 `entry_type=grpc, caller_type=sdk`；仅进程内直接调用才使用 `entry_type=sdk` |
+| 通用入口信息 | `operation_name` 使用稳定、低基数名称：HTTP 写路由模板而非原始 URL，gRPC 写 FullMethod，SDK 写公开方法名，任务写任务名；协议专属信息只允许写入 `protocol_detail` 白名单 |
+| 一资源一事件 | 一次入口调用批量操作多个逻辑资源时，每个资源写一条事件并共享 `correlation_id` / `trace_id` / `batch_id`；保证按 `resource_type + resource_id` 可直接查询，不依赖 JSON 扫描 |
+| 操作人快照 | `create_by` 来自认证用户 ID，`create_by_name` 保存当时姓名；登录失败等未知用户使用 `actor_type=anonymous`，不伪造用户 ID |
+| 可信时间 | `create_at` 只使用服务端时间；未来客户端、SDK 或外部事件的 `source_occurred_at` 仅供辅助展示，不参与顺序和保留期计算 |
+| 变更内容 | 普通字段在 `change_detail` 中记录字段名和 before/after；用户未实际修改的字段不记录 |
+| Secret 脱敏 | Secret 明文、密文均禁止进入审计表。仅记录 Secret `groupId`、key、环境 ID/code、版本号、批次 ID，并用 `changed=true, redacted=true` 表示值发生变化 |
+| 其他敏感数据 | 禁止记录密码、password hash、JWT、access token、Authorization、Cookie、主密钥、密钥分片、私钥、连接串、完整 HTTP header、gRPC metadata、请求体和响应体 |
+| 双重防护 | 业务模块只构造类型化白名单事件；audit 模块写库前再次递归拦截敏感字段名。`failure_reason` 使用稳定、安全文案，禁止直接保存底层错误字符串 |
+| 强一致写入 | 数据库写操作与 success 审计事件必须使用同一 PostgreSQL 事务；审计写入失败则业务事务回滚。查询操作必须在审计写入成功后才向客户端返回数据 |
+| 失败事件 | 业务事务失败后，failure 审计使用独立事务写入；失败事件写入失败时使用 `pkg/logger` 输出不含敏感数据的告警，但不能把失败操作误记为成功 |
+| 内存状态操作 | 主密钥分片等内存状态变更必须使用“校验 -> 审计持久化 -> 提交内存状态”的预提交方式；审计失败时不得改变内存状态 |
+| 外部事件预留 | 首期不接收复制、显示/隐藏等纯前端事件，也不接收 SDK 离线补报事件。未来启用时使用 `source_event_id` 做幂等，`source_occurred_at` 只作辅助；操作人、服务端时间、IP 等仍由后端根据认证和连接上下文填写，不信任事件源上送值 |
+| 权限预留 | 当前查询接口只要求通过认证，`applyPermissionFilter` 保留为空实现。后续由独立权限管控系统提供授权结果，再按 `userId + scope_type + scope_id` 接入资源管理员过滤并支持超管全局查询；在该系统接入前禁止将当前实现误认为已具备资源级日志查看权限 |
+| 保留期 | 每条记录默认写入一年后的 `expire_at`，当前阶段不实现清理任务。后续由系统保留期任务按 `expire_at` 分批物理清理到期数据，清理行为自身也必须留下系统审计事件 |
+| 数据库变更 | 本项目维护表结构设计和代码字段映射，但暂不内置 migration；实际建表、加列和索引变更由外部数据库变更系统执行。应用版本发布前必须由外部系统先完成对应 DDL，避免代码与数据库结构不一致 |
+| gRPC / SDK | 当前仅保留统一事件模型、入口类型和调用方字段，不实现 gRPC interceptor、SDK adapter 或离线事件接收；相关接入在对应协议能力开发时补充 |
+
+不同接入方式的字段映射如下。`action_code` 始终表示业务动作，不随接入协议变化；例如下面三种入口执行相同业务时均使用 `secret.update`。
+
+| 调用场景 | `event_source` | `entry_type` | `caller_type` | `operation_name` | `protocol_status` |
+|----------|----------------|--------------|---------------|------------------|-------------------|
+| Web 页面调用 HTTP API | `server` | `http` | `web` | `POST /api/v1/secret/update` | `200` |
+| Go SDK 经 HTTP API 调用 | `server` | `http` | `sdk` | `POST /api/v1/secret/update` | `200` |
+| Java SDK 经 gRPC 调用 | `server` | `grpc` | `sdk` | `/envvault.v1.SecretService/UpdateSecret` | `OK` |
+| 进程内 SDK 直接调用应用服务 | `server` | `sdk` | `sdk` | `SecretClient.Update` | `success` |
+| 系统保留期清理任务 | `system` | `job` | `system` | `audit.retention.cleanup` | `success` |
+
+`protocol_detail` 只允许按入口类型写入预定义白名单。例如 HTTP 可记录 `method`，gRPC 可记录 `service`、`method`、`streamType`，SDK 可记录 `language`；路由参数、query、header、metadata、请求体和响应体均不得写入。SDK 名称和版本统一写入 `caller_name` / `caller_version`，不塞入 JSON。
+
+`change_detail` 示例（仅定义安全结构，不要求数据库校验 JSON 内容）：
+
+```json
+[
+  {
+    "field": "name",
+    "before": "旧项目名",
+    "after": "新项目名",
+    "redacted": false
+  },
+  {
+    "field": "values.prod",
+    "changed": true,
+    "redacted": true
+  }
+]
+```
+
+### 可复用的现有能力
+
+| 现有能力 | 审计模块复用方式 |
+|----------|------------------|
+| `pkg/userctx` | 从请求上下文取得 `create_by` / `create_by_name`，不允许业务请求自行声明操作人 |
+| `middleware.RequestID` / `logger.TraceIDKey` | 首期复用现有 `x-request-id` 写入 `correlation_id`；它是请求关联 ID，不冒充分布式 `trace_id` |
+| Gin 请求上下文 | HTTP adapter 统一填充入口类型、路由模板、状态码、client IP 和 User-Agent；禁止读取并序列化 body |
+| 后续 gRPC interceptor | 从 FullMethod、status code、peer 和白名单 metadata 构造同一套审计上下文；禁止保存完整 metadata 或 message |
+| 后续 SDK adapter | 填充 SDK 名称、版本、语言和调用 ID；若 SDK 底层使用 HTTP/gRPC，则入口类型仍记录实际协议，调用方类型记录为 `sdk` |
+| `persistence.WithTx` / `persistence.TxDB` | 让审计仓储复用业务事务，保证业务写入和 success 审计原子提交 |
+| `application.NicknameResolver` | 仅在上下文缺少姓名时补齐操作人姓名快照，查询失败保留空字符串 |
+| `pkg/logger` | 只记录审计模块自身故障和安全告警，不作为审计表的成功写入替代品 |
+| 现有 permission filter 预留 | 后续审计查询按 `userId + scope_type + scope_id` 接入资源权限过滤 |
+
+### HMAC 哈希链增强方案（本期不启用）
+
+只追加表和“不提供更新/删除接口”能降低误操作风险，但数据库高权限账号仍可能直接篡改数据。HMAC 哈希链可以提供**篡改检测**：每条审计记录的哈希同时包含上一条记录哈希，任意修改、插入、删除或重排都会导致后续校验失败。
+
+计算规则建议为：
+
+```text
+eventHash = HMAC-SHA256(
+    auditHmacKey,
+    chainId || sequence || previousHash || canonicalEventPayload
+)
+```
+
+- `canonicalEventPayload` 必须采用固定字段顺序、UTC 时间和稳定 JSON 编码，且不包含 `event_hash` 自身。
+- HMAC 密钥必须通过独立 Kubernetes Secret 注入，不得与 Secret 主密钥或 JWT 签名密钥复用。
+- 使用 `hash_key_id` 标识密钥版本，支持轮换；旧密钥需按审计保留期保留验证能力。
+- 多实例并发写入时，需要在 PostgreSQL 中锁定对应链头记录，原子分配 `sequence` 并更新链头，不能由各实例自行计算上一条哈希。
+- 建议按自然日建立一条链（如 `2026-08-28`），便于一年后整链清理并降低单链无限增长影响。
+- 哈希链只能发现篡改，不能阻止拥有数据库和 HMAC 密钥的攻击者重算整条链。更强保证需要定期把每日链尾哈希写入外部只读存储或 SIEM 作为锚点。
+
+未来启用时再新增 `chain_id`、`chain_sequence`、`previous_hash`、`event_hash`、`hash_key_id` 字段和独立的链头状态表。HMAC 未启用前不写空占位字段，避免让使用方误以为当前记录已经具备防篡改能力。

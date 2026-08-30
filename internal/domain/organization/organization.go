@@ -38,10 +38,11 @@ type ListFilter struct {
 }
 
 // WithProjectsFilter 组织项目树查询过滤条件。
-// UserID 当前仅作为权限查询预留，待权限模型落地后用于仓储 SQL 过滤。
+// OwnOrganizationOnly 用于密钥导航，仅返回用户主组织；其他管理树保持原有范围。
 type WithProjectsFilter struct {
-	UserID    string
-	TenantIDs []uuid.UUID
+	UserID              string
+	TenantIDs           []uuid.UUID
+	OwnOrganizationOnly bool
 }
 
 // ProjectSummary 组织项目树中的项目摘要。
@@ -60,6 +61,20 @@ type OrganizationWithProjects struct {
 	ProjectList []ProjectSummary
 }
 
+// CollaborationProject 当前用户通过项目关系获得的跨组织协作项目。
+// 所属组织不对调用方暴露，ExpireAt 为 nil 时表示长期有效。
+type CollaborationProject struct {
+	ID       uuid.UUID
+	Name     string
+	ExpireAt *time.Time
+}
+
+// WithProjectsResult 密钥管理项目导航所需的普通组织树与协作项目。
+type WithProjectsResult struct {
+	Organizations         []*OrganizationWithProjects
+	CollaborationProjects []CollaborationProject
+}
+
 // Repository 组织仓储接口（领域层定义，基础设施层实现）
 type Repository interface {
 	// Create 创建组织
@@ -76,4 +91,6 @@ type Repository interface {
 	List(ctx context.Context, filter ListFilter) ([]*Organization, int64, error)
 	// ListWithProjects 查询全部组织及其项目；filter 为后续用户权限过滤预留
 	ListWithProjects(ctx context.Context, filter WithProjectsFilter) ([]*OrganizationWithProjects, error)
+	// ListCollaborationProjects 查询用户当前有效的跨组织协作项目，不返回所属组织信息。
+	ListCollaborationProjects(ctx context.Context, userID string) ([]CollaborationProject, error)
 }

@@ -448,3 +448,19 @@ Content-Type: application/json
 4. 状态响应已经增加非敏感提交进度，登录和分片提交记录固定结果审计日志
 5. 前端已经调整为登录、等待状态和单份分片输入三个阶段
 6. 已覆盖密码哈希、JWT 验签、重复分片、跨批次分片、并发提交和请求体限制测试
+
+### 9.9 集群内部主密钥传输（第一阶段）
+
+为支持滚动重启时从已就绪实例恢复主密钥，当前增加一个仅供集群内部调用的传输接口：
+
+```http
+POST /internal/v1/masterKey/transfer
+X-Env-Vault-Internal-Token: <集群内部令牌>
+Content-Type: application/json
+```
+
+请求体中的 `publicKey` 为新实例生成的临时 RSA 公钥，可使用 PEM 或 Base64 DER 编码。已就绪实例使用 RSA-OAEP-SHA256 加密内存中的 32 字节主密钥，返回 `encryptedMasterKey`、`keyFingerprint` 和算法标识。`encryptedMasterKey` 是密文的 Base64 表示，不是主密钥明文。
+
+当前阶段使用独立的 `security.master_key_peer_token` 作为临时实例认证方式，不复用用户 JWT。未配置该令牌时，接口保持禁用并返回 503；后续接入 mTLS 后替换该认证层。接口不经过公网业务路由，且只有已激活主密钥的实例能够返回密钥信封。
+
+新实例使用临时私钥解开信封，校验 `keyFingerprint` 后调用 `Activate(..., SourcePeer)`，解密后的主密钥不写入数据库、Redis、日志或 HTTP 响应。当前接口只解决“集群中仍有一个已就绪实例”的滚动重启场景；全部实例同时退出时仍需人工提交三个分片。

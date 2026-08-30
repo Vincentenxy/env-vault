@@ -93,6 +93,9 @@ func (s *stubOrgRepo) ListWithProjects(ctx context.Context, filter orgdomain.Wit
 	}
 	return nil, nil
 }
+func (s *stubOrgRepo) ListCollaborationProjects(context.Context, string) ([]orgdomain.CollaborationProject, error) {
+	return nil, nil
+}
 
 func TestService_Create_ManagerDefaultsToOperator(t *testing.T) {
 	var created *tenantdomain.Tenant

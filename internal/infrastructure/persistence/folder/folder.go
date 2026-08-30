@@ -51,6 +51,12 @@ func NewRepository(db *gorm.DB) *Repository {
 	return &Repository{db: db}
 }
 
+func (r *Repository) WithTx(ctx context.Context, fn func(context.Context) error) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return fn(persistence.WithTx(ctx, tx))
+	})
+}
+
 // CreateBatch 批量创建文件夹（GORM 对 slice 生成单条多行 INSERT，天然原子）
 func (r *Repository) CreateBatch(ctx context.Context, folders []*folderdomain.Folder) error {
 	if len(folders) == 0 {
@@ -97,7 +103,7 @@ func (r *Repository) UpdateByGroupID(ctx context.Context, groupID uuid.UUID, nam
 		updates["key_pattern"] = *keyPattern
 	}
 
-	result := r.db.WithContext(ctx).
+	result := persistence.TxDB(ctx, r.db).WithContext(ctx).
 		Model(&folderPO{}).
 		Where("group_id = ? AND is_deleted = false", groupID).
 		Updates(updates)
@@ -107,7 +113,7 @@ func (r *Repository) UpdateByGroupID(ctx context.Context, groupID uuid.UUID, nam
 // DeleteByGroupID 按 group_id 软删除全环境下的记录（所有层级）
 func (r *Repository) DeleteByGroupID(ctx context.Context, groupID uuid.UUID, deleteBy string) (int64, error) {
 	now := time.Now()
-	result := r.db.WithContext(ctx).
+	result := persistence.TxDB(ctx, r.db).WithContext(ctx).
 		Model(&folderPO{}).
 		Where("group_id = ? AND is_deleted = false", groupID).
 		Updates(map[string]any{
@@ -123,7 +129,7 @@ func (r *Repository) DeleteByGroupID(ctx context.Context, groupID uuid.UUID, del
 // GetByID 按 ID 查询文件夹（不含已删除）
 func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*folderdomain.Folder, error) {
 	var po folderPO
-	err := withStats(r.db.WithContext(ctx)).
+	err := withStats(persistence.TxDB(ctx, r.db).WithContext(ctx)).
 		Where("id = ? AND is_deleted = false", id).
 		Take(&po).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -139,7 +145,7 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*folderdomain.F
 // 代表记录选取：同 group_id 内 ORDER BY update_at DESC, create_at ASC 第一条
 func (r *Repository) GetByGroupID(ctx context.Context, groupID uuid.UUID) (*folderdomain.Folder, error) {
 	var po folderPO
-	err := r.db.WithContext(ctx).
+	err := persistence.TxDB(ctx, r.db).WithContext(ctx).
 		Where("group_id = ? AND is_deleted = false", groupID).
 		Order("update_at DESC, create_at ASC").
 		First(&po).Error
@@ -155,7 +161,7 @@ func (r *Repository) GetByGroupID(ctx context.Context, groupID uuid.UUID) (*fold
 // ListByGroupID 按 group_id 查询业务组下的全部环境实例（不含已删除）
 func (r *Repository) ListByGroupID(ctx context.Context, groupID uuid.UUID) ([]*folderdomain.Folder, error) {
 	var pos []folderPO
-	err := r.db.WithContext(ctx).
+	err := persistence.TxDB(ctx, r.db).WithContext(ctx).
 		Where("group_id = ? AND is_deleted = false", groupID).
 		Find(&pos).Error
 	if err != nil {
@@ -172,7 +178,7 @@ func (r *Repository) ListByGroupID(ctx context.Context, groupID uuid.UUID) ([]*f
 // GetByEnvIDsCode 按环境集合 + 编码查询文件夹（不含已删除），不存在返回 nil, nil
 func (r *Repository) GetByEnvIDsCode(ctx context.Context, envIDs []uuid.UUID, code string) (*folderdomain.Folder, error) {
 	var po folderPO
-	err := r.db.WithContext(ctx).
+	err := persistence.TxDB(ctx, r.db).WithContext(ctx).
 		Where("env_id IN ? AND code = ? AND is_deleted = false", envIDs, code).
 		First(&po).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -187,7 +193,7 @@ func (r *Repository) GetByEnvIDsCode(ctx context.Context, envIDs []uuid.UUID, co
 // GetByEnvCode 按环境 + 编码查询文件夹（不含已删除），不存在返回 nil, nil
 func (r *Repository) GetByEnvCode(ctx context.Context, envID uuid.UUID, code string) (*folderdomain.Folder, error) {
 	var po folderPO
-	err := r.db.WithContext(ctx).
+	err := persistence.TxDB(ctx, r.db).WithContext(ctx).
 		Where("env_id = ? AND code = ? AND is_deleted = false", envID, code).
 		First(&po).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -202,7 +208,7 @@ func (r *Repository) GetByEnvCode(ctx context.Context, envID uuid.UUID, code str
 // GetByParentCode 按父文件夹 + 编码查询文件夹（不含已删除），不存在返回 nil, nil
 func (r *Repository) GetByParentCode(ctx context.Context, parentID uuid.UUID, code string) (*folderdomain.Folder, error) {
 	var po folderPO
-	err := r.db.WithContext(ctx).
+	err := persistence.TxDB(ctx, r.db).WithContext(ctx).
 		Where("parent_folder_id = ? AND code = ? AND is_deleted = false", parentID, code).
 		First(&po).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -217,7 +223,7 @@ func (r *Repository) GetByParentCode(ctx context.Context, parentID uuid.UUID, co
 // ListTopGroupIDsByEnvIDs 列出指定环境集合下的顶级 folder 的全部 group_id（去重）
 func (r *Repository) ListTopGroupIDsByEnvIDs(ctx context.Context, envIDs []uuid.UUID) ([]uuid.UUID, error) {
 	var groupIDs []uuid.UUID
-	err := r.db.WithContext(ctx).
+	err := persistence.TxDB(ctx, r.db).WithContext(ctx).
 		Model(&folderPO{}).
 		Where("env_id IN ? AND parent_folder_id IS NULL AND is_deleted = false", envIDs).
 		Distinct("group_id").
@@ -231,7 +237,7 @@ func (r *Repository) ListTopGroupIDsByEnvIDs(ctx context.Context, envIDs []uuid.
 // ListSubGroupIDsByParentFolderID 列出指定 parent folder 下的所有子 folder 的 group_id（去重）。
 func (r *Repository) ListSubGroupIDsByParentFolderID(ctx context.Context, parentFolderID uuid.UUID) ([]uuid.UUID, error) {
 	var subGroupIDs []uuid.UUID
-	err := r.db.WithContext(ctx).Model(&folderPO{}).
+	err := persistence.TxDB(ctx, r.db).WithContext(ctx).Model(&folderPO{}).
 		Where("parent_folder_id = ? AND is_deleted = false", parentFolderID).
 		Distinct("group_id").
 		Pluck("group_id", &subGroupIDs).Error
@@ -253,7 +259,7 @@ func (r *Repository) ListByGroupIDs(ctx context.Context, groupIDs []uuid.UUID, f
 
 	// 1. total = COUNT(DISTINCT group_id) 应用过滤
 	var total int64
-	countQ := r.db.WithContext(ctx).Model(&folderPO{}).
+	countQ := persistence.TxDB(ctx, r.db).WithContext(ctx).Model(&folderPO{}).
 		Where("group_id IN ? AND is_deleted = false", groupIDs)
 	if filter.Code != "" {
 		countQ = countQ.Where("code ILIKE ?", "%"+filter.Code+"%")
@@ -267,7 +273,7 @@ func (r *Repository) ListByGroupIDs(ctx context.Context, groupIDs []uuid.UUID, f
 
 	// 2. 按 code 字典序取本页涉及的 code 子集（带分页 + 过滤）
 	var codes []string
-	codeQ := r.db.WithContext(ctx).Model(&folderPO{}).
+	codeQ := persistence.TxDB(ctx, r.db).WithContext(ctx).Model(&folderPO{}).
 		Select("DISTINCT code").
 		Where("group_id IN ? AND is_deleted = false", groupIDs)
 	if filter.Code != "" {
@@ -290,7 +296,7 @@ func (r *Repository) ListByGroupIDs(ctx context.Context, groupIDs []uuid.UUID, f
 
 	// 3. 取这些 code 对应的 group_id（每 code 取一个；多条同 code 共享同一 group_id，自然只返回 1 个）
 	var pageGroupIDs []uuid.UUID
-	if err := r.db.WithContext(ctx).Model(&folderPO{}).
+	if err := persistence.TxDB(ctx, r.db).WithContext(ctx).Model(&folderPO{}).
 		Select("DISTINCT group_id").
 		Where("group_id IN ? AND code IN ? AND is_deleted = false", groupIDs, codes).
 		Pluck("group_id", &pageGroupIDs).Error; err != nil {
@@ -304,7 +310,7 @@ func (r *Repository) ListByGroupIDs(ctx context.Context, groupIDs []uuid.UUID, f
 	// 3. 每 group_id 取代表记录：update_at DESC, create_at ASC 第一条，并按该环境记录统计子资源。
 	// PostgreSQL DISTINCT ON 按 group_id 分组，与 ORDER BY 起始列匹配实现"每组一行"
 	var pos []folderPO
-	err := r.db.WithContext(ctx).Raw(
+	err := persistence.TxDB(ctx, r.db).WithContext(ctx).Raw(
 		`WITH representative AS (
              SELECT DISTINCT ON (group_id) *
              FROM folder_info

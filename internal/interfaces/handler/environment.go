@@ -95,7 +95,7 @@ func (h *EnvironmentHandler) Create(c *gin.Context) {
 		})
 	}
 
-	environments, err := h.svc.Create(c, envapp.CreateInput{
+	environments, err := h.svc.Create(withHTTPAuditContext(c), envapp.CreateInput{
 		ProjectID:    req.ProjectID,
 		Environments: items,
 	}, operator(c))
@@ -119,7 +119,7 @@ func (h *EnvironmentHandler) Update(c *gin.Context) {
 		return
 	}
 
-	e, err := h.svc.Update(c, envapp.UpdateInput{
+	e, err := h.svc.Update(withHTTPAuditContext(c), envapp.UpdateInput{
 		ID:          req.ID,
 		Name:        req.Name,
 		Remark:      req.Remark,
@@ -141,7 +141,7 @@ func (h *EnvironmentHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	err := h.svc.Delete(c, req.ID, operator(c))
+	err := h.svc.Delete(withHTTPAuditContext(c), req.ID, operator(c))
 	h.respondError(c, err)
 	if err != nil {
 		return
@@ -157,7 +157,7 @@ func (h *EnvironmentHandler) Detail(c *gin.Context) {
 		return
 	}
 
-	e, err := h.svc.GetByID(c, req.ID)
+	e, err := h.svc.GetByID(withHTTPAuditContext(c), req.ID)
 	h.respondError(c, err)
 	if err != nil {
 		return
@@ -173,7 +173,7 @@ func (h *EnvironmentHandler) List(c *gin.Context) {
 		return
 	}
 
-	environments, err := h.svc.List(c, envapp.ListInput{
+	environments, err := h.svc.List(withHTTPAuditContext(c), envapp.ListInput{
 		ProjectID: req.ProjectID,
 	})
 	h.respondError(c, err)

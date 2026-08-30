@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -26,7 +27,7 @@ type stubOrgService struct {
 	deleteFn       func(ctx context.Context, id uuid.UUID, operator string) error
 	getByID        func(ctx context.Context, id uuid.UUID) (*orgdomain.Organization, error)
 	listFn         func(ctx context.Context, in orgapp.ListInput) ([]*orgdomain.Organization, int64, error)
-	withProjectsFn func(ctx context.Context, in orgapp.WithProjectsInput) ([]*orgdomain.OrganizationWithProjects, error)
+	withProjectsFn func(ctx context.Context, in orgapp.WithProjectsInput) (*orgdomain.WithProjectsResult, error)
 }
 
 func (s *stubOrgService) Create(ctx context.Context, in orgapp.CreateInput, operator string) (*orgdomain.Organization, error) {
@@ -59,7 +60,7 @@ func (s *stubOrgService) List(ctx context.Context, in orgapp.ListInput) ([]*orgd
 	}
 	return nil, 0, nil
 }
-func (s *stubOrgService) ListWithProjects(ctx context.Context, in orgapp.WithProjectsInput) ([]*orgdomain.OrganizationWithProjects, error) {
+func (s *stubOrgService) ListWithProjects(ctx context.Context, in orgapp.WithProjectsInput) (*orgdomain.WithProjectsResult, error) {
 	if s.withProjectsFn != nil {
 		return s.withProjectsFn(ctx, in)
 	}
@@ -421,17 +422,22 @@ func TestOrgHandler_WithProject_Success(t *testing.T) {
 	orgID := uuid.New()
 	projectID := uuid.New()
 	emptyOrgID := uuid.New()
+	expireAt := time.Now().Add(48 * time.Hour).Truncate(time.Second)
 	svc := &stubOrgService{
-		withProjectsFn: func(ctx context.Context, in orgapp.WithProjectsInput) ([]*orgdomain.OrganizationWithProjects, error) {
+		withProjectsFn: func(ctx context.Context, in orgapp.WithProjectsInput) (*orgdomain.WithProjectsResult, error) {
 			if in.UserID != "u-1" {
 				t.Fatalf("expected JWT user ID u-1, got %q", in.UserID)
 			}
-			return []*orgdomain.OrganizationWithProjects{
-				{
+			return &orgdomain.WithProjectsResult{
+				Organizations: []*orgdomain.OrganizationWithProjects{{
 					ID: orgID, Name: "研发组",
 					ProjectList: []orgdomain.ProjectSummary{{ID: projectID, Name: "效能平台"}},
 				},
-				{ID: emptyOrgID, Name: "空组织", ProjectList: []orgdomain.ProjectSummary{}},
+					{ID: emptyOrgID, Name: "空组织", ProjectList: []orgdomain.ProjectSummary{}},
+				},
+				CollaborationProjects: []orgdomain.CollaborationProject{{
+					ID: uuid.New(), Name: "协作平台", ExpireAt: &expireAt,
+				}},
 			}, nil
 		},
 	}
@@ -466,11 +472,18 @@ func TestOrgHandler_WithProject_Success(t *testing.T) {
 	if projects, ok := second["projectList"].([]any); !ok || len(projects) != 0 {
 		t.Fatalf("expected empty projectList array, got %+v", second["projectList"])
 	}
+	collaborations := data["collaborationProjectList"].([]any)
+	if len(collaborations) != 1 || collaborations[0].(map[string]any)["name"] != "协作平台" {
+		t.Fatalf("unexpected collaboration projects: %+v", collaborations)
+	}
+	if collaborations[0].(map[string]any)["expireAt"] != expireAt.Format(time.RFC3339) {
+		t.Fatalf("unexpected collaboration expiry: %+v", collaborations[0])
+	}
 }
 
 func TestOrgHandler_WithProject_InternalError(t *testing.T) {
 	svc := &stubOrgService{
-		withProjectsFn: func(context.Context, orgapp.WithProjectsInput) ([]*orgdomain.OrganizationWithProjects, error) {
+		withProjectsFn: func(context.Context, orgapp.WithProjectsInput) (*orgdomain.WithProjectsResult, error) {
 			return nil, errors.New("db unavailable")
 		},
 	}

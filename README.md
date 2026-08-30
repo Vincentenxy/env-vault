@@ -54,6 +54,35 @@ SERVER_PORT=9090 go run ./cmd
 docker build -t env-vault:latest .
 ```
 
+镜像不包含 `configs/config.yaml`，也不包含数据库密码、JWT 私钥或 Secret 主密钥。运行容器时必须挂载运行配置，或通过环境变量覆盖配置；这样可以避免凭证进入镜像层。
+
+### Kubernetes 三副本部署
+
+三副本 StatefulSet 清单位于 [deploy/k8s/env-vault-statefulset.yaml](deploy/k8s/env-vault-statefulset.yaml)。安装前必须完成以下修改：
+
+- 将 `env-vault-runtime` 和 `env-vault-jwt` 中的 `REPLACE_ME` 替换为真实凭证；这些占位值不能直接用于生产环境。
+- 将 ConfigMap 中的 PostgreSQL、Redis 服务地址改为实际地址，并确认 `ssl_mode` 与数据库配置一致。
+- 将 StatefulSet 的 `image` 改为集群可拉取的镜像地址；使用私有镜像仓库时追加 `imagePullSecrets`。
+- 3 个副本会通过 `topologySpreadConstraints` 分散到 3 个节点，因此集群至少需要 3 个可调度节点。
+
+构建并推送镜像后应用清单：
+
+```bash
+docker build -t registry.example.com/env-vault:0.1.0 .
+docker push registry.example.com/env-vault:0.1.0
+# 修改 YAML 中的 image 后执行
+kubectl apply -f deploy/k8s/env-vault-statefulset.yaml
+kubectl -n env-vault get pods -o wide
+```
+
+清单提供三个集群内地址：
+
+- `env-vault.env-vault.svc.cluster.local:80`：正常业务流量，只选择 readiness probe 已通过的副本。
+- `env-vault-headless.env-vault.svc.cluster.local:8090`：StatefulSet 的 Headless Service，用于后续 Pod 间发现。
+- `env-vault-bootstrap.env-vault.svc.cluster.local:8090`：只指向 `env-vault-0`，用于首次提交三个主密钥分片；不要将该 Service 直接暴露到公网。
+
+主密钥未激活时，业务接口仍由 Ready 中间件拦截。当前 StatefulSet 的 readiness probe 调用内部 `/internal/v1/masterKey/ready`，只有主密钥激活后副本才会加入正常业务 Service；首次启动需要通过受保护的 bootstrap 入口完成分片提交。详细部署约束见 [design/deploy.md](design/deploy.md)。
+
 健康检查：`GET /api/v1/pub/health`
 
 ## 本地认证初始化
@@ -262,6 +291,27 @@ go run ./cmd
 - 分片丢失导致可用数量少于 3 份时，主密钥和已有密文将无法恢复。
 
 详细启动设计见 [design/master-key-loading.md](design/master-key-loading.md)。
+
+### 测试集群内部主密钥传输
+
+`tools/master_key_transfer_test.py` 是一个不落盘的 Python 测试客户端。它会在内存中生成一次性 RSA-2048 密钥对，调用 `/internal/v1/masterKey/transfer`，使用临时私钥解密响应并校验主密钥指纹。需要 Python 3.9 或更高版本以及 `cryptography`：
+
+```powershell
+python -m pip install -r tools/requirements-master-key-test.txt
+$env:SECURITY_MASTER_KEY_PEER_TOKEN = '<与服务端相同的内部令牌>'
+python tools/master_key_transfer_test.py
+Remove-Item Env:SECURITY_MASTER_KEY_PEER_TOKEN
+```
+
+默认服务地址为 `http://localhost:8090/internal/v1/masterKey/transfer`。服务端必须已经激活主密钥，并通过 `SECURITY_MASTER_KEY_PEER_TOKEN` 配置内部令牌。脚本默认只验证解密结果长度和指纹；如果需要进一步确认它对应当前测试密钥，可以临时设置 `ENV_VAULT_MASTER_KEY`，脚本会做常量时间比对，但不会打印该密钥：
+
+```powershell
+$env:ENV_VAULT_MASTER_KEY = '<当前 security.encryption_key 的 Base64 值>'
+python tools/master_key_transfer_test.py
+Remove-Item Env:ENV_VAULT_MASTER_KEY
+```
+
+内部令牌和主密钥都不要作为命令行参数传递，以免进入 Shell 历史。该客户端只用于当前阶段的内部令牌认证测试，后续切换 mTLS 后仍可复用请求体和解密校验逻辑。
 
 ## 接口设计规范
 

@@ -10,10 +10,12 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
+	auditapp "env-vault/internal/application/audit"
 	authapp "env-vault/internal/application/auth"
 	envapp "env-vault/internal/application/environment"
 	folderapp "env-vault/internal/application/folder"
 	orgapp "env-vault/internal/application/organization"
+	personalapp "env-vault/internal/application/personalsecret"
 	projapp "env-vault/internal/application/project"
 	secretapp "env-vault/internal/application/secret"
 	tenantapp "env-vault/internal/application/tenant"
@@ -21,9 +23,11 @@ import (
 	infraauth "env-vault/internal/infrastructure/auth"
 	usercache "env-vault/internal/infrastructure/cache/user"
 	"env-vault/internal/infrastructure/config"
+	auditrepo "env-vault/internal/infrastructure/persistence/audit"
 	envrepo "env-vault/internal/infrastructure/persistence/environment"
 	folderrepo "env-vault/internal/infrastructure/persistence/folder"
 	orgrepo "env-vault/internal/infrastructure/persistence/organization"
+	personalrepo "env-vault/internal/infrastructure/persistence/personalsecret"
 	projrepo "env-vault/internal/infrastructure/persistence/project"
 	secretrepo "env-vault/internal/infrastructure/persistence/secret"
 	tenantrepo "env-vault/internal/infrastructure/persistence/tenant"
@@ -61,6 +65,9 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 		userapp.WithBlockStatusCache(userBlockStatusCache),
 		userapp.WithAllocationRepositories(tenantRepo, orgRepo, projRepo),
 	)
+	auditRepo := auditrepo.NewRepository(db)
+	auditSvc := auditapp.NewService(auditRepo, userSvc)
+	userSvc.WithAuditRecorder(auditSvc)
 
 	passwordHasher, err := infraauth.NewPasswordHasher()
 	if err != nil {
@@ -98,7 +105,7 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 		if err != nil {
 			return nil, err
 		}
-		localAuthSvc = authapp.NewService(userRepo, passwordHasher, issuer)
+		localAuthSvc = authapp.NewService(userRepo, passwordHasher, issuer).WithAuditRecorder(auditSvc)
 		jwtProviders = append(jwtProviders, middleware.JWTProvider{
 			Issuer: cfg.Auth.Local.Issuer, Audience: cfg.Auth.Local.Audience,
 			KeyID: cfg.Auth.Local.KeyID, PublicKey: string(publicMaterial),
@@ -115,14 +122,15 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 		})
 	}
 
-	tenantSvc := tenantapp.NewService(tenantRepo, orgRepo, userSvc)
-	orgSvc := orgapp.NewService(orgRepo, userSvc)
+	tenantSvc := tenantapp.NewService(tenantRepo, orgRepo, userSvc).WithAuditRecorder(auditSvc)
+	orgSvc := orgapp.NewService(orgRepo, userSvc).WithAuditRecorder(auditSvc)
 	projSvc := projapp.NewService(
 		projRepo,
 		projapp.WithEnvironmentRepository(envRepo),
 		projapp.WithNicknameResolver(userSvc),
-	)
-	folderSvc := folderapp.NewService(folderRepo, envRepo, userSvc)
+		projapp.WithManagerEligibilityChecker(userRepo),
+	).WithAuditRecorder(auditSvc)
+	folderSvc := folderapp.NewService(folderRepo, envRepo, userSvc).WithAuditRecorder(auditSvc)
 
 	// 主密钥未激活时仍允许 HTTP 服务完成启动
 	masterKeyManager := masterkey.NewManager()
@@ -136,11 +144,15 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 	// Ready 检查位于具体路由和 JWT 认证之前
 	r.Use(readyMiddleware)
 	secretRepo := secretrepo.NewRepository(db)
+	personalSecretRepo := personalrepo.NewRepository(db)
 	envSvc := envapp.NewService(
 		envRepo,
 		envapp.WithResourceClone(folderRepo, secretRepo, masterKeyManager),
-	)
-	secretSvc := secretapp.NewService(secretRepo, folderRepo, envRepo, masterKeyManager, userSvc)
+	).WithAuditRecorder(auditSvc)
+	secretSvc := secretapp.NewService(secretRepo, folderRepo, envRepo, masterKeyManager, userSvc).
+		WithAuditRecorder(auditSvc)
+	personalSecretSvc := personalapp.NewService(personalSecretRepo, userSvc, masterKeyManager).
+		WithAuditRecorder(auditSvc)
 
 	healthHandler := handler.NewHealthHandler()
 	var authHandler *handler.AuthHandler
@@ -154,9 +166,11 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 	environmentHandler := handler.NewEnvironmentHandler(envSvc)
 	folderHandler := handler.NewFolderHandler(folderSvc)
 	secretHandler := handler.NewSecretHandler(secretSvc)
+	personalSecretHandler := handler.NewPersonalSecretHandler(personalSecretSvc)
+	auditHandler := handler.NewAuditHandler(auditSvc)
 
 	// 初始化 JWT 认证中间件（加载配置中的公钥）
-	authMiddleware, err := middleware.Auth(jwtProviders, userSvc)
+	authMiddleware, err := middleware.AuthWithAudit(jwtProviders, userSvc, auditSvc)
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +186,7 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 
 		// 需认证接口分组
 		auth := v1.Group("", authMiddleware)
-		masterkey.RegisterRoutes(auth, masterKeyManager)
+		masterkey.RegisterRoutes(auth, masterKeyManager, auditSvc)
 		authGroup := auth.Group("/auth")
 		{
 			authGroup.GET("/me", userHandler.Me)
@@ -182,7 +196,22 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 		{
 			userGroup.POST("/update", userHandler.Update)
 			userGroup.POST("/list", userHandler.List)
+			// TODO(permission): 权限中心接入后，为用户管理路由挂载 user:manage 授权中间件。
+			userGroup.POST("/manage/list", userHandler.ManageList)
 			userGroup.POST("/allocate", userHandler.Allocate)
+
+			personalSecretGroup := userGroup.Group("/secret")
+			{
+				personalSecretGroup.POST("/create", personalSecretHandler.Create)
+				personalSecretGroup.POST("/update", personalSecretHandler.Update)
+				personalSecretGroup.POST("/delete", personalSecretHandler.Delete)
+				personalSecretGroup.POST("/list", personalSecretHandler.List)
+				// TODO(permission): 权限中心接入后，为该路由挂载 user:manage 授权中间件。
+				personalSecretGroup.POST("/manage/list", personalSecretHandler.ManageList)
+				personalSecretGroup.POST("/reveal", personalSecretHandler.Reveal)
+				personalSecretGroup.POST("/history", personalSecretHandler.History)
+				personalSecretGroup.POST("/history/reveal", personalSecretHandler.RevealHistory)
+			}
 		}
 
 		// 租户管理（带参数统一 POST）
@@ -248,7 +277,18 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 			secretGroup.POST("/history/batch", secretHandler.BatchHistory)
 			secretGroup.POST("/delete", secretHandler.Delete)
 		}
+
+		// 业务审计日志是跨资源独立模块；本期先由 Secret 写入并在密钥页面查询。
+		auditGroup := auth.Group("/audit")
+		{
+			auditGroup.POST("/list", auditHandler.List)
+		}
 	}
+
+	// 集群内部主密钥传输不使用用户 JWT，单独挂载内部令牌校验。
+	// 未配置 security.master_key_peer_token 时该接口保持禁用，避免意外暴露密钥传输能力。
+	internal := r.Group("/internal/v1")
+	masterkey.RegisterInternalRoutes(internal, masterKeyManager, cfg.Security.MasterKeyPeerToken, auditSvc)
 
 	go warmUpUsers(userSvc)
 	return r, nil

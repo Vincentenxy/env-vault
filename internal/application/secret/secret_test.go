@@ -2,6 +2,7 @@ package secret
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	auditdomain "env-vault/internal/domain/audit"
 	envdomain "env-vault/internal/domain/environment"
 	folderdomain "env-vault/internal/domain/folder"
 	secretdomain "env-vault/internal/domain/secret"
@@ -30,6 +32,107 @@ type nicknameResolverFunc func(context.Context, string) (string, error)
 func (f nicknameResolverFunc) GetNickname(ctx context.Context, userID string) (string, error) {
 	return f(ctx, userID)
 }
+
+func TestService_Delete_RecordsRedactedAuditInsideBusinessTransaction(t *testing.T) {
+	groupID := uuid.New()
+	folderID := uuid.New()
+	folderGroupID := uuid.New()
+	deleted := false
+	repo := &stubSecretRepo{
+		listByGroup: func(context.Context, uuid.UUID) ([]*secretdomain.Secret, error) {
+			return []*secretdomain.Secret{{
+				ID: uuid.New(), GroupID: groupID, FolderID: folderID, EnvCode: "prod",
+				Key: "DB_PASSWORD", ValueCiphertext: "ciphertext-must-not-leak",
+			}}, nil
+		},
+		deleteByGroupID: func(context.Context, uuid.UUID, string) (int64, error) {
+			deleted = true
+			return 1, nil
+		},
+		withTx: func(ctx context.Context, fn func(context.Context) error) error {
+			return fn(context.WithValue(ctx, auditTxMarker{}, true))
+		},
+	}
+	folderRepo := &stubFolderRepo{getByID: func(context.Context, uuid.UUID) (*folderdomain.Folder, error) {
+		return &folderdomain.Folder{ID: folderID, GroupID: folderGroupID}, nil
+	}}
+	recorder := &stubAuditRecorder{recordBatch: func(ctx context.Context, events []*auditdomain.Event) error {
+		if marked, _ := ctx.Value(auditTxMarker{}).(bool); !marked {
+			t.Fatal("audit event must use the business transaction context")
+		}
+		if len(events) != 1 {
+			t.Fatalf("expected one event, got %d", len(events))
+		}
+		event := events[0]
+		if event.ActionCode != auditActionDelete || event.ResourceID != groupID.String() ||
+			event.ScopeID != folderGroupID.String() || event.ResultCode != auditdomain.ResultSuccess {
+			t.Fatalf("unexpected audit event: %+v", event)
+		}
+		encoded, err := json.Marshal(event)
+		if err != nil {
+			t.Fatalf("marshal audit event: %v", err)
+		}
+		payload := string(encoded)
+		if strings.Contains(payload, "ciphertext-must-not-leak") || strings.Contains(payload, "ValueCiphertext") {
+			t.Fatalf("secret value leaked into audit event: %s", payload)
+		}
+		return nil
+	}}
+
+	svc := NewService(repo, folderRepo, &stubEnvRepo{}, testCipher(t)).WithAuditRecorder(recorder)
+	if err := svc.Delete(context.Background(), groupID, "operator-1"); err != nil {
+		t.Fatalf("Delete returned error: %v", err)
+	}
+	if !deleted {
+		t.Fatal("secret was not deleted")
+	}
+}
+
+func TestService_Delete_AuditFailureFailsBusinessTransaction(t *testing.T) {
+	groupID := uuid.New()
+	folderID := uuid.New()
+	auditWriteErr := errors.New("audit database unavailable")
+	repo := &stubSecretRepo{
+		listByGroup: func(context.Context, uuid.UUID) ([]*secretdomain.Secret, error) {
+			return []*secretdomain.Secret{{
+				ID: uuid.New(), GroupID: groupID, FolderID: folderID, Key: "API_KEY",
+			}}, nil
+		},
+		withTx: func(ctx context.Context, fn func(context.Context) error) error { return fn(ctx) },
+	}
+	folderRepo := &stubFolderRepo{getByID: func(context.Context, uuid.UUID) (*folderdomain.Folder, error) {
+		return &folderdomain.Folder{ID: folderID, GroupID: uuid.New()}, nil
+	}}
+	recorder := &stubAuditRecorder{recordBatch: func(_ context.Context, events []*auditdomain.Event) error {
+		if len(events) == 1 && events[0].ResultCode == auditdomain.ResultFailure {
+			return nil
+		}
+		return auditWriteErr
+	}}
+
+	svc := NewService(repo, folderRepo, &stubEnvRepo{}, testCipher(t)).WithAuditRecorder(recorder)
+	err := svc.Delete(context.Background(), groupID, "operator-1")
+	if !errors.Is(err, auditWriteErr) {
+		t.Fatalf("expected audit error to fail operation, got %v", err)
+	}
+}
+
+type stubAuditRecorder struct {
+	recordBatch func(context.Context, []*auditdomain.Event) error
+}
+
+func (s *stubAuditRecorder) Record(ctx context.Context, event *auditdomain.Event) error {
+	return s.RecordBatch(ctx, []*auditdomain.Event{event})
+}
+
+func (s *stubAuditRecorder) RecordBatch(ctx context.Context, events []*auditdomain.Event) error {
+	if s.recordBatch != nil {
+		return s.recordBatch(ctx, events)
+	}
+	return nil
+}
+
+type auditTxMarker struct{}
 
 // stubSecretRepo 内存实现的密钥 Repository
 type stubSecretRepo struct {

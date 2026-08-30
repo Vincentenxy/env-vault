@@ -73,6 +73,12 @@ type stubEnvironmentRepo struct {
 	createBatch func(ctx context.Context, environments []*envdomain.Environment) error
 }
 
+type managerEligibilityFunc func(context.Context, string, uuid.UUID) (bool, error)
+
+func (f managerEligibilityFunc) IsOrganizationMember(ctx context.Context, userID string, orgID uuid.UUID) (bool, error) {
+	return f(ctx, userID, orgID)
+}
+
 func (s *stubEnvironmentRepo) CreateBatch(ctx context.Context, environments []*envdomain.Environment) error {
 	if s.createBatch != nil {
 		return s.createBatch(ctx, environments)
@@ -151,6 +157,32 @@ func TestService_Create_CodeExists(t *testing.T) {
 	}, "u")
 	if !errors.Is(err, ErrCodeExists) {
 		t.Fatalf("expected ErrCodeExists, got %v", err)
+	}
+}
+
+func TestService_Create_RejectsExternalManager(t *testing.T) {
+	orgID := uuid.New()
+	repo := &stubRepo{
+		getByOrgCode: func(context.Context, uuid.UUID, string) (*projdomain.Project, error) {
+			return nil, nil
+		},
+		create: func(context.Context, *projdomain.Project) error {
+			t.Fatal("external manager must be rejected before create")
+			return nil
+		},
+	}
+	checker := managerEligibilityFunc(func(_ context.Context, userID string, gotOrgID uuid.UUID) (bool, error) {
+		if userID != "external-user" || gotOrgID != orgID {
+			t.Fatalf("unexpected eligibility input user=%q org=%s", userID, gotOrgID)
+		}
+		return false, nil
+	})
+
+	_, err := NewService(repo, WithManagerEligibilityChecker(checker)).Create(context.Background(), CreateInput{
+		Code: "p-001", Name: "电商平台", OrgID: orgID, Manager: "external-user",
+	}, "operator-1")
+	if !errors.Is(err, ErrManagerNotOrganizationMember) {
+		t.Fatalf("expected ErrManagerNotOrganizationMember, got %v", err)
 	}
 }
 
@@ -266,6 +298,29 @@ func TestService_Update_NotFound(t *testing.T) {
 	_, err := svc.Update(context.Background(), UpdateInput{ID: uuid.New(), Name: "n"}, "u")
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestService_Update_RejectsExternalManager(t *testing.T) {
+	project := newTestProject(uuid.New(), "p-001")
+	repo := &stubRepo{
+		getByID: func(context.Context, uuid.UUID) (*projdomain.Project, error) {
+			return project, nil
+		},
+		update: func(context.Context, *projdomain.Project) error {
+			t.Fatal("external manager must be rejected before update")
+			return nil
+		},
+	}
+	checker := managerEligibilityFunc(func(context.Context, string, uuid.UUID) (bool, error) {
+		return false, nil
+	})
+
+	_, err := NewService(repo, WithManagerEligibilityChecker(checker)).Update(context.Background(), UpdateInput{
+		ID: project.ID, Name: "new-name", Manager: "external-user",
+	}, "operator-1")
+	if !errors.Is(err, ErrManagerNotOrganizationMember) {
+		t.Fatalf("expected ErrManagerNotOrganizationMember, got %v", err)
 	}
 }
 

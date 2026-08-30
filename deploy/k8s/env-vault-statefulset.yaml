@@ -1,0 +1,330 @@
+# Env Vault three-replica StatefulSet.
+# Replace every REPLACE_ME value and the example PostgreSQL/Redis service names before applying.
+# Keep this file internal to the cluster; do not expose the bootstrap Service publicly.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: env-vault
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: env-vault
+  namespace: env-vault
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: env-vault-config
+  namespace: env-vault
+data:
+  config.yaml: |
+    server:
+      port: 8090
+      mode: release
+
+    app:
+      name: env-vault
+      version: 0.1.0
+
+    auth:
+      local:
+        enabled: true
+        issuer: env-vault
+        audience: env-vault-web
+        key_id: env-vault-local-v1
+        private_key_file: /app/secrets/jwt/jwt-private.pem
+        public_key_file: /app/secrets/jwt/jwt-public.pem
+        access_token_ttl: 2h
+      company:
+        enabled: false
+        issuer: ""
+        audience: ""
+        key_id: ""
+        public_key: ""
+        public_key_file: ""
+
+    security:
+      # Keep false in a cluster. The encryption key is injected from Secret.
+      allow_config_key_fallback: false
+      encryption_key: ""
+      master_key_peer_token: ""
+      ready_allowlist:
+        - method: GET
+          path: /api/v1/pub/health
+        - method: POST
+          path: /api/v1/pub/auth/login
+        - method: GET
+          path: /api/v1/masterKey/status
+        - method: POST
+          path: /api/v1/masterKey/share
+        - method: GET
+          path: /internal/v1/masterKey/ready
+
+    database:
+      # Change this example in-cluster name when PostgreSQL is external.
+      host: postgres.database.svc.cluster.local
+      port: 5432
+      user: env_vault
+      password: ""
+      name: env_vault
+      ssl_mode: require
+      max_open_conns: 50
+      max_idle_conns: 10
+      conn_max_lifetime: 30m
+      connect_timeout: 5s
+
+    redis:
+      enabled: true
+      mode: single
+      # Change this address for the actual Redis endpoint. Redis Cluster should list all nodes.
+      addrs:
+        - redis.database.svc.cluster.local:6379
+      password: ""
+      db: 1
+      key_prefix: env_vault
+      warm_up_on_start: true
+      pool_size: 20
+      min_idle_conns: 5
+      max_retries: 3
+      dial_timeout: 5s
+      read_timeout: 3s
+      write_timeout: 3s
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: env-vault-runtime
+  namespace: env-vault
+type: Opaque
+stringData:
+  # Replace all values before applying. Do not commit real values to this file.
+  database-password: REPLACE_ME
+  redis-password: REPLACE_ME
+  encryption-key: REPLACE_WITH_BASE64_32_BYTE_MASTER_KEY
+  master-key-peer-token: REPLACE_WITH_A_LONG_RANDOM_INTERNAL_TOKEN
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: env-vault-jwt
+  namespace: env-vault
+type: Opaque
+stringData:
+  # Replace with the shared local JWT key pair before applying.
+  jwt-private.pem: |
+    REPLACE_WITH_PKCS8_RSA_PRIVATE_KEY
+  jwt-public.pem: |
+    REPLACE_WITH_PKIX_RSA_PUBLIC_KEY
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: env-vault-headless
+  namespace: env-vault
+  labels:
+    app.kubernetes.io/name: env-vault
+    app.kubernetes.io/component: server
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector:
+    app.kubernetes.io/name: env-vault
+    app.kubernetes.io/component: server
+  ports:
+    - name: http
+      port: 8090
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: env-vault
+  namespace: env-vault
+  labels:
+    app.kubernetes.io/name: env-vault
+    app.kubernetes.io/component: server
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: env-vault
+    app.kubernetes.io/component: server
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# The bootstrap Service always targets ordinal 0. Use it only for the initial
+# three-share unlock flow, then route normal business traffic to env-vault.
+apiVersion: v1
+kind: Service
+metadata:
+  name: env-vault-bootstrap
+  namespace: env-vault
+  labels:
+    app.kubernetes.io/name: env-vault
+    app.kubernetes.io/component: bootstrap
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    statefulset.kubernetes.io/pod-name: env-vault-0
+  ports:
+    - name: http
+      port: 8090
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: env-vault
+  namespace: env-vault
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: env-vault
+      app.kubernetes.io/component: server
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: env-vault
+  namespace: env-vault
+  labels:
+    app.kubernetes.io/name: env-vault
+    app.kubernetes.io/component: server
+spec:
+  serviceName: env-vault-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: env-vault
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: env-vault
+        app.kubernetes.io/component: server
+    spec:
+      serviceAccountName: env-vault
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: env-vault
+              app.kubernetes.io/component: server
+      containers:
+        - name: env-vault
+          image: env-vault:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8090
+              protocol: TCP
+          env:
+            - name: SERVER_PORT
+              value: "8090"
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: env-vault-runtime
+                  key: database-password
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: env-vault-runtime
+                  key: redis-password
+            - name: SECURITY_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: env-vault-runtime
+                  key: encryption-key
+            - name: SECURITY_MASTER_KEY_PEER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: env-vault-runtime
+                  key: master-key-peer-token
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          volumeMounts:
+            - name: config
+              mountPath: /app/configs
+              readOnly: true
+            - name: jwt-keys
+              mountPath: /app/secrets/jwt
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+          startupProbe:
+            httpGet:
+              path: /api/v1/pub/health
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /api/v1/pub/health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # The internal readiness endpoint checks Manager.Ready(). It requires
+          # the token injected above and therefore never exposes the token in a URL.
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - >-
+                  test -n "$SECURITY_MASTER_KEY_PEER_TOKEN" &&
+                  wget -qO- --header="X-Env-Vault-Internal-Token: $SECURITY_MASTER_KEY_PEER_TOKEN"
+                  http://127.0.0.1:8090/internal/v1/masterKey/ready |
+                  grep -q '"status":"ready"'
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+      volumes:
+        - name: config
+          configMap:
+            name: env-vault-config
+            defaultMode: 0444
+        - name: jwt-keys
+          secret:
+            secretName: env-vault-jwt
+            defaultMode: 0640
+
