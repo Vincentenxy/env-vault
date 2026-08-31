@@ -1,0 +1,58 @@
+# cnpg参考： https://cloudnative-pg.io/documentation/1.20/
+
+# pg-poc 下的资源依赖该命名空间，首次部署时一并创建
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pg-poc
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  # 调整前：name: pg-poc-superuser
+  # bootstrap.initdb.secret 是应用数据库所有者凭据，不是 postgres 超级用户凭据
+  name: pg-poc-app
+  namespace: pg-poc
+type: kubernetes.io/basic-auth
+stringData:
+  # 调整前：username: myadmin
+  # username 必须与 bootstrap.initdb.owner 保持一致
+  username: env_vault
+  password: MyStrongP@ssw0rd123
+
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: TCPRoute
+metadata:
+  name: pg-poc-route
+  namespace: pg-poc
+spec:
+  parentRefs:
+    - name: higress-tcp-gateway
+      namespace: higress-system
+      sectionName: tcp-postgres-poc-30030
+  rules:
+    - backendRefs:
+        - name: pg-poc-rw
+          port: 5432
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: pg-poc
+  namespace: pg-poc
+spec:
+  instances: 1
+  storage:
+    size: 5Gi
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.4
+  bootstrap:
+    initdb:
+      # 调整前：未配置 database 和 owner，CNPG 默认使用 app
+      # 调整后：显式创建 EnvVault 使用的数据库及非超级用户所有者
+      database: env_vault
+      owner: env_vault
+      secret:
+        # 调整前：name: pg-poc-superuser
+        name: pg-poc-app

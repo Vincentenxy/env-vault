@@ -22,12 +22,13 @@ import (
 )
 
 var (
-	ErrInvalidParam    = errors.New("invalid param")
-	ErrNotFound        = errors.New("user not found")
-	ErrUsernameExists  = errors.New("username already exists")
-	ErrTenantNotFound  = errors.New("tenant not found")
-	ErrOrgNotFound     = errors.New("organization not found")
-	ErrProjectNotFound = errors.New("project not found")
+	ErrInvalidParam      = errors.New("invalid param")
+	ErrNotFound          = errors.New("user not found")
+	ErrUsernameExists    = errors.New("username already exists")
+	ErrTenantNotFound    = errors.New("tenant not found")
+	ErrOrgNotFound       = errors.New("organization not found")
+	ErrOrgTenantMismatch = errors.New("organization does not belong to tenant")
+	ErrProjectNotFound   = errors.New("project not found")
 )
 
 // UpdateInput 当前认证用户资料更新入参。
@@ -55,6 +56,18 @@ type ManagementListInput struct {
 	Keyword  string
 	PageNum  int
 	PageSize int
+}
+
+// ManagementUpdateInput 用户管理页面更新用户资料与直属归属的入参。
+type ManagementUpdateInput struct {
+	UserID   string
+	Nickname string
+	Username string
+	Email    string
+	Phone    string
+	TenantID uuid.UUID
+	OrgID    uuid.UUID
+	Operator string
 }
 
 // AllocateInput 用户批量分配请求。
@@ -86,6 +99,7 @@ type ResponsibilityChecker interface {
 // IService 用户应用服务接口。
 type IService interface {
 	Update(ctx context.Context, in UpdateInput) (*userdomain.User, error)
+	UpdateManagement(ctx context.Context, in ManagementUpdateInput) (*userdomain.User, error)
 	List(ctx context.Context, in ListInput) ([]*userdomain.User, error)
 	ListManagement(ctx context.Context, in ManagementListInput) ([]*userdomain.ManagementUser, int64, error)
 	Allocate(ctx context.Context, in AllocateInput) (int, error)
@@ -536,6 +550,114 @@ func (s *Service) updatePersisted(ctx context.Context, in UpdateInput) (*userdom
 	current.UpdateBy = in.UserID
 	current.UpdateAt = time.Now()
 	if err := s.repo.UpdateByUserID(ctx, current); err != nil {
+		return nil, nil, err
+	}
+	return &before, current, nil
+}
+
+// UpdateManagement 更新指定用户的基础资料与直属租户、组织归属。
+func (s *Service) UpdateManagement(ctx context.Context, in ManagementUpdateInput) (*userdomain.User, error) {
+	in.UserID = strings.TrimSpace(in.UserID)
+	in.Nickname = strings.TrimSpace(in.Nickname)
+	in.Username = strings.TrimSpace(in.Username)
+	in.Email = strings.TrimSpace(in.Email)
+	in.Phone = strings.TrimSpace(in.Phone)
+	in.Operator = strings.TrimSpace(in.Operator)
+
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
+
+	type updateResult struct {
+		before *userdomain.User
+		after  *userdomain.User
+	}
+	transactor, _ := s.repo.(auditapp.Transactor)
+	result, err := auditapp.RunWrite(ctx, s.auditRecorder, transactor, true,
+		func(writeCtx context.Context) (updateResult, *auditdomain.Event, error) {
+			before, after, updateErr := s.updateManagementPersisted(writeCtx, in)
+			if updateErr != nil {
+				return updateResult{}, nil, updateErr
+			}
+			return updateResult{before: before, after: after}, userEvent(
+				userActionManageUpdate, auditdomain.ResultSuccess, after, in.UserID, in.Operator,
+				userChanges(before, after), nil,
+			), nil
+		},
+		func(operationErr error) *auditdomain.Event {
+			return userFailure(userEvent(
+				userActionManageUpdate, auditdomain.ResultFailure, nil, in.UserID, in.Operator, nil, nil,
+			), operationErr)
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	s.refreshUserCaches(ctx, result.after)
+	return result.after, nil
+}
+
+func (s *Service) updateManagementPersisted(ctx context.Context, in ManagementUpdateInput) (*userdomain.User, *userdomain.User, error) {
+	if in.UserID == "" || in.Nickname == "" || in.Operator == "" {
+		return nil, nil, ErrInvalidParam
+	}
+	if in.OrgID != uuid.Nil && in.TenantID == uuid.Nil {
+		return nil, nil, ErrOrgTenantMismatch
+	}
+	if s.tenantRepo == nil || s.orgRepo == nil {
+		return nil, nil, errors.New("user management repositories are not configured")
+	}
+
+	if in.TenantID != uuid.Nil {
+		tenant, err := s.tenantRepo.GetByID(ctx, in.TenantID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if tenant == nil {
+			return nil, nil, ErrTenantNotFound
+		}
+	}
+	if in.OrgID != uuid.Nil {
+		org, err := s.orgRepo.GetByID(ctx, in.OrgID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if org == nil {
+			return nil, nil, ErrOrgNotFound
+		}
+		if org.TenantID != in.TenantID {
+			return nil, nil, ErrOrgTenantMismatch
+		}
+	}
+
+	current, err := s.repo.GetByUserID(ctx, in.UserID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if current == nil {
+		return nil, nil, ErrNotFound
+	}
+	if in.Username != "" {
+		usernameOwner, err := s.repo.GetByUsername(ctx, in.Username)
+		if err != nil {
+			return nil, nil, err
+		}
+		if usernameOwner != nil && usernameOwner.ID != current.ID {
+			return nil, nil, ErrUsernameExists
+		}
+	}
+
+	before := *current
+	current.Nickname = in.Nickname
+	current.Username = in.Username
+	current.Email = in.Email
+	current.Phone = in.Phone
+	current.TenantID = in.TenantID
+	current.OrgID = in.OrgID
+	current.UpdateBy = in.Operator
+	current.UpdateAt = time.Now()
+	if err := s.repo.UpdateManagement(ctx, userdomain.ManagementUpdate{
+		User: current, PreviousTenantID: before.TenantID, PreviousOrgID: before.OrgID,
+	}); err != nil {
 		return nil, nil, err
 	}
 	return &before, current, nil

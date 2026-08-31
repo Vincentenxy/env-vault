@@ -44,30 +44,6 @@
   - K8s自动签发：Kubernetes内置的控制器会自动签发一个有效期很短（比如24小时）的证书
 
 
-- 增加字段
-  ALTER TABLE project_user_relation
-  ADD COLUMN IF NOT EXISTS expire_at timestamptz,
-  ADD COLUMN IF NOT EXISTS is_deleted boolean NOT NULL DEFAULT false,
-  ADD COLUMN IF NOT EXISTS delete_at timestamptz,
-  ADD COLUMN IF NOT EXISTS delete_by text NOT NULL DEFAULT '',
-  ADD COLUMN IF NOT EXISTS create_by text NOT NULL DEFAULT '',
-  ADD COLUMN IF NOT EXISTS update_by text NOT NULL DEFAULT '',
-  ADD COLUMN IF NOT EXISTS create_at timestamptz NOT NULL DEFAULT now(),
-  ADD COLUMN IF NOT EXISTS update_at timestamptz NOT NULL DEFAULT now();
-
-DROP INDEX IF EXISTS uk_project_user_relation_project_user;
-CREATE UNIQUE INDEX uk_project_user_relation_project_user
-ON project_user_relation (project_id, user_id)
-WHERE is_deleted = false;
-
-DROP INDEX IF EXISTS idx_project_user_relation_user_project;
-CREATE INDEX IF NOT EXISTS idx_project_user_relation_user_active
-ON project_user_relation (user_id, project_id, expire_at)
-WHERE is_deleted = false;
-
-CREATE INDEX IF NOT EXISTS idx_project_user_relation_expire
-ON project_user_relation (expire_at)
-WHERE is_deleted = false AND expire_at IS NOT NULL;
 
 
 EnvVault 主密钥分片（共 5 份，恢复需要任意 3 份）

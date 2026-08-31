@@ -117,6 +117,52 @@ func (r *Repository) UpdateByUserID(ctx context.Context, user *userdomain.User) 
 		}).Error
 }
 
+// UpdateManagement 在当前事务中更新用户资料，并清理旧直属归属范围内的项目关系。
+func (r *Repository) UpdateManagement(ctx context.Context, change userdomain.ManagementUpdate) error {
+	user := change.User
+	tx := persistence.TxDB(ctx, r.db).WithContext(ctx)
+	result := tx.Model(&userPO{}).
+		Where("id = ? AND user_id = ? AND is_deleted = false", user.ID, user.UserID).
+		Updates(map[string]any{
+			"nickname":  user.Nickname,
+			"username":  user.Username,
+			"email":     user.Email,
+			"phone":     user.Phone,
+			"tenant_id": nullableUUID(user.TenantID),
+			"org_id":    nullableUUID(user.OrgID),
+			"update_by": user.UpdateBy,
+			"update_at": user.UpdateAt,
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+
+	switch {
+	case change.PreviousTenantID != uuid.Nil && change.PreviousTenantID != user.TenantID:
+		return softDeleteProjectRelations(tx.Where(`user_id = ? AND project_id IN (
+			SELECT p.id FROM project_info AS p
+			JOIN organization_info AS o ON o.id = p.org_id
+			WHERE o.tenant_id = ?
+		)`, user.ID, change.PreviousTenantID), user.UpdateBy, user.UpdateAt)
+	case change.PreviousOrgID != uuid.Nil && change.PreviousOrgID != user.OrgID:
+		return softDeleteProjectRelations(tx.Where(`user_id = ? AND project_id IN (
+			SELECT id FROM project_info WHERE org_id = ?
+		)`, user.ID, change.PreviousOrgID), user.UpdateBy, user.UpdateAt)
+	default:
+		return nil
+	}
+}
+
+func nullableUUID(id uuid.UUID) any {
+	if id == uuid.Nil {
+		return nil
+	}
+	return id
+}
+
 // GetByUserID 按外部用户 ID 查询用户。
 func (r *Repository) GetByUserID(ctx context.Context, userID string) (*userdomain.User, error) {
 	var po userPO

@@ -64,8 +64,9 @@ data:
           path: /internal/v1/masterKey/ready
 
     database:
-      # Change this example in-cluster name when PostgreSQL is external.
-      host: postgres.database.svc.cluster.local
+      # 调整前：host: postgres.database.svc.cluster.local
+      # EnvVault 与 PostgreSQL 位于不同命名空间，通过 CNPG 主库读写 Service 访问
+      host: pg-poc-rw.pg-poc.svc.cluster.local
       port: 5432
       user: env_vault
       password: ""
@@ -101,6 +102,8 @@ metadata:
 type: Opaque
 stringData:
   # Replace all values before applying. Do not commit real values to this file.
+  # 必须与 pg-poc 命名空间下 pg-poc-app Secret 的 password 保持一致
+  # Kubernetes Secret 不能被其他命名空间的 Pod 直接引用，因此在此注入副本
   database-password: REPLACE_ME
   redis-password: REPLACE_ME
   encryption-key: REPLACE_WITH_BASE64_32_BYTE_MASTER_KEY
@@ -327,4 +330,3 @@ spec:
           secret:
             secretName: env-vault-jwt
             defaultMode: 0640
-

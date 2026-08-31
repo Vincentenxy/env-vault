@@ -11,11 +11,12 @@ import (
 )
 
 const (
-	userResourceType     = "user"
-	userActionUpdate     = "user.update"
-	userActionRead       = "user.read"
-	userActionList       = "user.list"
-	userActionManageList = "user.manage.list"
+	userResourceType       = "user"
+	userActionUpdate       = "user.update"
+	userActionRead         = "user.read"
+	userActionList         = "user.list"
+	userActionManageList   = "user.manage.list"
+	userActionManageUpdate = "user.manage.update"
 )
 
 func userEvent(action, result string, user *userdomain.User, fallbackID, operator string, changes []auditdomain.Change, detail map[string]any) *auditdomain.Event {
@@ -39,7 +40,7 @@ func userEvent(action, result string, user *userdomain.User, fallbackID, operato
 }
 
 func userFailure(event *auditdomain.Event, err error) *auditdomain.Event {
-	return auditapp.MarkFailure(event, err, ErrInvalidParam, ErrNotFound, ErrUsernameExists, ErrTenantNotFound, ErrOrgNotFound, ErrProjectNotFound, auditapp.ErrTransactionUnavailable)
+	return auditapp.MarkFailure(event, err, ErrInvalidParam, ErrNotFound, ErrUsernameExists, ErrTenantNotFound, ErrOrgNotFound, ErrOrgTenantMismatch, ErrProjectNotFound, auditapp.ErrTransactionUnavailable)
 }
 
 func userChanges(before, after *userdomain.User) []auditdomain.Change {

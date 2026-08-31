@@ -198,6 +198,7 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 			userGroup.POST("/list", userHandler.List)
 			// TODO(permission): 权限中心接入后，为用户管理路由挂载 user:manage 授权中间件。
 			userGroup.POST("/manage/list", userHandler.ManageList)
+			userGroup.POST("/manage/update", userHandler.ManageUpdate)
 			userGroup.POST("/allocate", userHandler.Allocate)
 
 			personalSecretGroup := userGroup.Group("/secret")

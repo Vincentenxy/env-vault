@@ -1,0 +1,88 @@
+  apiVersion: gateway.networking.k8s.io/v1
+  kind: Gateway
+  metadata:
+    name: higress-tcp-gateway
+    namespace: higress-system
+  spec:
+    gatewayClassName: higress
+    listeners:
+      - name: tcp-postgres-poc-30030
+        protocol: TCP
+        port: 30030
+        allowedRoutes:
+          kinds:
+            - kind: TCPRoute
+          namespaces:
+            from: All
+#      - name: tcp-postgres-poc-30031
+#        protocol: TCP
+#        port: 30031
+#        allowedRoutes:
+#          kinds:
+#            - kind: TCPRoute
+#          namespaces:
+#            from: All
+#      - name: tcp-postgres-poc-30032
+#        protocol: TCP
+#        port: 30032
+#        allowedRoutes:
+#          kinds:
+#            - kind: TCPRoute
+#          namespaces:
+#            from: All
+#      - name: tcp-postgres-poc-30033
+#        protocol: TCP
+#        port: 30033
+#        allowedRoutes:
+#          kinds:
+#            - kind: TCPRoute
+#          namespaces:
+#            from: All
+#      - name: tcp-postgres-poc-30034
+#        protocol: TCP
+#        port: 30034
+#        allowedRoutes:
+#          kinds:
+#            - kind: TCPRoute
+#          namespaces:
+#            from: All
+#      - name: tcp-postgres-poc-30035
+#        protocol: TCP
+#        port: 30035
+#        allowedRoutes:
+#          kinds:
+#            - kind: TCPRoute
+#          namespaces:
+#            from: All
+#      - name: tcp-postgres-poc-30036
+#        protocol: TCP
+#        port: 30036
+#        allowedRoutes:
+#          kinds:
+#            - kind: TCPRoute
+#          namespaces:
+#            from: All
+#      - name: tcp-postgres-poc-30037
+#        protocol: TCP
+#        port: 30037
+#        allowedRoutes:
+#          kinds:
+#            - kind: TCPRoute
+#          namespaces:
+#            from: All
+#      - name: tcp-postgres-poc-30038
+#        protocol: TCP
+#        port: 30038
+#        allowedRoutes:
+#          kinds:
+#            - kind: TCPRoute
+#          namespaces:
+#            from: All
+#      - name: tcp-postgres-poc-30039
+#        protocol: TCP
+#        port: 30039
+#        allowedRoutes:
+#          kinds:
+#            - kind: TCPRoute
+#          namespaces:
+#            from: All

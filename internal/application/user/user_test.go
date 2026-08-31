@@ -39,6 +39,7 @@ func (s *stubAuditRecorder) RecordBatch(ctx context.Context, events []*auditdoma
 
 type stubUserRepo struct {
 	updateByUserID      func(ctx context.Context, user *userdomain.User) error
+	updateManagement    func(ctx context.Context, change userdomain.ManagementUpdate) error
 	getByUserID         func(ctx context.Context, userID string) (*userdomain.User, error)
 	getByUsername       func(ctx context.Context, username string) (*userdomain.User, error)
 	updatePasswordHash  func(ctx context.Context, username, passwordHash, operator string) error
@@ -60,6 +61,13 @@ func (s *stubUserRepo) WithTx(ctx context.Context, fn func(context.Context) erro
 func (s *stubUserRepo) UpdateByUserID(ctx context.Context, user *userdomain.User) error {
 	if s.updateByUserID != nil {
 		return s.updateByUserID(ctx, user)
+	}
+	return nil
+}
+
+func (s *stubUserRepo) UpdateManagement(ctx context.Context, change userdomain.ManagementUpdate) error {
+	if s.updateManagement != nil {
+		return s.updateManagement(ctx, change)
 	}
 	return nil
 }
@@ -342,6 +350,89 @@ func TestService_ListManagement_PassesNormalizedQueryToRepository(t *testing.T) 
 	})
 	if err != nil || total != 101 || len(items) != 1 || items[0] != want {
 		t.Fatalf("unexpected result items=%+v total=%d err=%v", items, total, err)
+	}
+}
+
+func TestService_UpdateManagement_ValidatesHierarchyAndPersistsScopeChange(t *testing.T) {
+	oldTenantID, oldOrgID := uuid.New(), uuid.New()
+	newTenantID, newOrgID := uuid.New(), uuid.New()
+	current := &userdomain.User{
+		ID: uuid.New(), UserID: "u-1", Nickname: "Before", Username: "before",
+		TenantID: oldTenantID, OrgID: oldOrgID,
+	}
+	var persisted userdomain.ManagementUpdate
+	repo := &stubUserRepo{
+		getByUserID: func(context.Context, string) (*userdomain.User, error) { return current, nil },
+		getByUsername: func(context.Context, string) (*userdomain.User, error) {
+			t.Fatal("empty management username must not trigger a uniqueness query")
+			return nil, nil
+		},
+		updateManagement: func(_ context.Context, change userdomain.ManagementUpdate) error {
+			persisted = change
+			return nil
+		},
+	}
+	cacheRefreshed := false
+	profileCache := &stubProfileCache{setFn: func(_ context.Context, user *userdomain.User) error {
+		cacheRefreshed = user.UserID == "u-1" && user.Nickname == "After"
+		return nil
+	}}
+	svc := NewService(repo, profileCache, nil, WithAllocationRepositories(
+		stubTenantReader{get: func(_ context.Context, id uuid.UUID) (*tenantdomain.Tenant, error) {
+			if id != newTenantID {
+				t.Fatalf("unexpected tenant id: %s", id)
+			}
+			return &tenantdomain.Tenant{ID: id}, nil
+		}},
+		stubOrgReader{get: func(_ context.Context, id uuid.UUID) (*orgdomain.Organization, error) {
+			if id != newOrgID {
+				t.Fatalf("unexpected organization id: %s", id)
+			}
+			return &orgdomain.Organization{ID: id, TenantID: newTenantID}, nil
+		}},
+		stubProjectReader{},
+	))
+
+	updated, err := svc.UpdateManagement(context.Background(), ManagementUpdateInput{
+		UserID: " u-1 ", Nickname: " After ", Username: " ", Email: " a@example.com ",
+		Phone: " 13800000000 ", TenantID: newTenantID, OrgID: newOrgID, Operator: " admin ",
+	})
+	if err != nil {
+		t.Fatalf("UpdateManagement() error = %v", err)
+	}
+	if updated.Nickname != "After" || updated.Username != "" || updated.TenantID != newTenantID || updated.OrgID != newOrgID {
+		t.Fatalf("unexpected updated user: %+v", updated)
+	}
+	if persisted.PreviousTenantID != oldTenantID || persisted.PreviousOrgID != oldOrgID || persisted.User != updated {
+		t.Fatalf("unexpected management change: %+v", persisted)
+	}
+	if updated.UpdateBy != "admin" || !cacheRefreshed {
+		t.Fatalf("update metadata/cache not refreshed: user=%+v refreshed=%v", updated, cacheRefreshed)
+	}
+}
+
+func TestService_UpdateManagement_RejectsOrganizationOutsideTenant(t *testing.T) {
+	tenantID, orgID := uuid.New(), uuid.New()
+	writeCalled := false
+	repo := &stubUserRepo{updateManagement: func(context.Context, userdomain.ManagementUpdate) error {
+		writeCalled = true
+		return nil
+	}}
+	svc := NewService(repo, nil, nil, WithAllocationRepositories(
+		stubTenantReader{get: func(context.Context, uuid.UUID) (*tenantdomain.Tenant, error) {
+			return &tenantdomain.Tenant{ID: tenantID}, nil
+		}},
+		stubOrgReader{get: func(context.Context, uuid.UUID) (*orgdomain.Organization, error) {
+			return &orgdomain.Organization{ID: orgID, TenantID: uuid.New()}, nil
+		}},
+		stubProjectReader{},
+	))
+
+	_, err := svc.UpdateManagement(context.Background(), ManagementUpdateInput{
+		UserID: "u-1", Nickname: "User", Username: "user", TenantID: tenantID, OrgID: orgID, Operator: "admin",
+	})
+	if !errors.Is(err, ErrOrgTenantMismatch) || writeCalled {
+		t.Fatalf("expected hierarchy validation error without write, err=%v writeCalled=%v", err, writeCalled)
 	}
 }
 

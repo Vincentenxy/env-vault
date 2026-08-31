@@ -97,6 +97,14 @@ type ManagementUser struct {
 	OrgName    string
 }
 
+// ManagementUpdate 用户管理页面提交的完整资料与归属变更命令。
+// PreviousTenantID/PreviousOrgID 用于在同一事务中清理旧归属范围内的项目成员关系。
+type ManagementUpdate struct {
+	User             *User
+	PreviousTenantID uuid.UUID
+	PreviousOrgID    uuid.UUID
+}
+
 // ProfileProject 当前用户已分配项目的展示摘要。
 type ProfileProject struct {
 	ID   uuid.UUID
@@ -137,6 +145,8 @@ type Repository interface {
 	List(ctx context.Context, filter ListFilter) ([]*User, error)
 	// ListManagement 分页查询用户管理列表，不返回密码哈希等认证敏感信息。
 	ListManagement(ctx context.Context, filter ManagementListFilter) ([]*ManagementUser, int64, error)
+	// UpdateManagement 更新用户资料和直属租户/组织，并清理旧归属范围内失效的项目成员关系。
+	UpdateManagement(ctx context.Context, change ManagementUpdate) error
 	// ListAll 查询全部未删除用户，用于启动时预热缓存。
 	ListAll(ctx context.Context) ([]*User, error)
 	// Allocate 在单个事务内批量更新用户归属及项目成员关系。

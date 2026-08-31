@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -47,6 +48,18 @@ type UserManagementListRequest struct {
 	TenantID uuid.UUID `json:"tenantId"`
 	Keyword  string    `json:"keyword"`
 	page.Request
+}
+
+// UserManagementUpdateRequest 用户管理页面更新指定用户的资料和直属归属。
+// tenantId/orgId 允许为 null，表示清空对应归属。
+type UserManagementUpdateRequest struct {
+	UserID   string     `json:"userId"`
+	Nickname string     `json:"nickname"`
+	Username string     `json:"username"`
+	Email    string     `json:"email"`
+	Phone    string     `json:"phone"`
+	TenantID *uuid.UUID `json:"tenantId"`
+	OrgID    *uuid.UUID `json:"orgId"`
 }
 
 // UserAllocateRequest 用户批量分配请求。
@@ -223,6 +236,46 @@ func (h *UserHandler) ManageList(c *gin.Context) {
 	response.Success(c, page.Response[UserManagementListItemDTO]{Total: total, List: list})
 }
 
+// ManageUpdate 更新指定用户的基础资料与直属租户、组织归属。
+// TODO(permission): 权限中心接入后，此接口必须由 user:manage 后端授权中间件保护。
+// @Summary 更新用户管理信息
+// @Tags user
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param request body UserManagementUpdateRequest true "用户信息"
+// @Success 200 {object} response.Response{data=UserDTO}
+// @Router /api/v1/user/manage/update [post]
+func (h *UserHandler) ManageUpdate(c *gin.Context) {
+	var req UserManagementUpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, err)
+		return
+	}
+	if strings.TrimSpace(req.UserID) == "" || strings.TrimSpace(req.Nickname) == "" {
+		response.Error(c, "invalid params")
+		return
+	}
+
+	tenantID, orgID := uuid.Nil, uuid.Nil
+	if req.TenantID != nil {
+		tenantID = *req.TenantID
+	}
+	if req.OrgID != nil {
+		orgID = *req.OrgID
+	}
+	user, err := h.svc.UpdateManagement(withHTTPAuditContext(c), userapp.ManagementUpdateInput{
+		UserID: req.UserID, Nickname: req.Nickname, Username: req.Username,
+		Email: req.Email, Phone: req.Phone, TenantID: tenantID, OrgID: orgID,
+		Operator: operator(c),
+	})
+	h.respondError(c, err)
+	if err != nil {
+		return
+	}
+	response.Success(c, toUserDTO(user))
+}
+
 // Allocate 批量分配或移除用户的租户、组织、项目归属。
 func (h *UserHandler) Allocate(c *gin.Context) {
 	var req UserAllocateRequest
@@ -286,6 +339,7 @@ func (h *UserHandler) respondError(c *gin.Context, err error) {
 		errors.Is(err, userapp.ErrUsernameExists),
 		errors.Is(err, userapp.ErrTenantNotFound),
 		errors.Is(err, userapp.ErrOrgNotFound),
+		errors.Is(err, userapp.ErrOrgTenantMismatch),
 		errors.Is(err, userapp.ErrProjectNotFound):
 		response.Error(c, err.Error())
 	default:

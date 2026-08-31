@@ -18,6 +18,7 @@ import (
 
 type stubUserService struct {
 	updateFn           func(ctx context.Context, in userapp.UpdateInput) (*userdomain.User, error)
+	manageUpdateFn     func(ctx context.Context, in userapp.ManagementUpdateInput) (*userdomain.User, error)
 	listFn             func(ctx context.Context, in userapp.ListInput) ([]*userdomain.User, error)
 	manageListFn       func(ctx context.Context, in userapp.ManagementListInput) ([]*userdomain.ManagementUser, int64, error)
 	allocateFn         func(ctx context.Context, in userapp.AllocateInput) (int, error)
@@ -36,6 +37,13 @@ func (s *stubUserService) Allocate(ctx context.Context, in userapp.AllocateInput
 func (s *stubUserService) Update(ctx context.Context, in userapp.UpdateInput) (*userdomain.User, error) {
 	if s.updateFn != nil {
 		return s.updateFn(ctx, in)
+	}
+	return nil, nil
+}
+
+func (s *stubUserService) UpdateManagement(ctx context.Context, in userapp.ManagementUpdateInput) (*userdomain.User, error) {
+	if s.manageUpdateFn != nil {
+		return s.manageUpdateFn(ctx, in)
 	}
 	return nil, nil
 }
@@ -104,6 +112,7 @@ func newUserTestEngine(svc userapp.IService, authUser *userctx.User) *gin.Engine
 	r.POST("/api/v1/user/update", h.Update)
 	r.POST("/api/v1/user/list", h.List)
 	r.POST("/api/v1/user/manage/list", h.ManageList)
+	r.POST("/api/v1/user/manage/update", h.ManageUpdate)
 	r.POST("/api/v1/user/allocate", h.Allocate)
 	return r
 }
@@ -255,6 +264,35 @@ func TestUserHandler_Allocate_PassesResourceAndOperator(t *testing.T) {
 	body := decodeBody(t, w)
 	data := body["data"].(map[string]any)
 	if body["code"] != float64(0) || data["affectedCount"] != float64(2) {
+		t.Fatalf("unexpected response: %s", w.Body.String())
+	}
+}
+
+func TestUserHandler_ManageUpdate_PassesProfileScopeAndOperator(t *testing.T) {
+	tenantID, orgID := uuid.New(), uuid.New()
+	updated := &userdomain.User{
+		ID: uuid.New(), UserID: "u-1", Nickname: "Updated", Username: "updated",
+		Email: "updated@example.com", Phone: "13800000000", TenantID: tenantID, OrgID: orgID,
+	}
+	svc := &stubUserService{manageUpdateFn: func(_ context.Context, in userapp.ManagementUpdateInput) (*userdomain.User, error) {
+		if in.UserID != "u-1" || in.Nickname != "Updated" || in.Username != "updated" ||
+			in.TenantID != tenantID || in.OrgID != orgID || in.Operator != "admin" {
+			t.Fatalf("unexpected management update input: %+v", in)
+		}
+		return updated, nil
+	}}
+	r := newUserTestEngine(svc, &userctx.User{UserID: "admin"})
+	w := doJSON(t, r, http.MethodPost, "/api/v1/user/manage/update", map[string]any{
+		"userId": "u-1", "nickname": "Updated", "username": "updated",
+		"email": "updated@example.com", "phone": "13800000000",
+		"tenantId": tenantID, "orgId": orgID,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := decodeBody(t, w)
+	data := body["data"].(map[string]any)
+	if body["code"] != float64(0) || data["userId"] != "u-1" || data["tenantId"] != tenantID.String() {
 		t.Fatalf("unexpected response: %s", w.Body.String())
 	}
 }

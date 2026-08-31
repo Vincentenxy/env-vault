@@ -37,6 +37,9 @@ type stubUserRepository struct {
 }
 
 func (s *stubUserRepository) UpdateByUserID(context.Context, *userdomain.User) error { return nil }
+func (s *stubUserRepository) UpdateManagement(context.Context, userdomain.ManagementUpdate) error {
+	return nil
+}
 func (s *stubUserRepository) GetByUserID(context.Context, string) (*userdomain.User, error) {
 	return nil, nil
 }

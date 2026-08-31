@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: higress-gateway
+  namespace: higress-system
+  annotations:
+    meta.helm.sh/release-name: higress
+    meta.helm.sh/release-namespace: higress-system
+    metallb.universe.tf/ip-allocated-from-pool: gateway-pool
+  labels:
+    app: higress-gateway
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: higress-gateway
+    app.kubernetes.io/version: 2.2.3
+    helm.sh/chart: higress-core-2.2.3
+    higress: higress-system-higress-gateway
+spec:
+  allocateLoadBalancerNodePorts: true
+  externalTrafficPolicy: Cluster
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+    - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+    - name: pgsql-30030
+      port: 30030
+      targetPort: 30030
+      protocol: TCP
+    - name: http2
+      nodePort: 32387
+      port: 80
+      protocol: TCP
+      targetPort: 80
+    - name: https
+      nodePort: 30332
+      port: 443
+      protocol: TCP
+      targetPort: 443
+  selector:
+    app: higress-gateway
+    higress: higress-system-higress-gateway
+  sessionAffinity: None
+  type: LoadBalancer
+
