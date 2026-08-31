@@ -64,25 +64,26 @@ data:
           path: /internal/v1/masterKey/ready
 
     database:
-      # 调整前：host: postgres.database.svc.cluster.local
-      # EnvVault 与 PostgreSQL 位于不同命名空间，通过 CNPG 主库读写 Service 访问
-      host: pg-poc-rw.pg-poc.svc.cluster.local
+      host: "192.168.1.110"
+      #  host: "127.0.0.1"
+      #      host: pg-poc-rw.pg-poc.svc.cluster.local
       port: 5432
-      user: env_vault
-      password: ""
-      name: env_vault
-      ssl_mode: require
-      max_open_conns: 50
-      max_idle_conns: 10
-      conn_max_lifetime: 30m
-      connect_timeout: 5s
+      user: "env_vault"
+      password: "123456"
+      name: "env_vault"
+      ssl_mode: "disable"
+      max_open_conns: 25
+      max_idle_conns: 5
+      conn_max_lifetime: "30m"
+      connect_timeout: "5s"
 
     redis:
       enabled: true
       mode: single
       # Change this address for the actual Redis endpoint. Redis Cluster should list all nodes.
       addrs:
-        - redis.database.svc.cluster.local:6379
+    #    - redis.database.svc.cluster.local:6379
+        - "192.168.1.110:6379"
       password: ""
       db: 1
       key_prefix: env_vault
@@ -104,10 +105,10 @@ stringData:
   # Replace all values before applying. Do not commit real values to this file.
   # 必须与 pg-poc 命名空间下 pg-poc-app Secret 的 password 保持一致
   # Kubernetes Secret 不能被其他命名空间的 Pod 直接引用，因此在此注入副本
-  database-password: REPLACE_ME
-  redis-password: REPLACE_ME
-  encryption-key: REPLACE_WITH_BASE64_32_BYTE_MASTER_KEY
-  master-key-peer-token: REPLACE_WITH_A_LONG_RANDOM_INTERNAL_TOKEN
+  database-password: "123456"
+  redis-password: ""
+  encryption-key: "Pk6V+TnUEZO6R8WOklCSrI/iM4QKHc55VQQrrptmVfk="
+  master-key-peer-token: "ES1Gu2txOxcvbPqwcPs+cMd8CCQOE5a7JVczPy0kx7u2mwjqtisWT0tR6WFv4TKb"
 ---
 apiVersion: v1
 kind: Secret
@@ -118,9 +119,58 @@ type: Opaque
 stringData:
   # Replace with the shared local JWT key pair before applying.
   jwt-private.pem: |
-    REPLACE_WITH_PKCS8_RSA_PRIVATE_KEY
+    -----BEGIN PRIVATE KEY-----
+    MIIG/gIBADANBgkqhkiG9w0BAQEFAASCBugwggbkAgEAAoIBgQDGB+C3BXGK4seY
+    3jgvFzUTi1LgK6APzuhF0y66zvHIjl8DOrNBYeJsUDpbp2abA7LaYeZW8kchKAxr
+    Ctx1HdfWnfzGeJeIrFhj+uewVibLXws/8/RX5/aGpRckvgydyrZLy1j+Ex1NIVOE
+    PtOIOFQZChutOVlk97a7q7MyYPCVigVuXL6fvgQ9jSgK6vKbqstc7SBXBU2+yUuq
+    XO2JQLw2ZP1zURgtWIgXlXXBGxnxeSMdU+rXw7lD/UhJaF7tdRCqCTFwpXd6oyVh
+    PjkohZQSgavOmJaevkvIv4W74PeqJEh7lNblZtmVY6qMA9CUyjcbZ9abn6FtM538
+    rIUSDs+Bds15pVkGRoNRvjijSZYHRWGDZY4cD/kMEtPPaXmD+1660XwPHf0lJlCa
+    A4ygiOoLW+yrX8gycPqN7J6+Ie7h0+JB3n0W2tCjHieObvW9i9h8COzQcqcPXLHy
+    8NJzGpa7RPMM8HNeBXuJhJNQFFh3WwYo0jiwQOho/PTTVt8hldsCAwEAAQKCAYAS
+    zoy41PuDhSYPjosnbbzMrl6gi4QX/D5y4yt88kpkEaFUXS7I9tLaFoR0T+Getys1
+    Mjb96uR2cac8QzvMo5jr+PUYpDs/7541YI7AYG4uwkf/OtvpvU3cW7Fm++WW1rmZ
+    WSaKeqY9vPyBgrX0KeVSu3MFcHzc6emgyR2rmyk+Cm2ZnZU89n7QmadD4ixIPGAz
+    4xE/MnG/vL5C37BvaIZ3Y//uA7WYGOBT3Q3h2QENvcNn9aBH/X6KxnMnBZJ+Wq+f
+    ZT847NEDK/V94+EaxuS9GQfTv8zbTe1Ms4cICbr0EpUiR8h8b//ff/dHKtJgAwEB
+    T1zVlcEKViUPWKEefsKsB0MEUyuOvm9mVOwHeDYkqR41oh43iYVYKPzl1uvc/mhF
+    7vCbJDkMM5PrXCc0cxZp/70IbzW430rdT2FHEy8F26Cah8DiQsAgLc7LtMk4zSlx
+    cN3OYH3fXsmVXWlcHRa7+Z8LOM8U3gWh2xCGVFVrsyJZ0MSqs7D8pen8RtnfNgEC
+    gcEA/XZFtOONkOMtceO+BLvP2vnD+xfbsJvNJ6rCVbgEBRX4BOrYs1GVJ7BS6aym
+    kfRcipkFOiE3qHz0oAZIBJukFdBHScAq7XQrppIv2S58cD/GoGUu7r3udmfV0UdF
+    OWLLI8b4s3xRms4ieVKlmfeFVniiA24JSKVsZHOJ8pBqoROEbCS9GNOGR7+jKPKv
+    kz3hnOpGDi51629k0wd9zzeJ7cVpSR8iFOsuLaF9MR2m1LMmZB7R41LBVO4DiqWC
+    Eq7LAoHBAMgDgyvMCNgbFnXgxjfcNo/Oxw3Cg9nywfnj6RfQpMNuBJUQNp5R9sso
+    NHYpXOWoZzibkAaR4jJR/1jLux0/yjyEV6TIOoWnpHhSG11YZrdMj8Ab2oCUozG0
+    p9SEMNcBp8//tu7Yxym+LivgLhNOeosstZb9Al1qAM+M4dst5J8UVlevaLYldvyw
+    KdiBVg8PWk1Bj8GtpFAoKWqlmVlBsu26+MjCamOLuKJGXHrlwhYhC1QJrL7ENjNc
+    +7kxcI1DMQKBwEsRRl/mrTzmK8V5YAPi5BLEuoiZblWGL2K6LkhY8cfX09cQ/xFM
+    7lIM5OGUYtkDeI0L+QJYaDWcnI7wjU/gEN7tCtAK/CvLpkn1Lfqyy+Qq31cN4LKQ
+    yhmDc05CP3xZiDSWb34pKbohpxArrCRHrNQJcmJ1qoY7iDjQB2Ex6ILAVw34a5D4
+    xOJnHZm5FssTHsjskccNd5s9KK1foKFIn68uMpqXf+6WIN0e4Qc08v43+PzaK+uZ
+    zOyseZwMnNOPtQKBwQCt9mgbKr4yf/TcF+EvaqhGEfoNXLZjVQIjv3fYD8+Obt0r
+    bUukDfQSJOjkMPusf/kvQhZVsILFc44dBC29teLHGfBE0SYdY37oa7mDScUk/kE1
+    PMSh+yWpsNAcRdFY4Aa+IVJRkVhAVTpBTR2mCycIb52NMofhCbakzosOoG7tcbnb
+    UCRJ8HH6O5pZxbw9IwROl4xaTxXP5e6H5HppKHxgyrNhob74z+iJs5ryBW3240zA
+    Dh4iWfQuXlxOadLT+rECgcEAy0Z5uXoNlSC0xnSJaPVUDROKHf2deex7VswyF2RF
+    Tzwd8smmAlWgTVgJqw+xTm1DG+TaXPqm7WSCtboQqwk7w4RiNF/xkpVGRZQk1+IP
+    ZucRmty01oJ/2K+zCpLuipUKqolB8drbnXr1R73bQU+CS1ekNKuDesgPnsnbFJ8k
+    tVnY+iUeiskj08jl3FlLlyoO1SLICEOMro54CA3iayPauzPL9Lp+c6UsLF/t+rAk
+    vr6LcHL6flMUFwuqYg/+qurf
+    -----END PRIVATE KEY-----
   jwt-public.pem: |
-    REPLACE_WITH_PKIX_RSA_PUBLIC_KEY
+    -----BEGIN PUBLIC KEY-----
+    MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAxgfgtwVxiuLHmN44Lxc1
+    E4tS4CugD87oRdMuus7xyI5fAzqzQWHibFA6W6dmmwOy2mHmVvJHISgMawrcdR3X
+    1p38xniXiKxYY/rnsFYmy18LP/P0V+f2hqUXJL4Mncq2S8tY/hMdTSFThD7TiDhU
+    GQobrTlZZPe2u6uzMmDwlYoFbly+n74EPY0oCurym6rLXO0gVwVNvslLqlztiUC8
+    NmT9c1EYLViIF5V1wRsZ8XkjHVPq18O5Q/1ISWhe7XUQqgkxcKV3eqMlYT45KIWU
+    EoGrzpiWnr5LyL+Fu+D3qiRIe5TW5WbZlWOqjAPQlMo3G2fWm5+hbTOd/KyFEg7P
+    gXbNeaVZBkaDUb44o0mWB0Vhg2WOHA/5DBLTz2l5g/teutF8Dx39JSZQmgOMoIjq
+    C1vsq1/IMnD6jeyeviHu4dPiQd59FtrQox4njm71vYvYfAjs0HKnD1yx8vDScxqW
+    u0TzDPBzXgV7iYSTUBRYd1sGKNI4sEDoaPz001bfIZXbAgMBAAE=
+    -----END PUBLIC KEY-----
 ---
 apiVersion: v1
 kind: Service
