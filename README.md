@@ -521,6 +521,14 @@ auth.POST("/user/update", userHandler.Update)   // 需认证
 所有开发必须遵循 [AGENT.md](AGENT.md) 中的完整规范。
 
 
+## 推送
+```shell
+docker login harbor.qiuer.net
+docker tag env-vault:0.0.1-alpha.1 harbor.gtjaqh.net/lucy-dev/env-vault:0.0.1-alpha.1
+docker push harbor.gtjaqh.net/lucy-dev/env-vault:0.0.1-alpha.1
+```
+
+
 ## 相关连接
 
 - hashicorp/vault/shamir 算法

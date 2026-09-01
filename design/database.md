@@ -22,29 +22,113 @@
 >
 > **硬性规则**：不使用外键；除 NOT NULL / 默认值 / 必要索引外不加数据库侧约束，业务校验在代码层面显式实现。
 
-## 已有表字段变更：`manager`
+## PostgreSQL 数据库、用户与授权初始化
 
-`manager` 保存资源管理员的外部用户 ID，与当前 JWT 的 `staffuserid` 使用同一标识。历史数据可使用原记录的 `create_by` 回填；后续新建资源由应用层处理：请求未传 `manager` 时使用当前登录人的用户 ID。
+当前 CNPG 部署清单通过 `bootstrap.initdb.database=env_vault` 和 `bootstrap.initdb.owner=env_vault` 自动创建应用数据库及所有者，使用 CNPG 初始化时不需要重复执行创建数据库和用户的 SQL。本节用于手工安装 PostgreSQL，或者修复已有数据库的所有者和对象权限。
+
+### 首次创建数据库和登录用户
+
+先使用 `postgres` 等管理员账号连接 `postgres` 数据库执行。PostgreSQL 不支持 `CREATE DATABASE IF NOT EXISTS`，以下语句只在首次初始化时执行。
 
 ```sql
-ALTER TABLE tenant_info
-    ADD COLUMN IF NOT EXISTS manager text NOT NULL DEFAULT '';
+-- 创建 EnvVault 登录用户，部署前替换示例密码
+CREATE ROLE env_vault
+    WITH LOGIN
+    PASSWORD 'REPLACE_WITH_REAL_PASSWORD';
 
-ALTER TABLE organization_info
-    ADD COLUMN IF NOT EXISTS manager text NOT NULL DEFAULT '';
+-- CREATE DATABASE 不能放在事务块中执行
+CREATE DATABASE env_vault
+    WITH
+    OWNER = env_vault
+    ENCODING = 'UTF8'
+    TEMPLATE = template0;
 
-ALTER TABLE project_info
-    ADD COLUMN IF NOT EXISTS manager text NOT NULL DEFAULT '';
-
-ALTER TABLE folder_info
-    ADD COLUMN IF NOT EXISTS manager text NOT NULL DEFAULT '';
-
--- 可选：为已有数据回填管理员，不覆盖已经存在的 manager。
-UPDATE tenant_info SET manager = create_by WHERE manager = '' AND create_by <> '';
-UPDATE organization_info SET manager = create_by WHERE manager = '' AND create_by <> '';
-UPDATE project_info SET manager = create_by WHERE manager = '' AND create_by <> '';
-UPDATE folder_info SET manager = create_by WHERE manager = '' AND create_by <> '';
+-- 数据库级权限只控制连接、建 schema 和临时对象，不代表拥有表数据权限
+GRANT CONNECT, CREATE, TEMPORARY
+    ON DATABASE env_vault
+    TO env_vault;
 ```
+
+如果用户或数据库已经存在，不要重复执行 `CREATE`，可由管理员按实际情况修复所有者和密码：
+
+```sql
+ALTER ROLE env_vault
+    WITH LOGIN
+    PASSWORD 'REPLACE_WITH_REAL_PASSWORD';
+
+ALTER DATABASE env_vault
+    OWNER TO env_vault;
+```
+
+### public schema 权限
+
+下面的语句必须连接到 `env_vault` 数据库后执行。使用 `psql` 时可通过 `\connect` 切换；使用数据库客户端时需要打开连接到 `env_vault` 的查询窗口。
+
+```sql
+\connect env_vault
+
+-- 防止其他普通用户在 public schema 中创建对象
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+
+-- EnvVault 用户可以访问并创建当前 schema 下的对象
+GRANT USAGE, CREATE
+    ON SCHEMA public
+    TO env_vault;
+```
+
+`env_vault` 是数据库 owner，并且后续建表语句也使用 `env_vault` 执行时，新表天然归该用户所有，不需要额外授权。生产环境建议保持这种方式，避免运行账号依赖管理员账号的默认权限配置。
+
+### 已有表和序列授权
+
+如果表是由 `postgres` 或其他管理账号创建的，需要在 `env_vault` 数据库中补充已有对象权限：
+
+```sql
+GRANT SELECT, INSERT, UPDATE, DELETE
+    ON ALL TABLES IN SCHEMA public
+    TO env_vault;
+
+-- 当前表使用 UUID，不依赖序列；保留该授权以兼容后续 identity / serial 字段
+GRANT USAGE, SELECT, UPDATE
+    ON ALL SEQUENCES IN SCHEMA public
+    TO env_vault;
+```
+
+以上表权限不包含 `TRUNCATE`、`REFERENCES` 和 `TRIGGER`，满足 EnvVault 当前运行时的查询和增删改需求。数据库结构变更应通过数据库变更流程执行，不依赖运行中的服务账号临时修改表结构。
+
+### 后续新增表和序列默认授权
+
+PostgreSQL 的默认权限按“对象创建人”分别保存。下面示例假设后续 DDL 由 `postgres` 创建；如果实际由其他管理角色建表，必须将 `FOR ROLE postgres` 替换为真实建表角色，并由该角色本身或数据库超级用户执行。
+
+```sql
+ALTER DEFAULT PRIVILEGES
+    FOR ROLE postgres
+    IN SCHEMA public
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO env_vault;
+
+ALTER DEFAULT PRIVILEGES
+    FOR ROLE postgres
+    IN SCHEMA public
+    GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO env_vault;
+```
+
+`ALTER DEFAULT PRIVILEGES` 只影响执行后由指定角色创建的新对象，不会给已有表补授权，也不会影响其他角色创建的表。如果始终使用 `env_vault` 用户执行本文档中的 DDL，则该用户是新表 owner，不需要执行上述默认授权。
+
+### 权限检查
+
+```sql
+SELECT current_database(), current_user;
+
+SELECT has_database_privilege('env_vault', 'env_vault', 'CONNECT') AS can_connect,
+       has_schema_privilege('env_vault', 'public', 'USAGE') AS can_use_schema,
+       has_schema_privilege('env_vault', 'public', 'CREATE') AS can_create_object;
+
+SELECT table_schema, table_name, privilege_type
+FROM information_schema.role_table_grants
+WHERE grantee = 'env_vault'
+  AND table_schema = 'public'
+ORDER BY table_name, privilege_type;
+```
+
 
 ---
 
