@@ -13,6 +13,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	auditdomain "env-vault/internal/domain/audit"
+	tokendomain "env-vault/internal/domain/useraccesstoken"
 	"env-vault/internal/interfaces/auditctx"
 	"env-vault/pkg/logger"
 	"env-vault/pkg/response"
@@ -24,6 +25,11 @@ import (
 // UserBlockChecker 查询认证用户是否已被锁定。
 type UserBlockChecker interface {
 	IsBlocked(ctx context.Context, userID string) (bool, error)
+}
+
+// PersonalTokenChecker validates PAT revocation and ownership after JWT verification
+type PersonalTokenChecker interface {
+	Validate(ctx context.Context, jti, userID string) (bool, error)
 }
 
 // JWTProvider 表示一个受信任 JWT 签发方及其验签公钥
@@ -60,7 +66,16 @@ func Auth(providers []JWTProvider, blockCheckers ...UserBlockChecker) (gin.Handl
 
 // AuthWithAudit builds the JWT middleware and persists every rejected
 // authentication attempt without retaining token or credential material.
-func AuthWithAudit(providers []JWTProvider, blockChecker UserBlockChecker, auditRecorder auditdomain.Recorder) (gin.HandlerFunc, error) {
+func AuthWithAudit(
+	providers []JWTProvider,
+	blockChecker UserBlockChecker,
+	auditRecorder auditdomain.Recorder,
+	personalTokenCheckers ...PersonalTokenChecker,
+) (gin.HandlerFunc, error) {
+	var personalTokenChecker PersonalTokenChecker
+	if len(personalTokenCheckers) > 0 {
+		personalTokenChecker = personalTokenCheckers[0]
+	}
 	parsedProviders := make([]parsedJWTProvider, 0, len(providers))
 	for i, provider := range providers {
 		issuer := strings.TrimSpace(provider.Issuer)
@@ -92,7 +107,7 @@ func AuthWithAudit(providers []JWTProvider, blockChecker UserBlockChecker, audit
 			return
 		}
 
-		claims, err := verifyJWT(tokenString, parsedProviders)
+		verified, err := verifyJWT(tokenString, parsedProviders)
 		if err != nil {
 			logger.Warn(c, "auth failed: invalid token", zap.Error(err))
 			if !recordAuthFailure(c, auditRecorder, "invalid_token", "authentication failed", "") {
@@ -101,12 +116,16 @@ func AuthWithAudit(providers []JWTProvider, blockChecker UserBlockChecker, audit
 			response.AbortWithHTTPStatus(c, 401)
 			return
 		}
+		claims := verified.claims
 
 		// 构建用户上下文（对应 Java createUserContext 逻辑）
 		user := &userctx.User{
-			UserID: getClaimString(claims, "staffuserid"),
-			Name:   getClaimString(claims, "name"),
-			Jwt:    tokenString,
+			UserID:     getClaimString(claims, "staffuserid"),
+			Name:       getClaimString(claims, "name"),
+			Jwt:        tokenString,
+			AuthSource: getClaimString(claims, "authSource"),
+			TokenUse:   getClaimString(claims, "tokenUse"),
+			TokenID:    getClaimString(claims, "jti"),
 		}
 		if user.UserID == "" {
 			user.UserID = getClaimString(claims, "sub")
@@ -134,6 +153,43 @@ func AuthWithAudit(providers []JWTProvider, blockChecker UserBlockChecker, audit
 					return
 				}
 				response.AbortWithHTTPStatusMessage(c, 403, "用户被锁定")
+				return
+			}
+		}
+
+		// PATs must carry all type markers and remain active in the database
+		isPersonalToken := user.AuthSource == tokendomain.AuthSource || user.TokenUse == tokendomain.TokenUse
+		if isPersonalToken {
+			if user.AuthSource != tokendomain.AuthSource || user.TokenUse != tokendomain.TokenUse ||
+				verified.tokenType != tokendomain.TokenType || user.TokenID == "" {
+				if !recordAuthFailure(c, auditRecorder, "invalid_personal_token_type", "authentication failed", user.UserID) {
+					return
+				}
+				response.AbortWithHTTPStatus(c, 401)
+				return
+			}
+			if personalTokenChecker == nil {
+				logger.Error(c, "personal token checker is not configured")
+				if !recordAuthFailure(c, auditRecorder, "personal_token_check_unavailable", "internal error", user.UserID) {
+					return
+				}
+				response.AbortWithHTTPStatusMessage(c, 500, "internal error")
+				return
+			}
+			active, checkErr := personalTokenChecker.Validate(c, user.TokenID, user.UserID)
+			if checkErr != nil {
+				logger.Error(c, "check personal token status failed", zap.String("userId", user.UserID), zap.Error(checkErr))
+				if !recordAuthFailure(c, auditRecorder, "personal_token_check_failed", "internal error", user.UserID) {
+					return
+				}
+				response.AbortWithHTTPStatusMessage(c, 500, "internal error")
+				return
+			}
+			if !active {
+				if !recordAuthFailure(c, auditRecorder, "personal_token_inactive", "authentication failed", user.UserID) {
+					return
+				}
+				response.AbortWithHTTPStatus(c, 401)
 				return
 			}
 		}
@@ -170,7 +226,12 @@ func recordAuthFailure(c *gin.Context, recorder auditdomain.Recorder, failureCod
 	return true
 }
 
-func verifyJWT(tokenString string, providers []parsedJWTProvider) (jwt.MapClaims, error) {
+type verifiedJWT struct {
+	claims    jwt.MapClaims
+	tokenType string
+}
+
+func verifyJWT(tokenString string, providers []parsedJWTProvider) (*verifiedJWT, error) {
 	var lastErr error
 	for _, provider := range providers {
 		claims := jwt.MapClaims{}
@@ -188,7 +249,7 @@ func verifyJWT(tokenString string, providers []parsedJWTProvider) (jwt.MapClaims
 			return provider.publicKey, nil
 		}, options...)
 		if err == nil && token.Valid {
-			return claims, nil
+			return &verifiedJWT{claims: claims, tokenType: getHeaderString(token, "typ")}, nil
 		}
 		lastErr = err
 	}

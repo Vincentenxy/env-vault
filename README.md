@@ -65,23 +65,36 @@ docker build -t env-vault:latest .
 - 将 StatefulSet 的 `image` 改为集群可拉取的镜像地址；使用私有镜像仓库时追加 `imagePullSecrets`。
 - 3 个副本会通过 `topologySpreadConstraints` 分散到 3 个节点，因此集群至少需要 3 个可调度节点。
 
-构建并推送镜像后应用清单：
+构建并推送镜像后应用清单。目标集群为 `linux/amd64`，在 Apple Silicon Mac 上必须显式指定目标平台，避免最终 Alpine 和 Go 二进制使用不同架构。每次部署使用新的不可变标签，防止 `imagePullPolicy: IfNotPresent` 继续使用节点上的旧镜像：
 
 ```bash
-docker build -t registry.example.com/env-vault:0.1.0 .
-docker push registry.example.com/env-vault:0.1.0
-# 修改 YAML 中的 image 后执行
+docker login harbor.gtjaqh.net
+docker buildx build \
+  --platform linux/amd64 \
+  --build-arg BASE_IMAGE_REGISTRY=m.daocloud.io/docker.io \
+  --build-arg GOPROXY=https://goproxy.cn,direct \
+  -t harbor.gtjaqh.net/lucy-dev/env-vault:0.0.1-alpha.2 \
+  --push \
+  .
+
+# 输出中必须包含 linux/amd64
+docker buildx imagetools inspect harbor.gtjaqh.net/lucy-dev/env-vault:0.0.1-alpha.2
+
+# 将 YAML 中的 image 修改为上述新标签后执行
 kubectl apply -f deploy/k8s/env-vault-statefulset.yaml
+kubectl rollout status statefulset/env-vault -n env-vault
 kubectl -n env-vault get pods -o wide
 ```
+
+`BASE_IMAGE_REGISTRY` 只控制 Dockerfile 使用的 Go 和 Alpine 基础镜像来源，默认值仍是 `docker.io`；`GOPROXY` 控制构建阶段的 Go 模块下载地址，默认值仍是 `https://proxy.golang.org,direct`。上面的命令通过 DaoCloud 和 goproxy.cn 处理国内网络下的公共依赖下载。本地已经存在同名镜像并不代表可以复用：Apple Silicon Mac 默认缓存的是 `linux/arm64`，构建集群镜像需要单独获取 `linux/amd64` 变体。
 
 清单提供三个集群内地址：
 
 - `env-vault.env-vault.svc.cluster.local:80`：正常业务流量，只选择 readiness probe 已通过的副本。
 - `env-vault-headless.env-vault.svc.cluster.local:8090`：StatefulSet 的 Headless Service，用于后续 Pod 间发现。
-- `env-vault-bootstrap.env-vault.svc.cluster.local:8090`：只指向 `env-vault-0`，用于首次提交三个主密钥分片；不要将该 Service 直接暴露到公网。
+- `env-vault-bootstrap.env-vault.svc.cluster.local:8090`：只指向 `env-vault-0`，用于启动阶段的登录、健康检查和主密钥分片提交；Ingress 只转发明确列出的启动接口，不对外暴露其他路径。
 
-主密钥未激活时，业务接口仍由 Ready 中间件拦截。当前 StatefulSet 的 readiness probe 调用内部 `/internal/v1/masterKey/ready`，只有主密钥激活后副本才会加入正常业务 Service；首次启动需要通过受保护的 bootstrap 入口完成分片提交。详细部署约束见 [design/deploy.md](design/deploy.md)。
+主密钥未激活时，业务接口仍由 Ready 中间件拦截。当前 StatefulSet 的 readiness probe 调用内部 `/internal/v1/masterKey/ready`，只有主密钥激活后副本才会加入正常业务 Service；Ingress 将 `/api/v1/pub/**` 和 `/api/v1/masterKey/**` 转发到只选择 Pod 0 的 bootstrap Service，其他 API 仍使用正常业务 Service。详细部署约束见 [design/deploy.md](design/deploy.md)。
 
 健康检查：`GET /api/v1/pub/health`
 
@@ -519,14 +532,6 @@ auth.POST("/user/update", userHandler.Update)   // 需认证
 ## 开发规范
 
 所有开发必须遵循 [AGENT.md](AGENT.md) 中的完整规范。
-
-
-## 推送
-```shell
-docker login harbor.qiuer.net
-docker tag env-vault:0.0.1-alpha.1 harbor.gtjaqh.net/lucy-dev/env-vault:0.0.1-alpha.1
-docker push harbor.gtjaqh.net/lucy-dev/env-vault:0.0.1-alpha.1
-```
 
 
 ## 相关连接

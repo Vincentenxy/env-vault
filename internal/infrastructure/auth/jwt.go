@@ -8,6 +8,8 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+
+	tokendomain "env-vault/internal/domain/useraccesstoken"
 )
 
 // JWTIssuer 使用 EnvVault 本地 RSA 私钥签发短期访问令牌
@@ -42,8 +44,18 @@ type localClaims struct {
 	StaffUserID string `json:"staffuserid"`
 	Name        string `json:"name"`
 	AuthSource  string `json:"authSource"`
+	TokenUse    string `json:"tokenUse"`
 	jwt.RegisteredClaims
 }
+
+const (
+	// PersonalTokenAuthSource identifies a JWT issued for personal API access
+	PersonalTokenAuthSource = tokendomain.AuthSource
+	// PersonalTokenUse separates PATs from interactive login tokens
+	PersonalTokenUse = tokendomain.TokenUse
+	// PersonalTokenType prevents a PAT from being confused with another JWT kind
+	PersonalTokenType = tokendomain.TokenType
+)
 
 // Issue 为本地认证用户生成 RS256 JWT
 func (i *JWTIssuer) Issue(userID, name string) (string, time.Time, error) {
@@ -57,6 +69,7 @@ func (i *JWTIssuer) Issue(userID, name string) (string, time.Time, error) {
 		StaffUserID: userID,
 		Name:        strings.TrimSpace(name),
 		AuthSource:  "local",
+		TokenUse:    "accessToken",
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    i.issuer,
 			Subject:   userID,
@@ -74,4 +87,35 @@ func (i *JWTIssuer) Issue(userID, name string) (string, time.Time, error) {
 		return "", time.Time{}, err
 	}
 	return signed, expiresAt, nil
+}
+
+// IssuePersonalAccessToken generates a revocable JWT with a caller-selected expiration
+func (i *JWTIssuer) IssuePersonalAccessToken(userID, name string, expiresAt time.Time) (string, uuid.UUID, error) {
+	userID = strings.TrimSpace(userID)
+	now := i.now()
+	if userID == "" || !expiresAt.After(now) {
+		return "", uuid.Nil, errors.New("personal access token claims are invalid")
+	}
+
+	// PATs use the same identity claims as local login tokens and add an explicit token kind
+	jti := uuid.New()
+	claims := localClaims{
+		StaffUserID: userID,
+		Name:        strings.TrimSpace(name),
+		AuthSource:  PersonalTokenAuthSource,
+		TokenUse:    PersonalTokenUse,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer: i.issuer, Subject: userID, Audience: jwt.ClaimStrings{i.audience},
+			ExpiresAt: jwt.NewNumericDate(expiresAt), NotBefore: jwt.NewNumericDate(now),
+			IssuedAt: jwt.NewNumericDate(now), ID: jti.String(),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token.Header["kid"] = i.keyID
+	token.Header["typ"] = PersonalTokenType
+	signed, err := token.SignedString(i.privateKey)
+	if err != nil {
+		return "", uuid.Nil, err
+	}
+	return signed, jti, nil
 }

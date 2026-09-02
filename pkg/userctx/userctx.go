@@ -18,9 +18,12 @@ const userKey contextKey = "authUser"
 
 // User 认证用户信息（对应 JWT claims 解析结果）
 type User struct {
-	UserID string `json:"userId"` // 用户 ID（claims.staffuserid）
-	Name   string `json:"name"`   // 用户姓名（claims.name）
-	Jwt    string `json:"jwt"`    // 原始 JWT token（用于向下游服务透传）
+	UserID     string `json:"userId"`     // 用户 ID（claims.staffuserid）
+	Name       string `json:"name"`       // 用户姓名（claims.name）
+	Jwt        string `json:"jwt"`        // 原始 JWT token（用于向下游服务透传）
+	AuthSource string `json:"authSource"` // JWT 认证来源
+	TokenUse   string `json:"tokenUse"`   // JWT 使用类型
+	TokenID    string `json:"tokenId"`    // JWT jti
 }
 
 // Set 将用户信息写入 gin.Context

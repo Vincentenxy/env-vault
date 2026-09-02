@@ -295,6 +295,7 @@ func TestService_CreateSub_Success_AllEnvs(t *testing.T) {
 			}
 			f := newTestFolder(envs[0].ID, "groups", nil)
 			f.ID = parentFolderID
+			f.Manager = "groups-manager"
 			return f, nil
 		},
 		getByEnvCode: func(ctx context.Context, envID uuid.UUID, code string) (*folderdomain.Folder, error) {
@@ -305,6 +306,7 @@ func TestService_CreateSub_Success_AllEnvs(t *testing.T) {
 				if envID == e.ID {
 					g := newTestFolder(envID, "groups", nil)
 					g.ID = groupsIDs[i]
+					g.Manager = "groups-manager"
 					return g, nil
 				}
 			}
@@ -328,6 +330,9 @@ func TestService_CreateSub_Success_AllEnvs(t *testing.T) {
 				if f.ParentFolderID == nil || *f.ParentFolderID != groupsIDs[i] {
 					t.Fatalf("folder[%d] parent mismatch: %+v", i, f)
 				}
+				if f.Manager != "groups-manager" {
+					t.Fatalf("folder[%d] manager should inherit groups manager, got %q", i, f.Manager)
+				}
 			}
 			return nil
 		},
@@ -349,6 +354,7 @@ func TestService_CreateSub_Success_AllEnvs(t *testing.T) {
 	svc := NewService(folderRepo, envRepo)
 	got, err := svc.CreateSub(context.Background(), CreateSubInput{
 		ParentFolderID: parentFolderID, Code: "ob_efficient_cfg", Name: "OB高效配置", Type: folderdomain.TypeCommon,
+		Manager: "request-manager",
 	}, "operator-1")
 	if err != nil {
 		t.Fatalf("expected nil err, got %v", err)

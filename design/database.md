@@ -24,32 +24,46 @@
 
 ## PostgreSQL 数据库、用户与授权初始化
 
-当前 CNPG 部署清单通过 `bootstrap.initdb.database=env_vault` 和 `bootstrap.initdb.owner=env_vault` 自动创建应用数据库及所有者，使用 CNPG 初始化时不需要重复执行创建数据库和用户的 SQL。本节用于手工安装 PostgreSQL，或者修复已有数据库的所有者和对象权限。
+PostgreSQL 的数据库权限、Schema 权限和表权限相互独立。拥有数据库不代表自动拥有其他账号创建的表；表及序列的权限取决于对象所有者和显式授权。
 
-### 首次创建数据库和登录用户
+本项目支持下面两种初始化模式：
+
+| 模式 | DDL 执行账号 | 应用账号能力 | 适用场景 |
+|------|--------------|--------------|----------|
+| 模式一：超管建表、应用账号只读写数据（推荐） | `postgres` 或独立迁移账号 | 只允许连接数据库、使用 Schema 和读写表数据 | 生产环境、人工或发布流水线统一执行 DDL |
+| 模式二：应用账号拥有数据库并自行建表 | `env_vault` | 可以创建 Schema、表、索引并读写数据 | 本地开发、CNPG 自动初始化或无需区分 DDL/DML 的环境 |
+
+当前 CNPG 部署清单通过 `bootstrap.initdb.database=env_vault` 和 `bootstrap.initdb.owner=env_vault` 自动初始化，属于模式二。手工安装生产数据库时，推荐使用模式一。
+
+### 模式一：超管建表，应用账号只读写数据（推荐）
+
+#### 1. 创建应用登录用户和数据库
 
 先使用 `postgres` 等管理员账号连接 `postgres` 数据库执行。PostgreSQL 不支持 `CREATE DATABASE IF NOT EXISTS`，以下语句只在首次初始化时执行。
 
 ```sql
--- 创建 EnvVault 登录用户，部署前替换示例密码
+-- 创建最小权限的 EnvVault 应用登录用户，部署前替换示例密码
 CREATE ROLE env_vault
     WITH LOGIN
-    PASSWORD 'REPLACE_WITH_REAL_PASSWORD';
+    PASSWORD 'REPLACE_WITH_REAL_PASSWORD'
+    NOSUPERUSER
+    NOCREATEDB
+    NOCREATEROLE
+    NOREPLICATION;
 
--- CREATE DATABASE 不能放在事务块中执行
+-- 数据库由 DDL 管理账号持有，CREATE DATABASE 不能放在事务块中执行
 CREATE DATABASE env_vault
     WITH
-    OWNER = env_vault
+    OWNER = postgres
     ENCODING = 'UTF8'
     TEMPLATE = template0;
 
--- 数据库级权限只控制连接、建 schema 和临时对象，不代表拥有表数据权限
-GRANT CONNECT, CREATE, TEMPORARY
-    ON DATABASE env_vault
-    TO env_vault;
+-- 应用账号只需要连接数据库
+REVOKE ALL ON DATABASE env_vault FROM PUBLIC;
+GRANT CONNECT ON DATABASE env_vault TO env_vault;
 ```
 
-如果用户或数据库已经存在，不要重复执行 `CREATE`，可由管理员按实际情况修复所有者和密码：
+如果用户或数据库已经存在，不要重复执行 `CREATE`，只需按实际情况修复登录密码。数据库已经由 `env_vault` 持有也不影响后续表授权；如需严格收回应用账号的 DDL 能力，可将数据库所有者调整为 DDL 管理账号。
 
 ```sql
 ALTER ROLE env_vault
@@ -57,10 +71,21 @@ ALTER ROLE env_vault
     PASSWORD 'REPLACE_WITH_REAL_PASSWORD';
 
 ALTER DATABASE env_vault
-    OWNER TO env_vault;
+    OWNER TO postgres;
+
+REVOKE CREATE, TEMPORARY
+    ON DATABASE env_vault
+    FROM env_vault;
+
+-- 切换到 env_vault 数据库，避免修改到 postgres 数据库的 public Schema
+\connect env_vault
+
+ALTER SCHEMA public OWNER TO postgres;
+REVOKE CREATE ON SCHEMA public FROM env_vault;
+GRANT USAGE ON SCHEMA public TO env_vault;
 ```
 
-### public schema 权限
+#### 2. 设置 public Schema 权限
 
 下面的语句必须连接到 `env_vault` 数据库后执行。使用 `psql` 时可通过 `\connect` 切换；使用数据库客户端时需要打开连接到 `env_vault` 的查询窗口。
 
@@ -70,17 +95,14 @@ ALTER DATABASE env_vault
 -- 防止其他普通用户在 public schema 中创建对象
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 
--- EnvVault 用户可以访问并创建当前 schema 下的对象
-GRANT USAGE, CREATE
-    ON SCHEMA public
-    TO env_vault;
+-- 应用账号只允许访问 Schema，不允许创建表和索引
+REVOKE CREATE ON SCHEMA public FROM env_vault;
+GRANT USAGE ON SCHEMA public TO env_vault;
 ```
 
-`env_vault` 是数据库 owner，并且后续建表语句也使用 `env_vault` 执行时，新表天然归该用户所有，不需要额外授权。生产环境建议保持这种方式，避免运行账号依赖管理员账号的默认权限配置。
+#### 3. 给已有表和序列授权
 
-### 已有表和序列授权
-
-如果表是由 `postgres` 或其他管理账号创建的，需要在 `env_vault` 数据库中补充已有对象权限：
+数据库和表创建完成后，由超管在 `env_vault` 数据库中执行。该授权只覆盖执行时已经存在的对象。
 
 ```sql
 GRANT SELECT, INSERT, UPDATE, DELETE
@@ -95,11 +117,12 @@ GRANT USAGE, SELECT, UPDATE
 
 以上表权限不包含 `TRUNCATE`、`REFERENCES` 和 `TRIGGER`，满足 EnvVault 当前运行时的查询和增删改需求。数据库结构变更应通过数据库变更流程执行，不依赖运行中的服务账号临时修改表结构。
 
-### 后续新增表和序列默认授权
+#### 4. 给后续新增表和序列设置默认授权
 
-PostgreSQL 的默认权限按“对象创建人”分别保存。下面示例假设后续 DDL 由 `postgres` 创建；如果实际由其他管理角色建表，必须将 `FOR ROLE postgres` 替换为真实建表角色，并由该角色本身或数据库超级用户执行。
+PostgreSQL 的默认权限按“对象创建人”分别保存。下面示例假设后续 DDL 由 `postgres` 创建；如果实际由 `migration_user` 等其他管理角色建表，必须将 `FOR ROLE postgres` 替换为真实建表角色。
 
 ```sql
+-- 必须在 env_vault 数据库中，由 postgres 本人或超级用户执行
 ALTER DEFAULT PRIVILEGES
     FOR ROLE postgres
     IN SCHEMA public
@@ -111,7 +134,36 @@ ALTER DEFAULT PRIVILEGES
     GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO env_vault;
 ```
 
-`ALTER DEFAULT PRIVILEGES` 只影响执行后由指定角色创建的新对象，不会给已有表补授权，也不会影响其他角色创建的表。如果始终使用 `env_vault` 用户执行本文档中的 DDL，则该用户是新表 owner，不需要执行上述默认授权。
+`ALTER DEFAULT PRIVILEGES IN SCHEMA public ...` 不写 `FOR ROLE` 时，只对当前执行账号以后创建的对象生效。它不会给已有表补授权，也不会影响其他账号创建的表。因此模式一必须同时执行“已有对象授权”和“指定 DDL 账号的默认授权”。
+
+### 模式二：应用账号拥有数据库并自行建表
+
+该模式下数据库 owner 和 DDL 执行账号都是 `env_vault`。`env_vault` 创建的表和序列天然归自己所有，不需要再向自己执行 `GRANT ON ALL TABLES` 或 `ALTER DEFAULT PRIVILEGES`。
+
+```sql
+-- 使用 postgres 等管理员账号连接 postgres 数据库执行
+CREATE ROLE env_vault
+    WITH LOGIN
+    PASSWORD 'REPLACE_WITH_REAL_PASSWORD'
+    NOSUPERUSER
+    NOCREATEDB
+    NOCREATEROLE
+    NOREPLICATION;
+
+CREATE DATABASE env_vault
+    WITH
+    OWNER = env_vault
+    ENCODING = 'UTF8'
+    TEMPLATE = template0;
+
+-- 切换到 env_vault 数据库后执行
+\connect env_vault
+
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+GRANT USAGE, CREATE ON SCHEMA public TO env_vault;
+```
+
+模式二的关键要求是：后续建表 SQL 必须使用 `env_vault` 登录执行。如果改用 `postgres` 建表，就已经切换为模式一，必须重新给已有对象授权，并为实际 DDL 账号配置默认权限。
 
 ### 权限检查
 
@@ -127,6 +179,12 @@ FROM information_schema.role_table_grants
 WHERE grantee = 'env_vault'
   AND table_schema = 'public'
 ORDER BY table_name, privilege_type;
+
+-- 检查 public 下的表由哪个账号创建
+SELECT schemaname, tablename, tableowner
+FROM pg_tables
+WHERE schemaname = 'public'
+ORDER BY tablename;
 ```
 
 
@@ -204,12 +262,6 @@ CREATE INDEX IF NOT EXISTS idx_organization_info_tenant_code ON organization_inf
 
 **说明**：用户信息表。`id` 为系统内部生成的 UUID，`user_id` 为外部系统传入的用户标识，对应当前 JWT 中的 `staffuserid`。用户归属租户和组织，关联关系由代码层维护，不使用外键。密码字段仅允许保存不可逆哈希，当前不设置密码时保存空字符串。
 
-已有表增加锁定字段：
-
-```sql
-ALTER TABLE user_info
-    ADD COLUMN IF NOT EXISTS is_blocked boolean NOT NULL DEFAULT false;
-```
 
 ```sql
 CREATE TABLE IF NOT EXISTS user_info (
@@ -272,6 +324,66 @@ CREATE UNIQUE INDEX IF NOT EXISTS uk_user_info_username_active
 - Redis 用户资料不保存 `password_hash`，避免扩大密码凭证的存储范围。
 
 **待办**：Kubernetes 多实例部署时，引入 Redis Pub/Sub 或等价的缓存变更通知机制，使一个实例更新用户姓名后，其余实例同步刷新进程内存。本期暂不实现跨实例内存同步。
+
+---
+
+## 表名：`user_access_token_info`
+
+**说明**：用户个人访问令牌（PAT）表。一个用户可以创建多个长期访问令牌，令牌使用本地登录相同的 RSA 私钥签发，并通过独立的 JWT 声明标识为 PAT。`owner_id` 关联 `user_info.id`（系统内部 UUID），关联关系由代码层维护，不使用外键。完整令牌使用当前系统主密钥和 AES-256-GCM 加密后存储，数据库、审计日志和应用日志均不得保存令牌明文。
+
+```sql
+CREATE TABLE IF NOT EXISTS user_access_token_info (
+    id               uuid        PRIMARY KEY,
+    owner_id         uuid        NOT NULL,                 -- user_info.id，令牌所有者的内部 UUID
+    name             text        NOT NULL,                 -- Token 名称，去除首尾空格后长度不超过 64
+    jti              uuid        NOT NULL,                 -- JWT 唯一标识，用于认证时校验撤销状态
+    token_ciphertext text        NOT NULL DEFAULT '',      -- 使用系统主密钥加密后的完整 JWT
+    expires_at       timestamptz NOT NULL,                 -- 到期时间，不支持延期
+    last_used_at     timestamptz,                          -- 最近一次认证成功时间
+    is_deleted       boolean     NOT NULL DEFAULT false,
+    delete_at        timestamptz,
+    delete_by        text        NOT NULL DEFAULT '',
+    create_by        text        NOT NULL DEFAULT '',
+    update_by        text        NOT NULL DEFAULT '',
+    create_at        timestamptz NOT NULL DEFAULT now(),
+    update_at        timestamptz NOT NULL DEFAULT now()
+);
+
+-- JWT jti 全局唯一
+CREATE UNIQUE INDEX IF NOT EXISTS uk_user_access_token_info_jti
+    ON user_access_token_info (jti);
+
+-- 查询用户的全部未删除 Token
+CREATE INDEX IF NOT EXISTS idx_user_access_token_info_owner_created
+    ON user_access_token_info (owner_id, create_at DESC)
+    WHERE is_deleted = false;
+
+-- 认证和过期清理使用
+CREATE INDEX IF NOT EXISTS idx_user_access_token_info_expires
+    ON user_access_token_info (expires_at)
+    WHERE is_deleted = false;
+```
+
+**索引说明**：
+
+| 索引名 | 字段 | 说明 |
+|--------|------|------|
+| `uk_user_access_token_info_jti` | `jti` | 认证时唯一定位令牌并防止重复标识 |
+| `idx_user_access_token_info_owner_created` | `owner_id, create_at DESC` | 查询用户的全部未删除 Token |
+| `idx_user_access_token_info_expires` | `expires_at` | 认证校验和后续过期清理 |
+
+**业务规则**（代码层校验）：
+
+- Token 所有者只允许从已认证 JWT 的 `staffuserid` 获取，请求不得指定其他用户。
+- Token 名称去除首尾空格后不能为空，长度不得超过 64 个字符；允许同一用户使用相同名称。
+- 到期时间由前端时间选择器提供，必须晚于当前时间；创建后不提供延期或修改接口。
+- 每个用户最多同时拥有 10 个未删除且未到期的 Token。创建事务先锁定对应的 `user_info` 记录，再统计有效 Token，避免并发请求突破上限。
+- PAT 使用与本地登录令牌相同的 RSA 密钥、`iss` 和 `aud`，并增加 `authSource=personalToken`、`tokenUse=personalAccessToken` 和 JWT Header `typ=env-vault-pat+jwt`。
+- PAT 不能调用 PAT 创建接口；PAT 的其他接口访问能力当前与所属用户一致，细粒度权限后续实现。
+- 每次 PAT 认证除校验 JWT 签名、`iss`、`aud` 和 `exp` 外，还必须按 `jti` 校验数据库记录未删除、未过期且属于当前用户。
+- 用户 `is_blocked=true` 时，其全部 PAT 立即失效；删除 PAT 使用软删除，删除后立即拒绝认证。
+- 列表接口允许所属用户查看完整令牌，后端解密后返回明文，并设置禁止缓存的响应头；前端默认遮罩，点击眼睛显示，点击 Token 内容复制。
+- 创建、列表查看、删除和 PAT 认证失败均写入审计日志；日志仅记录 Token 记录 ID、`jti`、名称和操作结果，禁止记录明文、密文、Authorization Header 或完整请求响应体。
 
 ---
 
@@ -368,35 +480,6 @@ CREATE INDEX IF NOT EXISTS idx_project_user_relation_expire
 - 外部协作者不能担任项目管理员；项目管理员对应用户的主组织必须与 `project_info.org_id` 一致。该规则由项目 service 在创建和修改时校验。
 - 删除项目或用户时，由应用层软删除相关绑定记录。
 
-### 已有表升级 SQL
-
-生产数据库中的 `project_user_relation` 已存在时，执行以下增量 SQL。执行后再发布依赖新字段的应用版本。
-
-```sql
-ALTER TABLE project_user_relation
-    ADD COLUMN IF NOT EXISTS expire_at timestamptz,
-    ADD COLUMN IF NOT EXISTS is_deleted boolean NOT NULL DEFAULT false,
-    ADD COLUMN IF NOT EXISTS delete_at timestamptz,
-    ADD COLUMN IF NOT EXISTS delete_by text NOT NULL DEFAULT '',
-    ADD COLUMN IF NOT EXISTS create_by text NOT NULL DEFAULT '',
-    ADD COLUMN IF NOT EXISTS update_by text NOT NULL DEFAULT '',
-    ADD COLUMN IF NOT EXISTS create_at timestamptz NOT NULL DEFAULT now(),
-    ADD COLUMN IF NOT EXISTS update_at timestamptz NOT NULL DEFAULT now();
-
-DROP INDEX IF EXISTS uk_project_user_relation_project_user;
-CREATE UNIQUE INDEX uk_project_user_relation_project_user
-    ON project_user_relation (project_id, user_id)
-    WHERE is_deleted = false;
-
-DROP INDEX IF EXISTS idx_project_user_relation_user_project;
-CREATE INDEX IF NOT EXISTS idx_project_user_relation_user_active
-    ON project_user_relation (user_id, project_id, expire_at)
-    WHERE is_deleted = false;
-
-CREATE INDEX IF NOT EXISTS idx_project_user_relation_expire
-    ON project_user_relation (expire_at)
-    WHERE is_deleted = false AND expire_at IS NOT NULL;
-```
 
 ---
 

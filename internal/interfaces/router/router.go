@@ -20,6 +20,7 @@ import (
 	secretapp "env-vault/internal/application/secret"
 	tenantapp "env-vault/internal/application/tenant"
 	userapp "env-vault/internal/application/user"
+	tokenapp "env-vault/internal/application/useraccesstoken"
 	infraauth "env-vault/internal/infrastructure/auth"
 	usercache "env-vault/internal/infrastructure/cache/user"
 	"env-vault/internal/infrastructure/config"
@@ -32,6 +33,7 @@ import (
 	secretrepo "env-vault/internal/infrastructure/persistence/secret"
 	tenantrepo "env-vault/internal/infrastructure/persistence/tenant"
 	userrepo "env-vault/internal/infrastructure/persistence/user"
+	tokenrepo "env-vault/internal/infrastructure/persistence/useraccesstoken"
 	"env-vault/internal/interfaces/handler"
 	"env-vault/internal/interfaces/middleware"
 	"env-vault/internal/masterkey"
@@ -75,6 +77,7 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 	}
 	jwtProviders := make([]middleware.JWTProvider, 0, 2)
 	var localAuthSvc authapp.IService
+	var personalTokenIssuer *infraauth.JWTIssuer
 	if cfg.Auth.Local.Enabled {
 		privateMaterial, err := infraauth.LoadKeyMaterial(cfg.Auth.Local.PrivateKey, cfg.Auth.Local.PrivateKeyFile)
 		if err != nil {
@@ -105,6 +108,7 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 		if err != nil {
 			return nil, err
 		}
+		personalTokenIssuer = issuer
 		localAuthSvc = authapp.NewService(userRepo, passwordHasher, issuer).WithAuditRecorder(auditSvc)
 		jwtProviders = append(jwtProviders, middleware.JWTProvider{
 			Issuer: cfg.Auth.Local.Issuer, Audience: cfg.Auth.Local.Audience,
@@ -145,6 +149,12 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 	r.Use(readyMiddleware)
 	secretRepo := secretrepo.NewRepository(db)
 	personalSecretRepo := personalrepo.NewRepository(db)
+	var personalTokenSvc *tokenapp.Service
+	if personalTokenIssuer != nil {
+		personalTokenRepo := tokenrepo.NewRepository(db)
+		personalTokenSvc = tokenapp.NewService(personalTokenRepo, userSvc, personalTokenIssuer, masterKeyManager).
+			WithAuditRecorder(auditSvc)
+	}
 	envSvc := envapp.NewService(
 		envRepo,
 		envapp.WithResourceClone(folderRepo, secretRepo, masterKeyManager),
@@ -167,10 +177,18 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 	folderHandler := handler.NewFolderHandler(folderSvc)
 	secretHandler := handler.NewSecretHandler(secretSvc)
 	personalSecretHandler := handler.NewPersonalSecretHandler(personalSecretSvc)
+	var personalTokenHandler *handler.UserAccessTokenHandler
+	if personalTokenSvc != nil {
+		personalTokenHandler = handler.NewUserAccessTokenHandler(personalTokenSvc)
+	}
 	auditHandler := handler.NewAuditHandler(auditSvc)
 
 	// 初始化 JWT 认证中间件（加载配置中的公钥）
-	authMiddleware, err := middleware.AuthWithAudit(jwtProviders, userSvc, auditSvc)
+	personalTokenCheckers := make([]middleware.PersonalTokenChecker, 0, 1)
+	if personalTokenSvc != nil {
+		personalTokenCheckers = append(personalTokenCheckers, personalTokenSvc)
+	}
+	authMiddleware, err := middleware.AuthWithAudit(jwtProviders, userSvc, auditSvc, personalTokenCheckers...)
 	if err != nil {
 		return nil, err
 	}
@@ -212,6 +230,15 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 				personalSecretGroup.POST("/reveal", personalSecretHandler.Reveal)
 				personalSecretGroup.POST("/history", personalSecretHandler.History)
 				personalSecretGroup.POST("/history/reveal", personalSecretHandler.RevealHistory)
+			}
+
+			if personalTokenHandler != nil {
+				personalTokenGroup := userGroup.Group("/token")
+				{
+					personalTokenGroup.POST("/create", personalTokenHandler.Create)
+					personalTokenGroup.POST("/list", personalTokenHandler.List)
+					personalTokenGroup.POST("/delete", personalTokenHandler.Delete)
+				}
 			}
 		}
 

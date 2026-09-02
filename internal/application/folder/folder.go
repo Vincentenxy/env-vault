@@ -50,7 +50,7 @@ type CreateSubInput struct {
 	Name           string
 	Remark         string
 	Type           string
-	Manager        string
+	Manager        string // 仅为兼容旧调用方保留；创建时始终继承父 groups 的管理员
 	KeyPattern     string
 }
 
@@ -267,7 +267,7 @@ func (s *Service) createSub(ctx context.Context, in CreateSubInput, operator str
 	// 子 folder 的业务组 ID：一次性生成，全环境共享
 	groupID := uuid.New()
 	now := time.Now()
-	manager := strings.TrimSpace(in.Manager)
+	manager := strings.TrimSpace(parent.Manager)
 	if manager == "" {
 		manager = operator
 	}
