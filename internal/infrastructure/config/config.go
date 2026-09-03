@@ -62,10 +62,20 @@ type CompanyAuthConfig struct {
 
 // SecurityConfig 安全相关配置
 type SecurityConfig struct {
-	EncryptionKey          string                  `mapstructure:"encryption_key"`            // secret value 加密私钥（AES-256-GCM，32 字节 base64 编码）
-	AllowConfigKeyFallback bool                    `mapstructure:"allow_config_key_fallback"` // 是否允许使用配置文件中的开发密钥
-	MasterKeyPeerToken     string                  `mapstructure:"master_key_peer_token"`     // 集群内部主密钥传输令牌，生产环境通过环境变量注入
-	ReadyAllowlist         []ReadyAllowRouteConfig `mapstructure:"ready_allowlist"`           // 主密钥未就绪时允许访问的接口
+	EncryptionKey          string                      `mapstructure:"encryption_key"`            // secret value 加密私钥（AES-256-GCM，32 字节 base64 编码）
+	AllowConfigKeyFallback bool                        `mapstructure:"allow_config_key_fallback"` // 是否允许使用配置文件中的开发密钥
+	MasterKeyPeerToken     string                      `mapstructure:"master_key_peer_token"`     // 集群内部主密钥传输令牌，生产环境通过环境变量注入
+	MasterKeyPeerRecovery  MasterKeyPeerRecoveryConfig `mapstructure:"master_key_peer_recovery"`  // 从集群 Ready 实例自动恢复主密钥的配置
+	ReadyAllowlist         []ReadyAllowRouteConfig     `mapstructure:"ready_allowlist"`           // 主密钥未就绪时允许访问的接口
+}
+
+// MasterKeyPeerRecoveryConfig 集群实例自动恢复主密钥配置
+type MasterKeyPeerRecoveryConfig struct {
+	Enabled              bool          `mapstructure:"enabled"`
+	BaseURL              string        `mapstructure:"base_url"`
+	RequestTimeout       time.Duration `mapstructure:"request_timeout"`
+	InitialRetryInterval time.Duration `mapstructure:"initial_retry_interval"`
+	MaxRetryInterval     time.Duration `mapstructure:"max_retry_interval"`
 }
 
 // ReadyAllowRouteConfig 主密钥未就绪时放行的单个接口配置

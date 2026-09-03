@@ -73,12 +73,12 @@ docker buildx build \
   --platform linux/amd64 \
   --build-arg BASE_IMAGE_REGISTRY=m.daocloud.io/docker.io \
   --build-arg GOPROXY=https://goproxy.cn,direct \
-  -t harbor.gtjaqh.net/lucy-dev/env-vault:0.0.1-alpha.2 \
+  -t harbor.gtjaqh.net/lucy-dev/env-vault:0.0.1-alpha.4 \
   --push \
   .
 
 # 输出中必须包含 linux/amd64
-docker buildx imagetools inspect harbor.gtjaqh.net/lucy-dev/env-vault:0.0.1-alpha.2
+docker buildx imagetools inspect harbor.gtjaqh.net/lucy-dev/env-vault:0.0.1-alpha.4
 
 # 将 YAML 中的 image 修改为上述新标签后执行
 kubectl apply -f deploy/k8s/env-vault-statefulset.yaml
@@ -90,11 +90,13 @@ kubectl -n env-vault get pods -o wide
 
 清单提供三个集群内地址：
 
-- `env-vault.env-vault.svc.cluster.local:80`：正常业务流量，只选择 readiness probe 已通过的副本。
-- `env-vault-headless.env-vault.svc.cluster.local:8090`：StatefulSet 的 Headless Service，用于后续 Pod 间发现。
-- `env-vault-bootstrap.env-vault.svc.cluster.local:8090`：只指向 `env-vault-0`，用于启动阶段的登录、健康检查和主密钥分片提交；Ingress 只转发明确列出的启动接口，不对外暴露其他路径。
+- `env-vault.env-vault.svc.cluster.local:80`：正常业务流量和主密钥自动恢复，只选择 readiness probe 已通过的副本。
+- `env-vault-headless.env-vault.svc.cluster.local:8090`：StatefulSet 的 Headless Service，只用于提供稳定的 Pod 网络身份。
+- `env-vault-bootstrap.env-vault.svc.cluster.local:8090`：使用稳定 ClusterIP，只指向 `env-vault-0`，作为 Web Nginx 处理 502、503、504 的回退上游，用于首次启动阶段的登录、健康检查和主密钥分片提交，不由 Ingress 直接暴露。
 
-主密钥未激活时，业务接口仍由 Ready 中间件拦截。当前 StatefulSet 的 readiness probe 调用内部 `/internal/v1/masterKey/ready`，只有主密钥激活后副本才会加入正常业务 Service；Ingress 将 `/api/v1/pub/**` 和 `/api/v1/masterKey/**` 转发到只选择 Pod 0 的 bootstrap Service，其他 API 仍使用正常业务 Service。详细部署约束见 [design/deploy.md](design/deploy.md)。
+主密钥未激活时，业务接口仍由 Ready 中间件拦截。当前 StatefulSet 的 readiness probe 每秒调用内部 `/internal/v1/masterKey/ready`，只有主密钥激活后副本才会加入正常业务 Service。所有外部 API 都先进入 Web Nginx，Web Nginx 优先访问正常业务 Service，并在没有 Ready Endpoint 导致 502、503、504 时回退到只选择 Pod 0 的 bootstrap Service。首次启动时登录、健康检查和主密钥接口通过该回退到达 Pod 0；正常运行后这些接口由任意 Ready Pod 响应，删除 Pod 0 不会中断前端状态检查。详细部署约束见 [design/deploy.md](design/deploy.md)。
+
+集群中的新 Pod 通过 `security.master_key_peer_recovery` 启动后台恢复任务，统一调用正常 `env-vault` Service 的 `/internal/v1/masterKey/transfer`。首次启动没有 Ready Endpoint 时会退避重试；Pod 0 通过三份分片激活后，其他 Pod 自动获取 RSA 加密的主密钥并进入 Ready。滚动更新时，新 Pod 从任意仍处于 Ready 的副本恢复，不固定依赖 Pod 0。所有副本同时丢失内存状态时仍需重新输入三份分片。
 
 健康检查：`GET /api/v1/pub/health`
 
@@ -360,8 +362,11 @@ Remove-Item Env:ENV_VAULT_MASTER_KEY
 |------|------|
 | `0` | 成功 |
 | `-1` | 通用失败 |
+| `-2` | 系统主密钥未就绪，固定使用 HTTP 200，由 Ready 中间件返回 |
 | `1 ~ 1000` | 系统预留失败状态码，600 以内与 HTTP 状态码保持一致 |
 | `10000+` | 业务失败状态码（分段规则后续补充） |
+
+`-2` 只表示请求已经到达 Go Pod，但当前实例尚未加载主密钥，响应固定为 `{ "code": -2, "msg": "系统启动中", "data": null }`。它不等同于 Ingress 或 Service 返回的 HTTP 502、503、504；客户端只有识别到统一响应体中的 `code=-2` 时才能进入主密钥等待页面。完整接口、流量链路和异常处理见 [主密钥加载设计](design/master-key-loading.md)。
 
 **错误响应硬性要求**：400/401/403/404/500 等场景，body 内 `code`、`msg` 必须与 HTTP 状态码、标准状态文本对应，例如 HTTP 401 时：
 

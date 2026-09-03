@@ -39,12 +39,9 @@
 
 - [ ] 审计日志查询自身是否记录 `audit.read`。确定全局日志中心上线后的查询行为是否需要留下“谁查看了哪些审计记录”的二次审计事件，并避免因记录查询日志造成递归写入。
 
-- [ ] shamri 秘钥分片管理
-- [ ] k8s集群内部自谦证书，使用k8s csr
-  - 创建RBAC权限：给Pod一个ServiceAccount，授权它可以创建和批准CertificateSigningRequest资源
-  - Pod启动时自动生成私钥和CSR：Pod启动脚本里调用openssl生成私钥和CSR（证书签名请求），通过K8s API提交
-  - K8s自动签发：Kubernetes内置的控制器会自动签发一个有效期很短（比如24小时）的证书
+## 主密钥后续能力
 
+- [ ] 按需将 Web Nginx的 API代理能力拆分为独立 `env-vault-gateway`。Gateway 使用独立镜像、Deployment 和 Service，统一负责 `/api/**` 到普通 `env-vault` Service 的代理及 502、503、504时到 `env-vault-bootstrap` 的启动回退；`env-vault-web` 只保留 Vue静态资源，Ingress按 API和页面路径分流。拆分时必须保持同域名访问、`code=-2` 语义、三副本高可用、健康探针和 PodDisruptionBudget。
 
 
 

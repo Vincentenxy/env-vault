@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -49,8 +48,12 @@ func main() {
 		)
 	}
 
+	// 应用生命周期用于统一取消 HTTP 服务和后台恢复任务
+	appCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	// 初始化路由
-	r, err := router.New(cfg, db, redisClient)
+	r, err := router.New(appCtx, cfg, db, redisClient)
 	if err != nil {
 		logger.L().Fatal("init router failed", zap.Error(err))
 	}
@@ -73,9 +76,7 @@ func main() {
 	}()
 
 	// 优雅退出
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	<-appCtx.Done()
 	logger.L().Info("shutting down server...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

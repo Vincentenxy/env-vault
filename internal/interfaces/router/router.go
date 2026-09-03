@@ -2,7 +2,10 @@ package router
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -44,7 +47,7 @@ import (
 // 路由规范：/api/[版本]/[pub]/...
 //   - /api/v1/pub/... 无认证接口，可随意调用
 //   - /api/v1/...     需认证接口，挂载 JWT 认证中间件
-func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) (*gin.Engine, error) {
+func New(ctx context.Context, cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) (*gin.Engine, error) {
 	gin.SetMode(cfg.Server.Mode)
 
 	r := gin.New()
@@ -139,6 +142,10 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 	// 主密钥未激活时仍允许 HTTP 服务完成启动
 	masterKeyManager := masterkey.NewManager()
 	if err := masterKeyManager.LoadConfigFallback(cfg.Security.AllowConfigKeyFallback, cfg.Security.EncryptionKey); err != nil {
+		return nil, err
+	}
+	peerRecovery, err := newMasterKeyPeerRecovery(masterKeyManager, cfg.Security)
+	if err != nil {
 		return nil, err
 	}
 	readyMiddleware, err := masterkey.NewReadyMiddleware(masterKeyManager, readyAllowedRoutes(cfg.Security.ReadyAllowlist))
@@ -318,8 +325,42 @@ func New(cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) 
 	internal := r.Group("/internal/v1")
 	masterkey.RegisterInternalRoutes(internal, masterKeyManager, cfg.Security.MasterKeyPeerToken, auditSvc)
 
+	if cfg.Security.MasterKeyPeerRecovery.Enabled {
+		go runMasterKeyPeerRecovery(ctx, peerRecovery)
+	}
 	go warmUpUsers(userSvc)
 	return r, nil
+}
+
+func newMasterKeyPeerRecovery(manager *masterkey.Manager, security config.SecurityConfig) (*masterkey.PeerRecovery, error) {
+	instanceID := ""
+	if security.MasterKeyPeerRecovery.Enabled {
+		instanceID = strings.TrimSpace(os.Getenv("POD_NAME"))
+		if instanceID == "" {
+			hostname, err := os.Hostname()
+			if err != nil {
+				return nil, fmt.Errorf("resolve master key peer instance ID: %w", err)
+			}
+			instanceID = hostname
+		}
+	}
+
+	peer := security.MasterKeyPeerRecovery
+	return masterkey.NewPeerRecovery(manager, masterkey.PeerRecoveryConfig{
+		Enabled:              peer.Enabled,
+		BaseURL:              peer.BaseURL,
+		Token:                security.MasterKeyPeerToken,
+		InstanceID:           instanceID,
+		RequestTimeout:       peer.RequestTimeout,
+		InitialRetryInterval: peer.InitialRetryInterval,
+		MaxRetryInterval:     peer.MaxRetryInterval,
+	})
+}
+
+func runMasterKeyPeerRecovery(ctx context.Context, recovery *masterkey.PeerRecovery) {
+	if err := recovery.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		logger.Error(ctx, "master key peer recovery stopped", zap.Error(err))
+	}
 }
 
 func warmUpUsers(svc userapp.IService) {

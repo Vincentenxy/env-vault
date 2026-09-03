@@ -29,7 +29,15 @@ security:
   # 集群内部主密钥传输令牌；生产环境应通过 SECURITY_MASTER_KEY_PEER_TOKEN 环境变量注入
   # 未配置时 /internal/v1/masterKey/transfer 保持禁用
   master_key_peer_token: ""
-  # secret value 加密私钥（AES-256-GCM，32 字节 base64 编码，测试环境使用）
+  # 本地开发默认关闭，Kubernetes 中通过普通 Ready Service 自动获取主密钥
+  master_key_peer_recovery:
+    enabled: false
+    base_url: ""
+    request_timeout: 3s
+    initial_retry_interval: 1s
+    max_retry_interval: 15s
+  # Secret value 加密主密钥（AES-256-GCM，32 字节 Base64 编码）
+  # 当前值仅用于本地开发和 POC 测试，不作为生产环境主密钥
   encryption_key: "Pk6V+TnUEZO6R8WOklCSrI/iM4QKHc55VQQrrptmVfk="
   # 主密钥未就绪时按请求方法和精确路径放行
   ready_allowlist:
@@ -76,5 +84,3 @@ redis:
   dial_timeout: "5s"
   read_timeout: "3s"
   write_timeout: "3s"
-
-

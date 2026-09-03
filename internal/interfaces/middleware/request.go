@@ -35,6 +35,9 @@ func GinLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
 		c.Next()
+		if !shouldLogAccess(gin.Mode(), c.Request.URL.Path) {
+			return
+		}
 		logger.Info(c, "http access",
 			zap.String("method", c.Request.Method),
 			zap.String("path", c.Request.URL.Path),
@@ -43,6 +46,15 @@ func GinLogger() gin.HandlerFunc {
 			zap.String("clientIp", c.ClientIP()),
 		)
 	}
+}
+
+// shouldLogAccess 在非 debug 模式跳过高频探针访问日志
+func shouldLogAccess(mode, path string) bool {
+	if mode == gin.DebugMode {
+		return true
+	}
+	return path != "/api/v1/pub/health" &&
+		path != "/internal/v1/masterKey/ready"
 }
 
 // generateID 生成 16 字节随机十六进制 trace-id

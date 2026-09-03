@@ -1,11 +1,14 @@
 # Env Vault three-replica StatefulSet.
 # Replace every REPLACE_ME value and the example PostgreSQL/Redis service names before applying.
-# Keep this file internal to the cluster; do not expose the bootstrap Service publicly.
+# Public ingress sends API traffic through Web Nginx, which falls back to Pod 0 only when no Ready backend exists.
 
 apiVersion: v1
 kind: Namespace
 metadata:
   name: env-vault
+  # Gateway API 启用后恢复该命名空间标签
+  # labels:
+  #   env-vault.io/gateway-access: "true"
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -27,7 +30,7 @@ data:
 
     app:
       name: env-vault
-      version: 0.1.0
+      version: 0.0.1
 
     auth:
       local:
@@ -51,6 +54,12 @@ data:
       allow_config_key_fallback: false
       encryption_key: ""
       master_key_peer_token: ""
+      master_key_peer_recovery:
+        enabled: true
+        base_url: http://env-vault.env-vault.svc.cluster.local
+        request_timeout: 3s
+        initial_retry_interval: 1s
+        max_retry_interval: 15s
       ready_allowlist:
         - method: GET
           path: /api/v1/pub/health
@@ -64,9 +73,9 @@ data:
           path: /internal/v1/masterKey/ready
 
     database:
-      host: "192.168.1.110"
-      #  host: "127.0.0.1"
-      #      host: pg-poc-rw.pg-poc.svc.cluster.local
+    #  host: "192.168.1.110"
+    #    host: "127.0.0.1"
+      host: postgres-rw.postgres.svc.cluster.local
       port: 5432
       user: "env_vault"
       password: "123456"
@@ -82,9 +91,9 @@ data:
       mode: single
       # Change this address for the actual Redis endpoint. Redis Cluster should list all nodes.
       addrs:
-    #    - redis.database.svc.cluster.local:6379
-        - "192.168.1.110:6379"
-      password: ""
+        - redis-replication.redis-poc.svc.cluster.local:6379
+    #    - "192.168.1.110:6379"
+      password: "Gtja_013e334af7"
       db: 1
       key_prefix: env_vault
       warm_up_on_start: true
@@ -107,6 +116,7 @@ stringData:
   # Kubernetes Secret 不能被其他命名空间的 Pod 直接引用，因此在此注入副本
   database-password: "123456"
   redis-password: ""
+  # 当前值仅用于本地开发和 POC 测试，生产环境启用分片加载后删除该字段和对应环境变量
   encryption-key: "Pk6V+TnUEZO6R8WOklCSrI/iM4QKHc55VQQrrptmVfk="
   master-key-peer-token: "ES1Gu2txOxcvbPqwcPs+cMd8CCQOE5a7JVczPy0kx7u2mwjqtisWT0tR6WFv4TKb"
 ---
@@ -120,56 +130,56 @@ stringData:
   # Replace with the shared local JWT key pair before applying.
   jwt-private.pem: |
     -----BEGIN PRIVATE KEY-----
-    MIIG/gIBADANBgkqhkiG9w0BAQEFAASCBugwggbkAgEAAoIBgQDGB+C3BXGK4seY
-    3jgvFzUTi1LgK6APzuhF0y66zvHIjl8DOrNBYeJsUDpbp2abA7LaYeZW8kchKAxr
-    Ctx1HdfWnfzGeJeIrFhj+uewVibLXws/8/RX5/aGpRckvgydyrZLy1j+Ex1NIVOE
-    PtOIOFQZChutOVlk97a7q7MyYPCVigVuXL6fvgQ9jSgK6vKbqstc7SBXBU2+yUuq
-    XO2JQLw2ZP1zURgtWIgXlXXBGxnxeSMdU+rXw7lD/UhJaF7tdRCqCTFwpXd6oyVh
-    PjkohZQSgavOmJaevkvIv4W74PeqJEh7lNblZtmVY6qMA9CUyjcbZ9abn6FtM538
-    rIUSDs+Bds15pVkGRoNRvjijSZYHRWGDZY4cD/kMEtPPaXmD+1660XwPHf0lJlCa
-    A4ygiOoLW+yrX8gycPqN7J6+Ie7h0+JB3n0W2tCjHieObvW9i9h8COzQcqcPXLHy
-    8NJzGpa7RPMM8HNeBXuJhJNQFFh3WwYo0jiwQOho/PTTVt8hldsCAwEAAQKCAYAS
-    zoy41PuDhSYPjosnbbzMrl6gi4QX/D5y4yt88kpkEaFUXS7I9tLaFoR0T+Getys1
-    Mjb96uR2cac8QzvMo5jr+PUYpDs/7541YI7AYG4uwkf/OtvpvU3cW7Fm++WW1rmZ
-    WSaKeqY9vPyBgrX0KeVSu3MFcHzc6emgyR2rmyk+Cm2ZnZU89n7QmadD4ixIPGAz
-    4xE/MnG/vL5C37BvaIZ3Y//uA7WYGOBT3Q3h2QENvcNn9aBH/X6KxnMnBZJ+Wq+f
-    ZT847NEDK/V94+EaxuS9GQfTv8zbTe1Ms4cICbr0EpUiR8h8b//ff/dHKtJgAwEB
-    T1zVlcEKViUPWKEefsKsB0MEUyuOvm9mVOwHeDYkqR41oh43iYVYKPzl1uvc/mhF
-    7vCbJDkMM5PrXCc0cxZp/70IbzW430rdT2FHEy8F26Cah8DiQsAgLc7LtMk4zSlx
-    cN3OYH3fXsmVXWlcHRa7+Z8LOM8U3gWh2xCGVFVrsyJZ0MSqs7D8pen8RtnfNgEC
-    gcEA/XZFtOONkOMtceO+BLvP2vnD+xfbsJvNJ6rCVbgEBRX4BOrYs1GVJ7BS6aym
-    kfRcipkFOiE3qHz0oAZIBJukFdBHScAq7XQrppIv2S58cD/GoGUu7r3udmfV0UdF
-    OWLLI8b4s3xRms4ieVKlmfeFVniiA24JSKVsZHOJ8pBqoROEbCS9GNOGR7+jKPKv
-    kz3hnOpGDi51629k0wd9zzeJ7cVpSR8iFOsuLaF9MR2m1LMmZB7R41LBVO4DiqWC
-    Eq7LAoHBAMgDgyvMCNgbFnXgxjfcNo/Oxw3Cg9nywfnj6RfQpMNuBJUQNp5R9sso
-    NHYpXOWoZzibkAaR4jJR/1jLux0/yjyEV6TIOoWnpHhSG11YZrdMj8Ab2oCUozG0
-    p9SEMNcBp8//tu7Yxym+LivgLhNOeosstZb9Al1qAM+M4dst5J8UVlevaLYldvyw
-    KdiBVg8PWk1Bj8GtpFAoKWqlmVlBsu26+MjCamOLuKJGXHrlwhYhC1QJrL7ENjNc
-    +7kxcI1DMQKBwEsRRl/mrTzmK8V5YAPi5BLEuoiZblWGL2K6LkhY8cfX09cQ/xFM
-    7lIM5OGUYtkDeI0L+QJYaDWcnI7wjU/gEN7tCtAK/CvLpkn1Lfqyy+Qq31cN4LKQ
-    yhmDc05CP3xZiDSWb34pKbohpxArrCRHrNQJcmJ1qoY7iDjQB2Ex6ILAVw34a5D4
-    xOJnHZm5FssTHsjskccNd5s9KK1foKFIn68uMpqXf+6WIN0e4Qc08v43+PzaK+uZ
-    zOyseZwMnNOPtQKBwQCt9mgbKr4yf/TcF+EvaqhGEfoNXLZjVQIjv3fYD8+Obt0r
-    bUukDfQSJOjkMPusf/kvQhZVsILFc44dBC29teLHGfBE0SYdY37oa7mDScUk/kE1
-    PMSh+yWpsNAcRdFY4Aa+IVJRkVhAVTpBTR2mCycIb52NMofhCbakzosOoG7tcbnb
-    UCRJ8HH6O5pZxbw9IwROl4xaTxXP5e6H5HppKHxgyrNhob74z+iJs5ryBW3240zA
-    Dh4iWfQuXlxOadLT+rECgcEAy0Z5uXoNlSC0xnSJaPVUDROKHf2deex7VswyF2RF
-    Tzwd8smmAlWgTVgJqw+xTm1DG+TaXPqm7WSCtboQqwk7w4RiNF/xkpVGRZQk1+IP
-    ZucRmty01oJ/2K+zCpLuipUKqolB8drbnXr1R73bQU+CS1ekNKuDesgPnsnbFJ8k
-    tVnY+iUeiskj08jl3FlLlyoO1SLICEOMro54CA3iayPauzPL9Lp+c6UsLF/t+rAk
-    vr6LcHL6flMUFwuqYg/+qurf
+    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
+    MvjR/yhR7TSvSqhndih+dGw=
     -----END PRIVATE KEY-----
   jwt-public.pem: |
     -----BEGIN PUBLIC KEY-----
-    MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAxgfgtwVxiuLHmN44Lxc1
-    E4tS4CugD87oRdMuus7xyI5fAzqzQWHibFA6W6dmmwOy2mHmVvJHISgMawrcdR3X
-    1p38xniXiKxYY/rnsFYmy18LP/P0V+f2hqUXJL4Mncq2S8tY/hMdTSFThD7TiDhU
-    GQobrTlZZPe2u6uzMmDwlYoFbly+n74EPY0oCurym6rLXO0gVwVNvslLqlztiUC8
-    NmT9c1EYLViIF5V1wRsZ8XkjHVPq18O5Q/1ISWhe7XUQqgkxcKV3eqMlYT45KIWU
-    EoGrzpiWnr5LyL+Fu+D3qiRIe5TW5WbZlWOqjAPQlMo3G2fWm5+hbTOd/KyFEg7P
-    gXbNeaVZBkaDUb44o0mWB0Vhg2WOHA/5DBLTz2l5g/teutF8Dx39JSZQmgOMoIjq
-    C1vsq1/IMnD6jeyeviHu4dPiQd59FtrQox4njm71vYvYfAjs0HKnD1yx8vDScxqW
-    u0TzDPBzXgV7iYSTUBRYd1sGKNI4sEDoaPz001bfIZXbAgMBAAE=
+    MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEA0NaDSMxvk8xlcxZKA98d
+    w1oybOvR/cjIyA1CiZYD5zlp6JqbzVXz3Djq/OqDs6AC1VruKGb9O66Tx8BJbuWg
+    hSHnJXmAdcOAP9gKXXO9OfzeiQNfwYOzyUbinH7hCHlJJ+6ZLwdfeZTNq5rkpsrf
+    R0PwxCjaa25C3Lyb7EOoI0ACaNtA0f4JEXbiq4QeE96qx16vPf+3DtF0peLGdvDb
+    iiHLy0YYiQp5CFAS7n8Grfse2xf9zFcOORQZtQ+oP8U1TWhxNmLmBAA0bpxgCUZ+
+    1bteQ6TjzCmr1rKVpzYlyg1/dqXXEvJ0VaCyowNM8m8BS5W7TuQNy7SuU5AURUJD
+    nXsCvYZrRjkY3gdTKgqmN7RnwWf0L84IKX5CZx7P6f3DkOn4W1glcITswV1ZN0oL
+    Ym9485px2ZahT6Dj7KuDcLjV+rn8/aNwlfRbfPKr6/lic7adqDDF/VKvVKEbCpMN
+    KXrWpwbJr3K+lai5rbUROpY53fXze7WZY9xQsc34xI4lAgMBAAE=
     -----END PUBLIC KEY-----
 ---
 apiVersion: v1
@@ -209,8 +219,9 @@ spec:
       port: 80
       targetPort: http
 ---
-# The bootstrap Service always targets ordinal 0. Use it only for the initial
-# three-share unlock flow, then route normal business traffic to env-vault.
+# The bootstrap Service uses a stable ClusterIP and always targets ordinal 0
+# Web Nginx uses it only when the normal Ready Service returns 502/503/504
+# Delete an existing Headless bootstrap Service once before applying this change
 apiVersion: v1
 kind: Service
 metadata:
@@ -220,7 +231,7 @@ metadata:
     app.kubernetes.io/name: env-vault
     app.kubernetes.io/component: bootstrap
 spec:
-  clusterIP: None
+  type: ClusterIP
   publishNotReadyAddresses: true
   selector:
     statefulset.kubernetes.io/pod-name: env-vault-0
@@ -285,7 +296,7 @@ spec:
               app.kubernetes.io/component: server
       containers:
         - name: env-vault
-          image: env-vault:0.1.0
+          image: harbor.gtjaqh.net/lucy-dev/env-vault:0.0.1-alpha.4
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -368,7 +379,8 @@ spec:
                   wget -qO- --header="X-Env-Vault-Internal-Token: $SECURITY_MASTER_KEY_PEER_TOKEN"
                   http://127.0.0.1:8090/internal/v1/masterKey/ready |
                   grep -q '"status":"ready"'
-            periodSeconds: 5
+            # 主密钥激活后尽快将 Pod 加入普通业务 Service
+            periodSeconds: 1
             timeoutSeconds: 3
             failureThreshold: 3
       volumes:
@@ -380,3 +392,247 @@ spec:
           secret:
             secretName: env-vault-jwt
             defaultMode: 0640
+# ---
+# Gateway API 配置暂时停用，Gateway API 调通后删除注释恢复
+# apiVersion: gateway.networking.k8s.io/v1
+# kind: Gateway
+# metadata:
+#   name: env-vault-higress-gateway
+#   namespace: higress-system
+# spec:
+#   gatewayClassName: higress
+#   listeners:
+#     - name: http-env-vault
+#       hostname: efficient-poc.qiuer.net
+#       protocol: HTTP
+#       port: 80
+#       allowedRoutes:
+#         kinds:
+#           - kind: HTTPRoute
+#         namespaces:
+#           from: Selector
+#           selector:
+#             matchLabels:
+#               env-vault.io/gateway-access: "true"
+# ---
+# apiVersion: gateway.networking.k8s.io/v1
+# kind: HTTPRoute
+# metadata:
+#   name: env-vault
+#   namespace: env-vault
+# spec:
+#   parentRefs:
+#     - name: env-vault-higress-gateway
+#       namespace: higress-system
+#       sectionName: http-env-vault
+#   hostnames:
+#     - efficient-poc.qiuer.net
+#   rules:
+#     - matches:
+#         - path:
+#             type: PathPrefix
+#             value: /envvault/api
+#       filters:
+#         - type: URLRewrite
+#           urlRewrite:
+#             path:
+#               type: ReplacePrefixMatch
+#               replacePrefixMatch: /api
+#       backendRefs:
+#         - group: ""
+#           kind: Service
+#           name: env-vault
+#           port: 80
+#           weight: 1
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: env-vault-bootstrap
+  namespace: env-vault
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: 'true'
+    nginx.ingress.kubernetes.io/rewrite-target: /api/v1/$1/$3
+    nginx.ingress.kubernetes.io/ssl-redirect: 'false'
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: efficient-poc.qiuer.net
+      http:
+        paths:
+          # 启动接口也先进入 Web Nginx，正常阶段由任意 Ready Pod 响应
+          - path: /envvault/api/v1/(pub|masterKey)(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: env-vault-web
+                port:
+                  number: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: env-vault
+  namespace: env-vault
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: 'true'
+    nginx.ingress.kubernetes.io/rewrite-target: /api/$2
+    nginx.ingress.kubernetes.io/ssl-redirect: 'false'
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: efficient-poc.qiuer.net
+      http:
+        paths:
+          # API 先进入 Web Nginx，由它在普通 Service 暂无 Ready Endpoint 时回退到 Pod 0
+          - path: /envvault/api(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: env-vault-web
+                port:
+                  number: 80
+
+
+
+# EnvVault Web deployment.
+# Build and push harbor.gtjaqh.net/lucy-dev/env-vault-web:0.1.0 before applying.
+# The env-vault namespace and backend Service are created by the backend manifest.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: env-vault-web
+  namespace: env-vault
+  labels:
+    app.kubernetes.io/name: env-vault-web
+    app.kubernetes.io/component: web
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: env-vault-web
+      app.kubernetes.io/component: web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: env-vault-web
+        app.kubernetes.io/component: web
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 10
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: env-vault-web
+              app.kubernetes.io/component: web
+      containers:
+        - name: env-vault-web
+          image: harbor.gtjaqh.net/lucy-dev/env-vault-web:0.0.1-alpha.2
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 15
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          env:
+            # Normal traffic uses the ready backend replicas; Nginx falls back to
+            # env-vault-bootstrap while the master key is still locked.
+            - name: API_UPSTREAM
+              value: http://env-vault
+            - name: API_BOOTSTRAP_UPSTREAM
+              value: http://env-vault-bootstrap:8090
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: env-vault-web
+  namespace: env-vault
+  labels:
+    app.kubernetes.io/name: env-vault-web
+    app.kubernetes.io/component: web
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: env-vault-web
+    app.kubernetes.io/component: web
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: env-vault-web
+  namespace: env-vault
+  labels:
+    app.kubernetes.io/name: env-vault-web
+    app.kubernetes.io/component: web
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: env-vault-web
+      app.kubernetes.io/component: web
+---
+# All /envvault requests enter the Web container. The prefix is removed before
+# forwarding; /api requests are then proxied by Web Nginx to the backend Service.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: env-vault-web
+  namespace: env-vault
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: 'true'
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/ssl-redirect: 'false'
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: efficient-poc.qiuer.net
+      http:
+        paths:
+          - path: /envvault(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: env-vault-web
+                port:
+                  number: 80
