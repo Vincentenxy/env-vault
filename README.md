@@ -56,6 +56,34 @@ docker build -t env-vault:latest .
 
 镜像不包含 `configs/config.yaml`，也不包含数据库密码、JWT 私钥或 Secret 主密钥。运行容器时必须挂载运行配置，或通过环境变量覆盖配置；这样可以避免凭证进入镜像层。
 
+### Redis运行模式
+
+应用支持以下 Redis客户端模式：
+
+| `mode` | `addrs` | 客户端行为 |
+| --- | --- | --- |
+| `single` | 一个 Redis地址 | 直接连接单节点或稳定主节点 Service，支持 `db` |
+| `cluster` | 多个 Redis Cluster节点地址 | 自动处理 Cluster分片与节点变化，不使用 `db` |
+| `sentinel` | 多个 Sentinel地址 | 根据 `master_name` 自动发现主节点并处理故障切换，支持 `db` |
+
+Sentinel模式示例：
+
+```yaml
+redis:
+  enabled: true
+  mode: sentinel
+  addrs:
+    - redis-sentinel-sentinel.redis-poc.svc.cluster.local:26379
+  master_name: mymaster
+  username: ""
+  password: "<Redis数据节点密码>"
+  sentinel_username: ""
+  sentinel_password: "<Sentinel密码>"
+  db: 1
+```
+
+`username/password` 用于 Redis数据节点认证，`sentinel_username/sentinel_password` 只用于 Sentinel认证。生产凭证应通过环境变量或 Secret注入，不写入镜像。
+
 ### Kubernetes 三副本部署
 
 三副本 StatefulSet 清单位于 [deploy/k8s/env-vault-statefulset.yaml](deploy/k8s/env-vault-statefulset.yaml)。安装前必须完成以下修改：

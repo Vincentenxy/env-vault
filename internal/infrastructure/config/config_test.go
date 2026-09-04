@@ -91,3 +91,36 @@ func TestLoadMasterKeyPeerRecoveryFromEnvironment(t *testing.T) {
 		t.Fatalf("environment override not applied: token=%q config=%+v", cfg.Security.MasterKeyPeerToken, cfg.Security.MasterKeyPeerRecovery)
 	}
 }
+
+func TestLoadRedisSentinelConfig(t *testing.T) {
+	dir := t.TempDir()
+	content := []byte(`redis:
+  enabled: true
+  mode: sentinel
+  addrs:
+    - sentinel-0:26379
+    - sentinel-1:26379
+  username: redis-user
+  password: redis-password
+  master_name: mymaster
+  sentinel_username: sentinel-user
+  sentinel_password: sentinel-password
+  db: 2
+`)
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	redisCfg := cfg.Redis
+	if redisCfg.Mode != RedisModeSentinel || redisCfg.MasterName != "mymaster" || len(redisCfg.Addrs) != 2 {
+		t.Fatalf("unexpected Redis Sentinel config: %+v", redisCfg)
+	}
+	if redisCfg.Username != "redis-user" || redisCfg.Password != "redis-password" ||
+		redisCfg.SentinelUsername != "sentinel-user" || redisCfg.SentinelPassword != "sentinel-password" || redisCfg.Db != 2 {
+		t.Fatalf("unexpected Redis Sentinel credentials: %+v", redisCfg)
+	}
+}

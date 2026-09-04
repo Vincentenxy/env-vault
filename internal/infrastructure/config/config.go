@@ -100,25 +100,30 @@ type DatabaseConfig struct {
 
 // Redis 运行模式
 const (
-	RedisModeSingle  = "single"
-	RedisModeCluster = "cluster"
+	RedisModeSingle   = "single"
+	RedisModeCluster  = "cluster"
+	RedisModeSentinel = "sentinel"
 )
 
-// RedisConfig Redis 配置，mode 决定使用单机还是集群客户端
+// RedisConfig Redis 配置，mode 决定使用单机、集群或哨兵客户端
 type RedisConfig struct {
-	Enabled       bool          `mapstructure:"enabled"`
-	Mode          string        `mapstructure:"mode"`  // single / cluster
-	Addrs         []string      `mapstructure:"addrs"` // 单机填一个地址，集群填多个节点地址
-	Password      string        `mapstructure:"password"`
-	Db            int           `mapstructure:"db"`         // 仅单机模式生效（集群不支持分库）
-	KeyPrefix     string        `mapstructure:"key_prefix"` // 业务 key 统一前缀，供缓存封装使用
-	WarmUpOnStart bool          `mapstructure:"warm_up_on_start"`
-	PoolSize      int           `mapstructure:"pool_size"`
-	MinIdleConns  int           `mapstructure:"min_idle_conns"`
-	MaxRetries    int           `mapstructure:"max_retries"`
-	DialTimeout   time.Duration `mapstructure:"dial_timeout"`
-	ReadTimeout   time.Duration `mapstructure:"read_timeout"`
-	WriteTimeout  time.Duration `mapstructure:"write_timeout"`
+	Enabled          bool          `mapstructure:"enabled"`
+	Mode             string        `mapstructure:"mode"`  // single / cluster / sentinel
+	Addrs            []string      `mapstructure:"addrs"` // 单机填一个地址，集群或哨兵填多个节点地址
+	Username         string        `mapstructure:"username"`
+	Password         string        `mapstructure:"password"`
+	MasterName       string        `mapstructure:"master_name"`       // 哨兵模式监听的主节点名称
+	SentinelUsername string        `mapstructure:"sentinel_username"` // Sentinel ACL 用户名
+	SentinelPassword string        `mapstructure:"sentinel_password"` // Sentinel 认证密码
+	Db               int           `mapstructure:"db"`                // 单机和哨兵模式生效
+	KeyPrefix        string        `mapstructure:"key_prefix"`        // 业务 key 统一前缀，供缓存封装使用
+	WarmUpOnStart    bool          `mapstructure:"warm_up_on_start"`
+	PoolSize         int           `mapstructure:"pool_size"`
+	MinIdleConns     int           `mapstructure:"min_idle_conns"`
+	MaxRetries       int           `mapstructure:"max_retries"`
+	DialTimeout      time.Duration `mapstructure:"dial_timeout"`
+	ReadTimeout      time.Duration `mapstructure:"read_timeout"`
+	WriteTimeout     time.Duration `mapstructure:"write_timeout"`
 }
 
 // Load 加载配置文件，path 为配置文件所在目录（如 ./configs）

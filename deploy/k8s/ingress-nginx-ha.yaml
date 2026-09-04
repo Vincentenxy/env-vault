@@ -1,0 +1,101 @@
+# ingress-nginx 集群入口高可用覆盖清单
+# 该控制器属于集群共享基础设施，不随 Env Vault 应用卸载
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingress-nginx-controller
+  namespace: ingress-nginx
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: ingress-nginx
+  template:
+    metadata:
+      labels:
+        app: ingress-nginx
+    spec:
+      serviceAccountName: ingress-nginx-controller
+      terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: ingress-nginx
+      containers:
+        - name: controller
+          image: k8s.m.daocloud.io/ingress-nginx/controller:v1.13.2
+          imagePullPolicy: IfNotPresent
+          args:
+            - /nginx-ingress-controller
+            - --ingress-class=nginx
+            - --watch-ingress-without-class=false
+            - --publish-service=ingress-nginx/ingress-nginx-controller
+            - --enable-metrics=false
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+            - name: https
+              containerPort: 443
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 10254
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 10254
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: true
+            runAsUser: 101
+            capabilities:
+              add:
+                - NET_BIND_SERVICE
+              drop:
+                - ALL
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ingress-nginx-controller
+  namespace: ingress-nginx
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: ingress-nginx

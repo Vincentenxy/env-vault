@@ -88,7 +88,12 @@ data:
 
     redis:
       enabled: true
+      # 支持 single、cluster、sentinel，切换 Sentinel时 addrs填写 Sentinel Service地址
       mode: single
+      master_name: ""
+      sentinel_username: ""
+      sentinel_password: ""
+      username: ""
       # Change this address for the actual Redis endpoint. Redis Cluster should list all nodes.
       addrs:
         - redis-replication.redis-poc.svc.cluster.local:6379
