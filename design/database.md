@@ -24,25 +24,18 @@
 
 ## PostgreSQL 数据库、用户与授权初始化
 
-PostgreSQL 的数据库权限、Schema 权限和表权限相互独立。拥有数据库不代表自动拥有其他账号创建的表；表及序列的权限取决于对象所有者和显式授权。
+本项目统一采用以下角色分工：
 
-本项目支持下面两种初始化模式：
+- `postgres`：数据库所有者和 DDL 执行账号，负责创建数据库、表、索引等数据库对象。
+- `env_vault`：应用登录账号，可以连接 `env_vault` 数据库，并拥有 `public` Schema 中全部已有表和后续新增表的访问权限，但不负责执行 DDL。
 
-| 模式 | DDL 执行账号 | 应用账号能力 | 适用场景 |
-|------|--------------|--------------|----------|
-| 模式一：超管建表、应用账号只读写数据（推荐） | `postgres` 或独立迁移账号 | 只允许连接数据库、使用 Schema 和读写表数据 | 生产环境、人工或发布流水线统一执行 DDL |
-| 模式二：应用账号拥有数据库并自行建表 | `env_vault` | 可以创建 Schema、表、索引并读写数据 | 本地开发、CNPG 自动初始化或无需区分 DDL/DML 的环境 |
+PostgreSQL 的数据库、Schema、表和序列权限相互独立。只执行 `GRANT ... ON DATABASE` 不能访问数据库中的表；已有对象授权和后续对象默认授权也必须分别设置。
 
-当前 CNPG 部署清单通过 `bootstrap.initdb.database=env_vault` 和 `bootstrap.initdb.owner=env_vault` 自动初始化，属于模式二。手工安装生产数据库时，推荐使用模式一。
+### 1. 创建应用用户和数据库（只在首次初始化时执行）
 
-### 模式一：超管建表，应用账号只读写数据（推荐）
-
-#### 1. 创建应用登录用户和数据库
-
-先使用 `postgres` 等管理员账号连接 `postgres` 数据库执行。PostgreSQL 不支持 `CREATE DATABASE IF NOT EXISTS`，以下语句只在首次初始化时执行。
+使用 `postgres` 超级用户连接默认的 `postgres` 数据库执行。请先替换示例密码。PostgreSQL 不支持 `CREATE DATABASE IF NOT EXISTS`，并且 `CREATE DATABASE` 不能在事务块中执行；用户或数据库已经存在时跳过对应的 `CREATE` 语句。
 
 ```sql
--- 创建最小权限的 EnvVault 应用登录用户，部署前替换示例密码
 CREATE ROLE env_vault
     WITH LOGIN
     PASSWORD 'REPLACE_WITH_REAL_PASSWORD'
@@ -51,121 +44,79 @@ CREATE ROLE env_vault
     NOCREATEROLE
     NOREPLICATION;
 
--- 数据库由 DDL 管理账号持有，CREATE DATABASE 不能放在事务块中执行
 CREATE DATABASE env_vault
     WITH
     OWNER = postgres
     ENCODING = 'UTF8'
     TEMPLATE = template0;
 
--- 应用账号只需要连接数据库
+-- 新建或修复已有数据库时，确保应用账号不是数据库所有者。
+ALTER DATABASE env_vault OWNER TO postgres;
+
 REVOKE ALL ON DATABASE env_vault FROM PUBLIC;
+REVOKE CREATE, TEMPORARY ON DATABASE env_vault FROM env_vault;
 GRANT CONNECT ON DATABASE env_vault TO env_vault;
 ```
 
-如果用户或数据库已经存在，不要重复执行 `CREATE`，只需按实际情况修复登录密码。数据库已经由 `env_vault` 持有也不影响后续表授权；如需严格收回应用账号的 DDL 能力，可将数据库所有者调整为 DDL 管理账号。
+如果 `env_vault` 用户已经存在，只需使用下面的语句修复登录属性或更新密码：
 
 ```sql
 ALTER ROLE env_vault
-    WITH LOGIN
-    PASSWORD 'REPLACE_WITH_REAL_PASSWORD';
-
-ALTER DATABASE env_vault
-    OWNER TO postgres;
-
-REVOKE CREATE, TEMPORARY
-    ON DATABASE env_vault
-    FROM env_vault;
-
--- 切换到 env_vault 数据库，避免修改到 postgres 数据库的 public Schema
-\connect env_vault
-
-ALTER SCHEMA public OWNER TO postgres;
-REVOKE CREATE ON SCHEMA public FROM env_vault;
-GRANT USAGE ON SCHEMA public TO env_vault;
-```
-
-#### 2. 设置 public Schema 权限
-
-下面的语句必须连接到 `env_vault` 数据库后执行。使用 `psql` 时可通过 `\connect` 切换；使用数据库客户端时需要打开连接到 `env_vault` 的查询窗口。
-
-```sql
-\connect env_vault
-
--- 防止其他普通用户在 public schema 中创建对象
-REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-
--- 应用账号只允许访问 Schema，不允许创建表和索引
-REVOKE CREATE ON SCHEMA public FROM env_vault;
-GRANT USAGE ON SCHEMA public TO env_vault;
-```
-
-#### 3. 给已有表和序列授权
-
-数据库和表创建完成后，由超管在 `env_vault` 数据库中执行。该授权只覆盖执行时已经存在的对象。
-
-```sql
-GRANT SELECT, INSERT, UPDATE, DELETE
-    ON ALL TABLES IN SCHEMA public
-    TO env_vault;
-
--- 当前表使用 UUID，不依赖序列；保留该授权以兼容后续 identity / serial 字段
-GRANT USAGE, SELECT, UPDATE
-    ON ALL SEQUENCES IN SCHEMA public
-    TO env_vault;
-```
-
-以上表权限不包含 `TRUNCATE`、`REFERENCES` 和 `TRIGGER`，满足 EnvVault 当前运行时的查询和增删改需求。数据库结构变更应通过数据库变更流程执行，不依赖运行中的服务账号临时修改表结构。
-
-#### 4. 给后续新增表和序列设置默认授权
-
-PostgreSQL 的默认权限按“对象创建人”分别保存。下面示例假设后续 DDL 由 `postgres` 创建；如果实际由 `migration_user` 等其他管理角色建表，必须将 `FOR ROLE postgres` 替换为真实建表角色。
-
-```sql
--- 必须在 env_vault 数据库中，由 postgres 本人或超级用户执行
-ALTER DEFAULT PRIVILEGES
-    FOR ROLE postgres
-    IN SCHEMA public
-    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO env_vault;
-
-ALTER DEFAULT PRIVILEGES
-    FOR ROLE postgres
-    IN SCHEMA public
-    GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO env_vault;
-```
-
-`ALTER DEFAULT PRIVILEGES IN SCHEMA public ...` 不写 `FOR ROLE` 时，只对当前执行账号以后创建的对象生效。它不会给已有表补授权，也不会影响其他账号创建的表。因此模式一必须同时执行“已有对象授权”和“指定 DDL 账号的默认授权”。
-
-### 模式二：应用账号拥有数据库并自行建表
-
-该模式下数据库 owner 和 DDL 执行账号都是 `env_vault`。`env_vault` 创建的表和序列天然归自己所有，不需要再向自己执行 `GRANT ON ALL TABLES` 或 `ALTER DEFAULT PRIVILEGES`。
-
-```sql
--- 使用 postgres 等管理员账号连接 postgres 数据库执行
-CREATE ROLE env_vault
     WITH LOGIN
     PASSWORD 'REPLACE_WITH_REAL_PASSWORD'
     NOSUPERUSER
     NOCREATEDB
     NOCREATEROLE
     NOREPLICATION;
-
-CREATE DATABASE env_vault
-    WITH
-    OWNER = env_vault
-    ENCODING = 'UTF8'
-    TEMPLATE = template0;
-
--- 切换到 env_vault 数据库后执行
-\connect env_vault
-
-REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-GRANT USAGE, CREATE ON SCHEMA public TO env_vault;
 ```
 
-模式二的关键要求是：后续建表 SQL 必须使用 `env_vault` 登录执行。如果改用 `postgres` 建表，就已经切换为模式一，必须重新给已有对象授权，并为实际 DDL 账号配置默认权限。
+### 2. 授权已有表，并设置后续新表的默认权限
 
-### 权限检查
+必须继续使用 `postgres` 超级用户，但需要切换并连接到刚创建的 `env_vault` 数据库。`psql` 可以执行 `\connect env_vault`；GoLand、DBeaver 等客户端需要新建一个数据库为 `env_vault` 的查询窗口，然后执行代码块中除 `\connect` 以外的内容。
+
+```sql
+\connect env_vault
+
+-- 数据库连接权限。
+ALTER DATABASE env_vault OWNER TO postgres;
+REVOKE ALL ON DATABASE env_vault FROM PUBLIC;
+REVOKE CREATE, TEMPORARY ON DATABASE env_vault FROM env_vault;
+GRANT CONNECT ON DATABASE env_vault TO env_vault;
+
+-- 应用可以使用 public Schema，但不能自行创建表等数据库对象。
+ALTER SCHEMA public OWNER TO postgres;
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+REVOKE CREATE ON SCHEMA public FROM env_vault;
+GRANT USAGE ON SCHEMA public TO env_vault;
+
+-- 修复当前已经存在的所有表和序列权限。
+GRANT ALL PRIVILEGES
+    ON ALL TABLES IN SCHEMA public
+    TO env_vault;
+
+GRANT ALL PRIVILEGES
+    ON ALL SEQUENCES IN SCHEMA public
+    TO env_vault;
+
+-- 以后由 postgres 在 public Schema 中创建的表和序列会自动授权给应用账号。
+ALTER DEFAULT PRIVILEGES
+    FOR ROLE postgres
+    IN SCHEMA public
+    GRANT ALL PRIVILEGES ON TABLES TO env_vault;
+
+ALTER DEFAULT PRIVILEGES
+    FOR ROLE postgres
+    IN SCHEMA public
+    GRANT ALL PRIVILEGES ON SEQUENCES TO env_vault;
+```
+
+`ALTER DEFAULT PRIVILEGES` 按对象创建角色生效。上面的配置只覆盖以后由 `postgres` 创建的对象；后续必须继续使用 `postgres` 执行建表脚本。如果改用其他迁移账号创建表，需要为该账号再执行同样的 `ALTER DEFAULT PRIVILEGES FOR ROLE <迁移账号>`。
+
+`ALL PRIVILEGES ON TABLES` 是表对象权限，不包含修改表结构、删除表或转移所有权。应用正常运行不需要这些 DDL 权限，数据库结构仍由 `postgres` 管理。
+
+### 3. 权限检查
+
+在 `env_vault` 数据库中使用 `postgres` 执行：
 
 ```sql
 SELECT current_database(), current_user;
@@ -174,18 +125,32 @@ SELECT has_database_privilege('env_vault', 'env_vault', 'CONNECT') AS can_connec
        has_schema_privilege('env_vault', 'public', 'USAGE') AS can_use_schema,
        has_schema_privilege('env_vault', 'public', 'CREATE') AS can_create_object;
 
-SELECT table_schema, table_name, privilege_type
-FROM information_schema.role_table_grants
-WHERE grantee = 'env_vault'
-  AND table_schema = 'public'
-ORDER BY table_name, privilege_type;
-
--- 检查 public 下的表由哪个账号创建
+-- 正常应返回 0 行；返回的表表示 env_vault 仍缺少至少一种表权限。
 SELECT schemaname, tablename, tableowner
 FROM pg_tables
 WHERE schemaname = 'public'
+  AND NOT (
+      has_table_privilege('env_vault', format('%I.%I', schemaname, tablename), 'SELECT')
+      AND has_table_privilege('env_vault', format('%I.%I', schemaname, tablename), 'INSERT')
+      AND has_table_privilege('env_vault', format('%I.%I', schemaname, tablename), 'UPDATE')
+      AND has_table_privilege('env_vault', format('%I.%I', schemaname, tablename), 'DELETE')
+      AND has_table_privilege('env_vault', format('%I.%I', schemaname, tablename), 'TRUNCATE')
+      AND has_table_privilege('env_vault', format('%I.%I', schemaname, tablename), 'REFERENCES')
+      AND has_table_privilege('env_vault', format('%I.%I', schemaname, tablename), 'TRIGGER')
+  )
 ORDER BY tablename;
+
+-- 确认 postgres 的默认权限已包含 env_vault。
+SELECT defaclrole::regrole AS object_creator,
+       defaclnamespace::regnamespace AS schema_name,
+       defaclobjtype AS object_type,
+       defaclacl AS default_acl
+FROM pg_default_acl
+WHERE defaclrole = 'postgres'::regrole
+ORDER BY defaclobjtype;
 ```
+
+授权完成后，使用 `env_vault` 用户重新建立连接并执行实际表查询。数据库客户端可能复用旧连接，授权前已经打开的事务也应先提交或回滚。
 
 
 ---

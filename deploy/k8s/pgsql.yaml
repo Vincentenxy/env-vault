@@ -19,7 +19,7 @@ stringData:
   # 调整前：username: myadmin
   # username 必须与 bootstrap.initdb.owner 保持一致
   username: env_vault
-  password: MyStrongP@ssw0rd123
+  password: "123456"
 
 ---
 apiVersion: gateway.networking.k8s.io/v1
