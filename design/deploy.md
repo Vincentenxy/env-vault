@@ -70,6 +70,21 @@ During this operation, Ready backend replicas remain available through the norma
 
 In non-debug mode, the application access logger suppresses the high-frequency `/api/v1/pub/health` and `/internal/v1/masterKey/ready` probe requests. Debug mode retains these logs, while all business API access logs remain enabled in every mode.
 
+## Ingress controller high availability
+
+`deploy/k8s/ingress-nginx-ha.yaml` records the cluster-level ingress-nginx controller configuration used by the POC cluster. It keeps the existing controller image and arguments, runs three replicas across different nodes, and adds a PodDisruptionBudget with `minAvailable: 2`. This resource belongs to shared cluster infrastructure and must not be included in an Env Vault namespace uninstall operation.
+
+```bash
+kubectl apply --dry-run=server -f deploy/k8s/ingress-nginx-ha.yaml
+kubectl apply -f deploy/k8s/ingress-nginx-ha.yaml
+kubectl -n ingress-nginx rollout status deployment/ingress-nginx-controller
+kubectl -n ingress-nginx get pods -o wide
+```
+
+The ingress controller Service remains the external `NodePort` or future `LoadBalancer`. Env Vault backend, Web, and bootstrap Services remain internal ClusterIP Services.
+
+The current POC hostname resolves to a single Kubernetes node and reaches ingress-nginx through NodePort. Three controller replicas protect against controller Pod failure, but they do not protect against failure of that externally addressed node. Production must place a LoadBalancer or virtual IP in front of multiple nodes, or otherwise publish multiple healthy ingress entry addresses.
+
 
 ```shell
 # restart pod

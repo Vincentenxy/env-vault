@@ -70,10 +70,16 @@ database:
 
 redis:
   enabled: true
+  # 支持 single、cluster、sentinel，当前本地开发使用 single
   mode: "single"
   addrs:
     - "127.0.0.1:6379"
 #    - "192.168.1.110:6379"
+  # Sentinel 模式下 addrs填写 Sentinel地址，master_name填写监控名称
+  master_name: ""
+  sentinel_username: ""
+  sentinel_password: ""
+  username: ""
   password: "123456"
   db: 1
   key_prefix: "env_vault"

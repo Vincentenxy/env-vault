@@ -2,6 +2,8 @@
 
 - [ ] 部署一套高可用pgsql: [cnpg](https://cloudnative-pg.io/documentation/1.20/)
 
+- [ ] 生产入口将 ingress-nginx Service从单节点域名加 NodePort切换为 LoadBalancer、虚拟 IP或其他多节点入口。当前 Controller已有三个跨节点副本，但 `efficient-poc.qiuer.net` 只解析到一个控制节点，该节点不可达时外部流量仍会中断。
+
 - [ ] `/api/v1/user/allocate` 执行 `remove` 前，检查用户负责的租户、组织、项目和文件夹等资源；必须先将管理员职责移交给其他用户后才能移除。当前应用层已预留 `ResponsibilityChecker` 扩展点，待负责人移交规则和上下级关系确定后实现。
 
 - [ ] 增加用户锁定/解锁接口。更新 `user_info.is_blocked` 后必须同步刷新 Redis `user:blocked` 状态缓存；多实例部署时还需保证各实例及时观察到状态变化。
