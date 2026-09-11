@@ -1,0 +1,173 @@
+openapi: 3.0.3
+info:
+  title: Env Vault Tag API
+  version: 0.1.0
+  description: |
+    Tenant-scoped Tag CRUD only. No Secret associations or value search are implemented.
+    Apply tag_info DDL from database.md manually before use. No foreign keys.
+    All operations require authentication; resource-level authorization awaits the shared permission system.
+    Code is immutable. Create defaults allowValueSearch to true; update preserves it when omitted.
+    Explicit false is persisted. Delete is soft; active codes are unique per tenant.
+servers:
+  - url: /api/v1
+security:
+  - BearerAuth: []
+paths:
+  /tag/create:
+    post:
+      operationId: createTag
+      summary: Create a tag
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/Fields'
+                - type: object
+                  required: [tenantId, code, name]
+                  properties:
+                    tenantId: {type: string, format: uuid}
+                    code: {type: string, pattern: '^[a-z][a-z0-9_-]{0,63}$'}
+                    allowValueSearch: {type: boolean, default: true}
+      responses:
+        '200': {$ref: '#/components/responses/TagResult'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /tag/update:
+    post:
+      operationId: updateTag
+      summary: Update a tag; code and tenant cannot change
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/Target'
+                - $ref: '#/components/schemas/Fields'
+                - type: object
+                  required: [name]
+      responses:
+        '200': {$ref: '#/components/responses/TagResult'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /tag/delete:
+    post:
+      operationId: deleteTag
+      summary: Soft-delete a tag
+      requestBody: {$ref: '#/components/requestBodies/Target'}
+      responses:
+        '200':
+          description: Success has code 0 and data null; business errors have code -1 and data null
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Envelope'}
+              example: {code: 0, msg: success, data: null}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /tag/info:
+    post:
+      operationId: getTag
+      summary: Get a tag within its tenant
+      requestBody: {$ref: '#/components/requestBodies/Target'}
+      responses:
+        '200': {$ref: '#/components/responses/TagResult'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /tag/list:
+    post:
+      operationId: listTags
+      summary: List tenant tags ordered by createAt descending then id descending
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tenantId]
+              properties:
+                tenantId: {type: string, format: uuid}
+                keyword: {type: string, description: Literal case-insensitive substring of code or name}
+                pageNum: {type: integer, default: 1, description: Nonpositive values normalize to 1}
+                pageSize: {type: integer, default: 20, description: Nonpositive values normalize to 20; values above 200 clamp to 200}
+      responses:
+        '200':
+          description: Success has code 0; business errors have code -1 and data null
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        nullable: true
+                        required: [total, list]
+                        properties:
+                          total: {type: integer, format: int64}
+                          list: {type: array, items: {$ref: '#/components/schemas/Tag'}}
+              example: {code: 0, msg: success, data: {total: 0, list: []}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+components:
+  securitySchemes:
+    BearerAuth: {type: http, scheme: bearer, bearerFormat: JWT}
+  schemas:
+    Target:
+      type: object
+      required: [tenantId, id]
+      properties:
+        tenantId: {type: string, format: uuid}
+        id: {type: string, format: uuid}
+    Fields:
+      type: object
+      properties:
+        name: {type: string, minLength: 1, maxLength: 64}
+        remark: {type: string, maxLength: 1024, default: ''}
+        allowValueSearch: {type: boolean}
+    Tag:
+      allOf:
+        - $ref: '#/components/schemas/Target'
+        - $ref: '#/components/schemas/Fields'
+        - type: object
+          required: [code, name, remark, allowValueSearch, createBy, updateBy, createAt, updateAt]
+          properties:
+            code: {type: string}
+            createBy: {type: string}
+            updateBy: {type: string}
+            createAt: {type: string, format: date-time}
+            updateAt: {type: string, format: date-time}
+    Envelope:
+      type: object
+      required: [code, msg, data]
+      properties:
+        code: {type: integer}
+        msg: {type: string}
+        data: {nullable: true}
+  requestBodies:
+    Target:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Target'}
+  responses:
+    TagResult:
+      description: |
+        Success has code 0 and a Tag. Errors have code -1 and data null.
+        Known messages: invalid tag params, tenant not found, tag not found, tag code already exists.
+        Unknown database/infrastructure errors return internal error without SQL details.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/Envelope'
+              - type: object
+                properties:
+                  data:
+                    type: object
+                    nullable: true
+                    allOf:
+                      - $ref: '#/components/schemas/Tag'
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Envelope'}
+          example: {code: 401, msg: Unauthorized, data: null}

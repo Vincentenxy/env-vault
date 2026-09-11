@@ -972,3 +972,61 @@ eventHash = HMAC-SHA256(
 - 哈希链只能发现篡改，不能阻止拥有数据库和 HMAC 密钥的攻击者重算整条链。更强保证需要定期把每日链尾哈希写入外部只读存储或 SIEM 作为锚点。
 
 未来启用时再新增 `chain_id`、`chain_sequence`、`previous_hash`、`event_hash`、`hash_key_id` 字段和独立的链头状态表。HMAC 未启用前不写空占位字段，避免让使用方误以为当前记录已经具备防篡改能力。
+
+## Tag 管理（2026-09-09）
+
+本阶段仅开发租户标签 CRUD，由 Owner 手动执行以下 DDL；不自动迁移或创建表。
+标签在租户内共享，code 创建后不可变。所有跨表关联、租户存在性在代码层校验，无数据库外键。
+allow_value_search 默认 true，显式 false 必须保存。此字段目前仅保存策略，不建立 value 索引、不解密检索。
+后续有效标签为 group 与当前 item 标签的并集，任一 false 禁止 value 检索，无标签默认允许；仍须校验 value 查看权限。
+
+```sql
+CREATE TABLE tag_info (
+    id uuid PRIMARY KEY,
+    tenant_id uuid NOT NULL,
+    code varchar(64) NOT NULL,
+    name varchar(64) NOT NULL,
+    remark text NOT NULL DEFAULT '',
+    allow_value_search boolean NOT NULL DEFAULT true,
+    is_deleted boolean NOT NULL DEFAULT false,
+    delete_at timestamptz,
+    delete_by text NOT NULL DEFAULT '',
+    create_by text NOT NULL DEFAULT '',
+    update_by text NOT NULL DEFAULT '',
+    create_at timestamptz NOT NULL DEFAULT now(),
+    update_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uk_tag_info_tenant_code_active
+    ON tag_info (tenant_id, code) WHERE is_deleted = false;
+CREATE INDEX idx_tag_info_tenant_created_active
+    ON tag_info (tenant_id, create_at DESC, id DESC) WHERE is_deleted = false;
+```
+
+保留主键与唯一索引用于并发保护；code 格式、名称长度等业务校验在代码层完成。
+删除为软删除，code 可在删除后重新使用。成功增删改与审计同事务提交。
+认证沿用现有 API 中间件，资源级授权待统一权限中心接入，不将 tenantId 过滤视为已完成用户授权。
+
+### Secret 关联表（后续阶段草案，本次不要执行）
+
+```sql
+CREATE TABLE secret_tag_relation (
+    id uuid PRIMARY KEY,
+    tag_id uuid NOT NULL,
+    target_type varchar(5) NOT NULL,
+    target_id uuid NOT NULL,
+    is_deleted boolean NOT NULL DEFAULT false,
+    delete_at timestamptz,
+    delete_by text NOT NULL DEFAULT '',
+    create_by text NOT NULL DEFAULT '',
+    update_by text NOT NULL DEFAULT '',
+    create_at timestamptz NOT NULL DEFAULT now(),
+    update_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uk_secret_tag_relation_target_tag_active
+    ON secret_tag_relation (target_type, target_id, tag_id) WHERE is_deleted = false;
+CREATE INDEX idx_secret_tag_relation_tag_target_active
+    ON secret_tag_relation (tag_id, target_type, target_id) WHERE is_deleted = false;
+```
+
+target_type 仅接受 group/item，由代码校验；target_id 分别对应 secret_info.group_id / secret_info.id，不使用 key，不建立外键。
+关联功能实施时必须增加已绑定标签删除保护、事务内目标校验和关联清理。本次不提供关联或检索接口。

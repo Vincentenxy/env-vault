@@ -21,6 +21,7 @@ import (
 	personalapp "env-vault/internal/application/personalsecret"
 	projapp "env-vault/internal/application/project"
 	secretapp "env-vault/internal/application/secret"
+	tagapp "env-vault/internal/application/tag"
 	tenantapp "env-vault/internal/application/tenant"
 	userapp "env-vault/internal/application/user"
 	tokenapp "env-vault/internal/application/useraccesstoken"
@@ -34,6 +35,7 @@ import (
 	personalrepo "env-vault/internal/infrastructure/persistence/personalsecret"
 	projrepo "env-vault/internal/infrastructure/persistence/project"
 	secretrepo "env-vault/internal/infrastructure/persistence/secret"
+	tagrepo "env-vault/internal/infrastructure/persistence/tag"
 	tenantrepo "env-vault/internal/infrastructure/persistence/tenant"
 	userrepo "env-vault/internal/infrastructure/persistence/user"
 	tokenrepo "env-vault/internal/infrastructure/persistence/useraccesstoken"
@@ -178,6 +180,7 @@ func New(ctx context.Context, cfg *config.Config, db *gorm.DB, redisClient redis
 	}
 	userHandler := handler.NewUserHandler(userSvc)
 	tenantHandler := handler.NewTenantHandler(tenantSvc)
+	tagHandler := handler.NewTagHandler(tagapp.NewService(tagrepo.NewRepository(db), tenantRepo, auditSvc))
 	orgHandler := handler.NewOrganizationHandler(orgSvc)
 	projectHandler := handler.NewProjectHandler(projSvc)
 	environmentHandler := handler.NewEnvironmentHandler(envSvc)
@@ -251,6 +254,12 @@ func New(ctx context.Context, cfg *config.Config, db *gorm.DB, redisClient redis
 
 		// 租户管理（带参数统一 POST）
 		tenantGroup := auth.Group("/tenant")
+		tagGroup := auth.Group("/tag")
+		tagGroup.POST("/create", tagHandler.Create)
+		tagGroup.POST("/update", tagHandler.Update)
+		tagGroup.POST("/delete", tagHandler.Delete)
+		tagGroup.POST("/info", tagHandler.Info)
+		tagGroup.POST("/list", tagHandler.List)
 		{
 			tenantGroup.POST("/create", tenantHandler.Create)
 			tenantGroup.POST("/update", tenantHandler.Update)
