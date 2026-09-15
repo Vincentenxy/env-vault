@@ -92,7 +92,7 @@ func (s *stubSecretStructureRepo) CreateBatch(ctx context.Context, secrets []*se
 	return s.createBatch(ctx, secrets)
 }
 
-func (s *stubSecretStructureRepo) ListByFolderIDs(ctx context.Context, folderIDs []uuid.UUID) ([]*secretdomain.Secret, error) {
+func (s *stubSecretStructureRepo) ListByFolderIDs(ctx context.Context, folderIDs []uuid.UUID, tagIDs ...uuid.UUID) ([]*secretdomain.Secret, error) {
 	return s.listByFolderIDs(ctx, folderIDs)
 }
 

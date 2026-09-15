@@ -3,11 +3,11 @@ info:
   title: Env Vault Tag API
   version: 0.1.0
   description: |
-    Tenant-scoped Tag CRUD only. No Secret associations or value search are implemented.
-    Apply tag_info DDL from database.md manually before use. No foreign keys.
+    Tenant-scoped Tag CRUD. Secret group associations are documented in secret-tag-openapi.yaml.
+    Apply tag_info and secret_tag_relation DDL from database.md manually before use. No foreign keys.
     All operations require authentication; resource-level authorization awaits the shared permission system.
     Code is immutable. Create defaults allowValueSearch to true; update preserves it when omitted.
-    Explicit false is persisted. Delete is soft; active codes are unique per tenant.
+    Explicit false is persisted; value search is not implemented. Delete is soft and removes all active Secret group associations in the same transaction; active codes are unique per tenant.
 servers:
   - url: /api/v1
 security:

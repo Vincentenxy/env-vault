@@ -8,9 +8,11 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	folderdomain "env-vault/internal/domain/folder"
 	"env-vault/internal/infrastructure/persistence"
+	tagrepo "env-vault/internal/infrastructure/persistence/tag"
 )
 
 // folderPO folder_info 表持久化对象（数据库列名下划线）
@@ -113,17 +115,37 @@ func (r *Repository) UpdateByGroupID(ctx context.Context, groupID uuid.UUID, nam
 // DeleteByGroupID 按 group_id 软删除全环境下的记录（所有层级）
 func (r *Repository) DeleteByGroupID(ctx context.Context, groupID uuid.UUID, deleteBy string) (int64, error) {
 	now := time.Now()
-	result := persistence.TxDB(ctx, r.db).WithContext(ctx).
-		Model(&folderPO{}).
-		Where("group_id = ? AND is_deleted = false", groupID).
-		Updates(map[string]any{
-			"is_deleted": true,
-			"delete_at":  now,
-			"delete_by":  deleteBy,
-			"update_at":  now,
-			"update_by":  deleteBy,
-		})
-	return result.RowsAffected, result.Error
+	var affected int64
+	err := persistence.TxDB(ctx, r.db).WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 与标签维护统一按目录 ID 加锁，删除父目录时绑定会等待并重新检查存活状态
+		var rows []folderPO
+		if err := tx.Select("id").Where("group_id = ? AND is_deleted = false", groupID).
+			Order("id").Clauses(clause.Locking{Strength: "UPDATE"}).Find(&rows).Error; err != nil {
+			return err
+		}
+		result := tx.
+			Model(&folderPO{}).
+			Where("group_id = ? AND is_deleted = false", groupID).
+			Updates(map[string]any{
+				"is_deleted": true,
+				"delete_at":  now,
+				"delete_by":  deleteBy,
+				"update_at":  now,
+				"update_by":  deleteBy,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		affected = result.RowsAffected
+		// 删除目录后其子目录也不可访问，清理整棵目录下的标签关联
+		groups := tx.Raw(`WITH RECURSIVE folders AS (
+			SELECT id FROM folder_info WHERE group_id = ?
+			UNION
+			SELECT f.id FROM folder_info f JOIN folders parent ON f.parent_folder_id = parent.id
+		) SELECT s.group_id FROM secret_info s WHERE s.folder_id IN (SELECT id FROM folders)`, groupID)
+		return tagrepo.SoftDeleteRelations(tx.Where("target_id IN (?)", groups), deleteBy)
+	})
+	return affected, err
 }
 
 // GetByID 按 ID 查询文件夹（不含已删除）

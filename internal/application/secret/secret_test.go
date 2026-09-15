@@ -176,7 +176,7 @@ func (s *stubSecretRepo) GetByFolderIDsKey(ctx context.Context, folderIDs []uuid
 	}
 	return nil, nil
 }
-func (s *stubSecretRepo) ListByFolderIDs(ctx context.Context, folderIDs []uuid.UUID) ([]*secretdomain.Secret, error) {
+func (s *stubSecretRepo) ListByFolderIDs(ctx context.Context, folderIDs []uuid.UUID, tagIDs ...uuid.UUID) ([]*secretdomain.Secret, error) {
 	if s.listByFolders != nil {
 		return s.listByFolders(ctx, folderIDs)
 	}

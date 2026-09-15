@@ -17,6 +17,19 @@ type Config struct {
 	Database DatabaseConfig `mapstructure:"database"`
 	Redis    RedisConfig    `mapstructure:"redis"`
 	Security SecurityConfig `mapstructure:"security"`
+	Search   SearchConfig   `mapstructure:"search"`
+}
+
+// SearchConfig 集中管理独立搜索模块的查询超时，不改变其他接口
+type SearchConfig struct {
+	QueryTimeout time.Duration `mapstructure:"query_timeout"`
+}
+
+func (c SearchConfig) Timeout() time.Duration {
+	if c.QueryTimeout <= 0 {
+		return 5 * time.Second
+	}
+	return c.QueryTimeout
 }
 
 // ServerConfig HTTP 服务配置
@@ -137,6 +150,7 @@ func Load(path string) (*Config, error) {
 	// 环境变量覆盖：将 key 中的 "." 替换为 "_"
 	v.AutomaticEnv()
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.SetDefault("search.query_timeout", "5s")
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("read config file: %w", err)

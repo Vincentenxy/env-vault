@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	secretapp "env-vault/internal/application/secret"
+	tagdomain "env-vault/internal/domain/tag"
 	"env-vault/pkg/page"
 	"env-vault/pkg/response"
 )
@@ -70,11 +71,12 @@ type UpdateSecretRequest struct {
 //   - 旧模式：传 folderGroupId，按 folder 业务组查询其下全部 secrets
 //   - 新模式：传 projectId + folderCode + envList，keyList 为空查全部 key，非空按 key 精确过滤
 type ListSecretRequest struct {
-	FolderGroupID uuid.UUID `json:"folderGroupId"`
-	ProjectID     uuid.UUID `json:"projectId"`
-	FolderCode    string    `json:"folderCode"`
-	EnvList       []string  `json:"envList"`
-	KeyList       []string  `json:"keyList"`
+	FolderGroupID uuid.UUID   `json:"folderGroupId"`
+	ProjectID     uuid.UUID   `json:"projectId"`
+	FolderCode    string      `json:"folderCode"`
+	EnvList       []string    `json:"envList"`
+	KeyList       []string    `json:"keyList"`
+	TagIDList     []uuid.UUID `json:"tagIdList"` // 可选，多选匹配任意一个标签
 }
 
 // DetailSecretRequest 查询2请求：按 secret 业务组查询
@@ -146,6 +148,7 @@ type SecretViewDTO struct {
 	Key     string                    `json:"key"`
 	Remark  string                    `json:"remark"`
 	Values  map[string]SecretValueDTO `json:"values"`
+	TagList []tagdomain.Summary       `json:"tagList"`
 }
 
 // Create 批量创建 secrets
@@ -399,6 +402,7 @@ func (h *SecretHandler) List(c *gin.Context) {
 		FolderCode:    req.FolderCode,
 		EnvList:       req.EnvList,
 		KeyList:       req.KeyList,
+		TagIDList:     req.TagIDList,
 	})
 	h.respondError(c, err)
 	if err != nil {
@@ -469,6 +473,10 @@ func (h *SecretHandler) respondError(c *gin.Context, err error) {
 
 // toSecretViewDTO 聚合视图转响应 DTO
 func toSecretViewDTO(v secretapp.SecretView) SecretViewDTO {
+	tags := v.TagList
+	if tags == nil {
+		tags = []tagdomain.Summary{}
+	}
 	values := make(map[string]SecretValueDTO, len(v.Values))
 	for code, sv := range v.Values {
 		values[code] = SecretValueDTO{
@@ -485,5 +493,6 @@ func toSecretViewDTO(v secretapp.SecretView) SecretViewDTO {
 		Key:     v.Key,
 		Remark:  v.Remark,
 		Values:  values,
+		TagList: tags,
 	}
 }

@@ -60,16 +60,19 @@ func (r *Repository) Update(ctx context.Context, item *domain.Tag) error {
 	return nil
 }
 func (r *Repository) Delete(ctx context.Context, tenantID, id uuid.UUID, operator string) error {
-	result := r.query(ctx).Where("tenant_id = ? AND id = ?", tenantID, id).Updates(map[string]any{
-		"is_deleted": true, "delete_by": operator, "delete_at": time.Now(), "update_by": operator, "update_at": time.Now(),
+	return persistence.TxDB(ctx, r.db).WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Table("tag_info").Where("is_deleted = false AND tenant_id = ? AND id = ?", tenantID, id).Updates(map[string]any{
+			"is_deleted": true, "delete_by": operator, "delete_at": time.Now(), "update_by": operator, "update_at": time.Now(),
+		})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return domain.ErrNotFound
+		}
+		// 标签行更新先取得行锁，清理与绑定写入互斥
+		return SoftDeleteRelations(tx.Where("tag_id = ?", id), operator)
 	})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return domain.ErrNotFound
-	}
-	return nil
 }
 func (r *Repository) List(ctx context.Context, filter domain.Filter) ([]*domain.Tag, int64, error) {
 	query := r.query(ctx).Where("tenant_id = ?", filter.TenantID)

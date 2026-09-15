@@ -42,6 +42,7 @@ import (
 	"env-vault/internal/interfaces/handler"
 	"env-vault/internal/interfaces/middleware"
 	"env-vault/internal/masterkey"
+	"env-vault/internal/search"
 	"env-vault/pkg/logger"
 )
 
@@ -168,8 +169,11 @@ func New(ctx context.Context, cfg *config.Config, db *gorm.DB, redisClient redis
 		envRepo,
 		envapp.WithResourceClone(folderRepo, secretRepo, masterKeyManager),
 	).WithAuditRecorder(auditSvc)
+	tagRepo := tagrepo.NewRepository(db)
 	secretSvc := secretapp.NewService(secretRepo, folderRepo, envRepo, masterKeyManager, userSvc).
-		WithAuditRecorder(auditSvc)
+		WithAuditRecorder(auditSvc).WithTags(tagRepo)
+	secretTagHandler := handler.NewSecretTagHandler(secretapp.NewTagService(tagRepo, auditSvc))
+	searchHandler := search.NewHTTPHandler(search.NewService(db, masterKeyManager, tagRepo, auditSvc, cfg.Search.Timeout()))
 	personalSecretSvc := personalapp.NewService(personalSecretRepo, userSvc, masterKeyManager).
 		WithAuditRecorder(auditSvc)
 
@@ -180,7 +184,7 @@ func New(ctx context.Context, cfg *config.Config, db *gorm.DB, redisClient redis
 	}
 	userHandler := handler.NewUserHandler(userSvc)
 	tenantHandler := handler.NewTenantHandler(tenantSvc)
-	tagHandler := handler.NewTagHandler(tagapp.NewService(tagrepo.NewRepository(db), tenantRepo, auditSvc))
+	tagHandler := handler.NewTagHandler(tagapp.NewService(tagRepo, tenantRepo, auditSvc))
 	orgHandler := handler.NewOrganizationHandler(orgSvc)
 	projectHandler := handler.NewProjectHandler(projSvc)
 	environmentHandler := handler.NewEnvironmentHandler(envSvc)
@@ -316,10 +320,13 @@ func New(ctx context.Context, cfg *config.Config, db *gorm.DB, redisClient redis
 			secretGroup.POST("/create", secretHandler.Create)
 			secretGroup.POST("/update", secretHandler.Update)
 			secretGroup.POST("/list", secretHandler.List)
+			secretGroup.POST("/search", searchHandler.Search)
 			secretGroup.POST("/info", secretHandler.Detail)
 			secretGroup.POST("/history", secretHandler.History)
 			secretGroup.POST("/history/batch", secretHandler.BatchHistory)
 			secretGroup.POST("/delete", secretHandler.Delete)
+			secretGroup.POST("/tag/info", secretTagHandler.Info)
+			secretGroup.POST("/tag/update", secretTagHandler.Update)
 		}
 
 		// 业务审计日志是跨资源独立模块；本期先由 Secret 写入并在密钥页面查询。

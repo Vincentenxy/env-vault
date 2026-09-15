@@ -37,7 +37,7 @@ type folderStructureRepository interface {
 
 type secretStructureRepository interface {
 	CreateBatch(ctx context.Context, secrets []*secretdomain.Secret) error
-	ListByFolderIDs(ctx context.Context, folderIDs []uuid.UUID) ([]*secretdomain.Secret, error)
+	ListByFolderIDs(ctx context.Context, folderIDs []uuid.UUID, tagIDs ...uuid.UUID) ([]*secretdomain.Secret, error)
 	CreateHistoryBatch(ctx context.Context, histories []*secretdomain.History) error
 }
 

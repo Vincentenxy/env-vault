@@ -640,6 +640,30 @@ CREATE INDEX IF NOT EXISTS idx_secret_info_folder_key ON secret_info (folder_id,
 
 ---
 
+### Secret 搜索索引
+
+Key、备注包含匹配使用 pg_trgm GIN 索引，搜索模块设计见 [secret-search.md](secret-search.md)
+在应用使用的 env_vault 数据库执行，由数据库所有者或运维账号创建扩展和索引，应用账号不需要 DDL 权限
+以下并发建索引语句分别执行，不放在 BEGIN / COMMIT 事务中，程序不自动执行 DDL
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_secret_info_key_trgm_active
+    ON secret_info USING gin (key gin_trgm_ops)
+    WHERE is_deleted = false;
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_secret_info_remark_trgm_active
+    ON secret_info USING gin (remark gin_trgm_ops)
+    WHERE is_deleted = false;
+
+ANALYZE secret_info;
+```
+
+保留现有 group_id、folder_id 索引，查询必须带 is_deleted=false，才符合这两个部分索引的条件
+上线前检查索引是否有效；IF NOT EXISTS 不会修复先前并发创建失败留下的无效索引
+索引会增加存储和写入成本，短词及高命中率模式仍可能扫描较多数据，不能承诺所有包含查询都走索引
+
 ## 表名：`secret_info_history`
 
 **说明**：密钥值历史表。每行保存 `secret_info` 中某个具体环境实例的一个 value 版本快照。该表只追加、不更新、不删除，因此不包含 `update_at` / `update_by` / `delete_at` / `delete_by` / `is_deleted`。
@@ -975,10 +999,11 @@ eventHash = HMAC-SHA256(
 
 ## Tag 管理（2026-09-09）
 
-本阶段仅开发租户标签 CRUD，由 Owner 手动执行以下 DDL；不自动迁移或创建表。
+当前已实现租户标签 CRUD、按 Secret groupId 绑定标签，以及展示和筛选；由 Owner 手动执行下方标签表与关联表 DDL，应用不自动迁移或创建表
 标签在租户内共享，code 创建后不可变。所有跨表关联、租户存在性在代码层校验，无数据库外键。
 allow_value_search 默认 true，显式 false 必须保存。此字段目前仅保存策略，不建立 value 索引、不解密检索。
-后续有效标签为 group 与当前 item 标签的并集，任一 false 禁止 value 检索，无标签默认允许；仍须校验 value 查看权限。
+本阶段仅支持按 Secret groupId 绑定标签，同一个 Key 的全部环境共享标签；不支持单环境实例标签
+allow_value_search 暂不参与实际检索，后续值检索仍须同时校验标签策略和 value 查看权限
 
 ```sql
 CREATE TABLE tag_info (
@@ -1006,7 +1031,9 @@ CREATE INDEX idx_tag_info_tenant_created_active
 删除为软删除，code 可在删除后重新使用。成功增删改与审计同事务提交。
 认证沿用现有 API 中间件，资源级授权待统一权限中心接入，不将 tenantId 过滤视为已完成用户授权。
 
-### Secret 关联表（后续阶段草案，本次不要执行）
+### Secret 标签关联（2026-09-14，按 groupId 绑定）
+
+沿用已有关系表结构，只启用 group 范围；上线前由 Owner 执行以下 DDL，应用不自动建表
 
 ```sql
 CREATE TABLE secret_tag_relation (
@@ -1028,5 +1055,18 @@ CREATE INDEX idx_secret_tag_relation_tag_target_active
     ON secret_tag_relation (tag_id, target_type, target_id) WHERE is_deleted = false;
 ```
 
-target_type 仅接受 group/item，由代码校验；target_id 分别对应 secret_info.group_id / secret_info.id，不使用 key，不建立外键。
-关联功能实施时必须增加已绑定标签删除保护、事务内目标校验和关联清理。本次不提供关联或检索接口。
+target_type 当前固定为 group，target_id 对应 secret_info.group_id，不使用 key，不建立外键
+唯一索引用于防止重复绑定，反向索引用于标签筛选和删除清理
+
+- POST /api/v1/secret/tag/info：传 groupId，返回实际所属 tenantId 和当前 tagList，编辑标签不需要读取密钥明文
+- POST /api/v1/secret/tag/update：传 groupId、tagIdList，完整替换当前标签集合；空数组表示解绑全部，缺省或 null 拒绝；重复 ID 去重
+- secret/list 和 secret/info 的每个 Secret 增加 tagList（id、code、name、allowValueSearch），无标签返回 []；原字段保持不变
+- secret/list 的两种查询模式均支持 tagIdList，空数组或缺省不筛选，多选时匹配任意一个标签；筛选在数据库中执行，不扩大原目录或项目查询范围
+- 标签必须存在且未删除，必须与 Secret 实际所属租户一致；所属租户由后端沿 folder、env、project、org 查询，不信任前端传入租户
+- 绑定与标签删除、密钥删除、目录删除通过事务和行锁协调；失败整体回滚，避免产生失效关联
+- 删除标签同步软删除全部关联；删除 Secret 整组、目录及其子目录不可见时清理相应关联，不删除密钥值历史
+- 标签变更记录独立业务审计，与绑定操作同事务，不增加 value 的 version、不产生 value 历史
+- 新环境沿用 groupId，自动共享整组标签，不复制关联行；新建同名 Key 使用新 groupId，不继承已删除密钥的标签
+- 前端在密钥名称下展示标签，提供独立标签编辑弹框及目录内标签筛选；租户标签选择器支持搜索和分页
+- 资源权限继续预留统一权限中心接入，仅完成同租户校验，不将租户归属校验视为用户授权
+- Java SDK 仅增加响应字段，不改变原字段；发布前应验证外部 SDK 对未知 JSON 字段的兼容性，当前 Mac 工作区未找到 env-vault-client

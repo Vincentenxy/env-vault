@@ -47,6 +47,7 @@ type ProjectFolderListFilter struct {
 	FolderCode string
 	EnvCodes   []string
 	Keys       []string
+	TagIDs     []uuid.UUID
 }
 
 // History 密钥值的不可变历史版本快照
@@ -111,7 +112,7 @@ type Repository interface {
 	// GetByFolderIDsKey 按文件夹集合 + key 查询密钥（不含已删除，业务 folder 内 key 唯一校验），不存在返回 nil, nil
 	GetByFolderIDsKey(ctx context.Context, folderIDs []uuid.UUID, key string) (*Secret, error)
 	// ListByFolderIDs 查询文件夹集合下的全部密钥（不含已删除，按创建时间倒序）
-	ListByFolderIDs(ctx context.Context, folderIDs []uuid.UUID) ([]*Secret, error)
+	ListByFolderIDs(ctx context.Context, folderIDs []uuid.UUID, tagIDs ...uuid.UUID) ([]*Secret, error)
 	// ListByGroupID 按 group_id 查询业务组下的全部环境实例（不含已删除）
 	ListByGroupID(ctx context.Context, groupID uuid.UUID) ([]*Secret, error)
 	// ListByProjectFolder 按 project_id + folder code + env code 查询 secrets，可选 key 精确过滤

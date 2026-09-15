@@ -20,6 +20,7 @@ import (
 	envdomain "env-vault/internal/domain/environment"
 	folderdomain "env-vault/internal/domain/folder"
 	secretdomain "env-vault/internal/domain/secret"
+	tagdomain "env-vault/internal/domain/tag"
 )
 
 // 业务错误（应用层显式定义，handler 映射为业务错误码）
@@ -113,6 +114,7 @@ type ListInput struct {
 	FolderCode    string
 	EnvList       []string
 	KeyList       []string
+	TagIDList     []uuid.UUID
 }
 
 // HistoryView 解密后的 value 历史版本
@@ -160,6 +162,7 @@ type SecretView struct {
 	Key     string
 	Remark  string
 	Values  map[string]SecretValueView // key: env code
+	TagList []tagdomain.Summary
 }
 
 // IService 密钥应用服务接口（handler 仅依赖接口，便于单测替换实现）
@@ -187,6 +190,13 @@ type Service struct {
 	cipher        valueCryptor
 	nameResolver  app.NicknameResolver
 	auditRecorder auditdomain.Recorder
+	tags          tagdomain.GroupReader
+}
+
+// WithTags 为列表和详情批量加载整组标签
+func (s *Service) WithTags(tags tagdomain.GroupReader) *Service {
+	s.tags = tags
+	return s
 }
 
 // NewService 创建密钥应用服务
@@ -718,6 +728,7 @@ func (s *Service) List(ctx context.Context, in ListInput) (views []SecretView, r
 		detail := map[string]any{
 			"environmentFilterCount": len(in.EnvList),
 			"keyFilterCount":         len(in.KeyList),
+			"tagFilterCount":         len(in.TagIDList),
 			"resultCount":            len(views),
 		}
 		auditErr := s.recordReadResult(
@@ -734,8 +745,13 @@ func (s *Service) List(ctx context.Context, in ListInput) (views []SecretView, r
 		}
 	}()
 
+	var err error
+	in.TagIDList, err = normalizeTagIDs(in.TagIDList)
+	if err != nil {
+		return nil, err
+	}
 	if in.FolderGroupID != uuid.Nil {
-		return s.ListByFolder(ctx, in.FolderGroupID)
+		return s.listByFolder(ctx, in.FolderGroupID, in.TagIDList)
 	}
 
 	in.FolderCode = strings.TrimSpace(in.FolderCode)
@@ -750,6 +766,7 @@ func (s *Service) List(ctx context.Context, in ListInput) (views []SecretView, r
 		FolderCode: in.FolderCode,
 		EnvCodes:   in.EnvList,
 		Keys:       in.KeyList,
+		TagIDs:     in.TagIDList,
 	})
 	if err != nil {
 		return nil, err
@@ -759,6 +776,10 @@ func (s *Service) List(ctx context.Context, in ListInput) (views []SecretView, r
 
 // ListByFolder 查询1：按 folder 业务组查询其下全部 secrets（返回每个 secret 的聚合视图列表）
 func (s *Service) ListByFolder(ctx context.Context, folderGroupID uuid.UUID) ([]SecretView, error) {
+	return s.listByFolder(ctx, folderGroupID, nil)
+}
+
+func (s *Service) listByFolder(ctx context.Context, folderGroupID uuid.UUID, tagIDs []uuid.UUID) ([]SecretView, error) {
 	if folderGroupID == uuid.Nil {
 		return nil, ErrInvalidParam
 	}
@@ -776,7 +797,7 @@ func (s *Service) ListByFolder(ctx context.Context, folderGroupID uuid.UUID) ([]
 		folderIDs = append(folderIDs, f.ID)
 	}
 
-	secrets, err := s.repo.ListByFolderIDs(ctx, folderIDs)
+	secrets, err := s.repo.ListByFolderIDs(ctx, folderIDs, tagIDs...)
 	if err != nil {
 		return nil, err
 	}
@@ -940,7 +961,19 @@ func (s *Service) buildViews(ctx context.Context, secrets []*secretdomain.Secret
 	}
 
 	views := make([]SecretView, 0, len(order))
+	tags := make(map[uuid.UUID][]tagdomain.Summary)
+	if s.tags != nil && len(order) > 0 {
+		var err error
+		tags, err = s.tags.ListGroupTags(ctx, order)
+		if err != nil {
+			return nil, err
+		}
+	}
 	for _, gid := range order {
+		byGroup[gid].TagList = tags[gid]
+		if byGroup[gid].TagList == nil {
+			byGroup[gid].TagList = []tagdomain.Summary{}
+		}
 		views = append(views, *byGroup[gid])
 	}
 	sort.Slice(views, func(i, j int) bool {

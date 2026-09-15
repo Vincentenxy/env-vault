@@ -8,6 +8,22 @@ import (
 	"time"
 )
 
+func TestSearchTimeoutConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("server:\n  port: 8090\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(dir)
+	if err != nil || cfg.Search.Timeout() != 5*time.Second {
+		t.Fatalf("default search timeout: %v %v", cfg, err)
+	}
+	t.Setenv("SEARCH_QUERY_TIMEOUT", "2s")
+	cfg, err = Load(dir)
+	if err != nil || cfg.Search.Timeout() != 2*time.Second {
+		t.Fatalf("search timeout override: %v %v", cfg, err)
+	}
+}
+
 func TestLoadSecurityConfig(t *testing.T) {
 	dir := t.TempDir()
 	content := []byte(`security:

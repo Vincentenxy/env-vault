@@ -6,6 +6,10 @@ app:
   name: env-vault
   version: 0.1.0
 
+search:
+  # 只限制检索模块的数据库查询及本页解密，可用 SEARCH_QUERY_TIMEOUT 覆盖
+  query_timeout: 5s
+
 auth:
   local:
     enabled: true

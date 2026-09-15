@@ -8,9 +8,11 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	secretdomain "env-vault/internal/domain/secret"
 	"env-vault/internal/infrastructure/persistence"
+	tagrepo "env-vault/internal/infrastructure/persistence/tag"
 )
 
 // txKey context 中携带事务句柄的 key（类型不导出避免跨包冲突）
@@ -76,17 +78,31 @@ func (r *Repository) CreateBatch(ctx context.Context, secrets []*secretdomain.Se
 // DeleteByGroupID 按 group_id 软删除全部环境实例
 func (r *Repository) DeleteByGroupID(ctx context.Context, groupID uuid.UUID, deleteBy string) (int64, error) {
 	now := time.Now()
-	result := r.withTxDB(ctx).WithContext(ctx).
-		Model(&secretPO{}).
-		Where("group_id = ? AND is_deleted = false", groupID).
-		Updates(map[string]any{
-			"is_deleted": true,
-			"delete_at":  now,
-			"delete_by":  deleteBy,
-			"update_at":  now,
-			"update_by":  deleteBy,
-		})
-	return result.RowsAffected, result.Error
+	var affected int64
+	err := r.withTxDB(ctx).WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 与标签绑定保持相同的行锁顺序，避免多个环境实例交叉加锁
+		var rows []secretPO
+		if err := tx.Select("id").Where("group_id = ? AND is_deleted = false", groupID).
+			Order("id").Clauses(clause.Locking{Strength: "UPDATE"}).Find(&rows).Error; err != nil {
+			return err
+		}
+		result := tx.
+			Model(&secretPO{}).
+			Where("group_id = ? AND is_deleted = false", groupID).
+			Updates(map[string]any{
+				"is_deleted": true,
+				"delete_at":  now,
+				"delete_by":  deleteBy,
+				"update_at":  now,
+				"update_by":  deleteBy,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		affected = result.RowsAffected
+		return tagrepo.SoftDeleteRelations(tx.Where("target_id = ?", groupID), deleteBy)
+	})
+	return affected, err
 }
 
 // GetByID 按 ID 查询密钥（不含已删除）
@@ -120,10 +136,11 @@ func (r *Repository) GetByFolderIDsKey(ctx context.Context, folderIDs []uuid.UUI
 }
 
 // ListByFolderIDs 查询文件夹集合下的全部密钥（不含已删除，按 key 升序）
-func (r *Repository) ListByFolderIDs(ctx context.Context, folderIDs []uuid.UUID) ([]*secretdomain.Secret, error) {
+func (r *Repository) ListByFolderIDs(ctx context.Context, folderIDs []uuid.UUID, tagIDs ...uuid.UUID) ([]*secretdomain.Secret, error) {
 	var pos []secretPO
-	err := r.withTxDB(ctx).WithContext(ctx).
-		Where("folder_id IN ? AND is_deleted = false", folderIDs).
+	query := r.withTxDB(ctx).WithContext(ctx).Model(&secretPO{}).
+		Where("folder_id IN ? AND is_deleted = false", folderIDs)
+	err := filterTags(query, tagIDs).
 		Order("key ASC, group_id ASC, env_code ASC, id ASC").
 		Find(&pos).Error
 	if err != nil {
@@ -170,6 +187,7 @@ func (r *Repository) ListByProjectFolder(ctx context.Context, filter secretdomai
 	if len(filter.Keys) > 0 {
 		query = query.Where("secret_info.key IN ?", filter.Keys)
 	}
+	query = filterTags(query, filter.TagIDs)
 	if err := query.Order("secret_info.key ASC, secret_info.group_id ASC, secret_info.env_code ASC, secret_info.id ASC").Find(&pos).Error; err != nil {
 		return nil, err
 	}
@@ -179,6 +197,17 @@ func (r *Repository) ListByProjectFolder(ctx context.Context, filter secretdomai
 		secrets = append(secrets, toDomain(&pos[i]))
 	}
 	return secrets, nil
+}
+
+// filterTags 使用 EXISTS 匹配任意选中标签，避免 JOIN 造成环境实例重复
+func filterTags(query *gorm.DB, ids []uuid.UUID) *gorm.DB {
+	if len(ids) == 0 {
+		return query
+	}
+	return query.Where(`EXISTS (SELECT 1 FROM secret_tag_relation r
+		JOIN tag_info t ON t.id = r.tag_id AND t.is_deleted = false
+		WHERE r.target_type = 'group' AND r.target_id = secret_info.group_id
+		AND r.is_deleted = false AND r.tag_id IN ?)`, ids)
 }
 
 // UpdateValueByIDs 按 ID 集合逐条更新 value_ciphertext 与 version（version = version + 1）。

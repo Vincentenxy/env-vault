@@ -1,5 +1,18 @@
 # 待办事项
 
+## 标签与搜索
+
+- [x] 租户标签定义、按 Secret groupId 绑定和解绑、密钥列表展示与目录内标签筛选，暂不支持单环境标签
+- [x] 删除标签、密钥整组及目录时事务内软删除关联，标签编辑独立审计，不增加值版本
+- [ ] 接入统一权限中心，为标签查询、维护与密钥筛选校验当前用户权限
+- [x] 独立 search 模块实现共享密钥 Key、备注包含匹配、组级分页、查询超时及固定展示结果，设计见 design/secret-search.md
+- [ ] 搜索接入统一资源与环境权限，当前与共享 secret/list 一样仅要求认证；扩展标签条件和跨租户标签候选，值检索单独设计
+- [ ] 搜索上线前在业务数据库安装 pg_trgm 并执行两个 GIN 索引 DDL，核对索引有效性与关联表统计信息，使用目标 PostgreSQL 版本及代表性业务数据压测
+- [ ] 若后续增加租户、组织、项目、环境的级联删除或回收站恢复，统一处理标签和密钥关联的生命周期，避免恢复已清理的关联
+- [ ] 发布前确认外部 Java SDK 对新增 tagList 字段的反序列化兼容性，当前 Mac 工作区未提供 env-vault-client
+
+## 部署与用户
+
 - [ ] 部署一套高可用pgsql: [cnpg](https://cloudnative-pg.io/documentation/1.20/)
 
 - [ ] 生产入口将 ingress-nginx Service从单节点域名加 NodePort切换为 LoadBalancer、虚拟 IP或其他多节点入口。当前 Controller已有三个跨节点副本，但 `efficient-poc.qiuer.net` 只解析到一个控制节点，该节点不可达时外部流量仍会中断。
