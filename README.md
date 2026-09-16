@@ -101,7 +101,7 @@ docker buildx build \
   --platform linux/amd64 \
   --build-arg BASE_IMAGE_REGISTRY=m.daocloud.io/docker.io \
   --build-arg GOPROXY=https://goproxy.cn,direct \
-  -t harbor.gtjaqh.net/lucy-dev/env-vault:0.0.1-alpha.4 \
+  -t harbor.gtjaqh.net/lucy-dev/env-vault:0.0.1-alpha.5 \
   --push \
   .
 

@@ -32,6 +32,10 @@ func (s *auditStub) Record(_ context.Context, event *auditdomain.Event) error {
 func (s *auditStub) RecordBatch(context.Context, []*auditdomain.Event) error { return nil }
 
 func TestInputRules(t *testing.T) {
+	const shortKeywordMessage = "搜索全部范围、租户或组织时，关键词需包含至少 3 个连续的中文、字母或数字；短关键词请先选择项目或文件夹"
+	if ErrShortKeyword.Error() != shortKeywordMessage {
+		t.Fatalf("short keyword message=%q, want %q", ErrShortKeyword.Error(), shortKeywordMessage)
+	}
 	project, folder := Scope{Type: "project", ID: uuid.New()}, Scope{Type: "folder", ID: uuid.New()}
 	for _, test := range []struct {
 		name, keyword string

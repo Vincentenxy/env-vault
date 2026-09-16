@@ -13,7 +13,7 @@ import (
 
 var (
 	ErrInvalidInput = errors.New("搜索参数不合法")
-	ErrShortKeyword = errors.New("短关键词搜索请先选择项目或文件夹")
+	ErrShortKeyword = errors.New("搜索全部范围、租户或组织时，关键词需包含至少 3 个连续的中文、字母或数字；短关键词请先选择项目或文件夹")
 	ErrEnvironment  = errors.New("同一项目请指定有效环境，跨项目或租户、组织范围不能指定环境")
 	ErrScope        = errors.New("所选项目或文件夹不存在或已删除，请刷新范围")
 	ErrDecrypt      = errors.New("decrypt secret value failed")
