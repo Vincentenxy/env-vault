@@ -49,7 +49,7 @@ CREATE TABLE folder_info(id uuid PRIMARY KEY,group_id uuid,env_id uuid,parent_fo
 CREATE TABLE secret_info(id uuid PRIMARY KEY,group_id uuid,folder_id uuid,env_code text,key text,remark text DEFAULT '',value_ciphertext text DEFAULT 'cipher',version integer DEFAULT 1,update_at timestamptz DEFAULT now(),is_deleted boolean DEFAULT false);
 CREATE INDEX search_group_idx ON secret_info(group_id);
 CREATE INDEX search_folder_idx ON secret_info(folder_id);
-CREATE TABLE tag_info(id uuid PRIMARY KEY,code text,name text,allow_value_search boolean DEFAULT false,is_deleted boolean DEFAULT false);
+CREATE TABLE tag_info(id uuid PRIMARY KEY,tenant_id uuid,code text,name text,remark text DEFAULT '',allow_value_search boolean DEFAULT false,is_deleted boolean DEFAULT false);
 CREATE TABLE secret_tag_relation(target_id uuid,tag_id uuid,target_type text DEFAULT 'group',is_deleted boolean DEFAULT false);
 `
 	if err = db.Exec(ddl).Error; err != nil {
@@ -202,6 +202,60 @@ func TestPostgresScopeEnvironmentAndSoftDeletion(t *testing.T) {
 	page, err = repo.read(context.Background(), in)
 	if err != nil || page.Total != 0 {
 		t.Fatal("deleted tenant returned")
+	}
+}
+
+func TestPostgresTagFilterAndOptions(t *testing.T) {
+	db := testDatabase(t)
+	f := testFixture(t, db)
+	other := testFixture(t, db)
+	first := addGroup(t, db, f, "DB_HOST", "database")
+	second := addGroup(t, db, f, "CACHE_HOST", "cache")
+	otherGroup := addGroup(t, db, other, "OTHER_HOST", "other")
+	databaseTag, sharedTag, otherTag := uuid.New(), uuid.New(), uuid.New()
+	for _, args := range [][]any{
+		{databaseTag, f.tenant, "database", "数据库", "数据库配置"},
+		{sharedTag, f.tenant, "shared", "公共配置", "共享配置"},
+		{otherTag, other.tenant, "database", "数据库", "另一个租户"},
+	} {
+		if err := db.Exec("INSERT INTO tag_info(id,tenant_id,code,name,remark) VALUES (?,?,?,?,?)", args...).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, binding := range [][2]uuid.UUID{{first, databaseTag}, {first, sharedTag}, {second, sharedTag}, {otherGroup, otherTag}} {
+		if err := db.Exec("INSERT INTO secret_tag_relation(target_id,tag_id) VALUES (?,?)", binding[0], binding[1]).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	repo := &repository{db: db, tags: tagrepo.NewRepository(db)}
+	searchInput := Input{TagIDs: []uuid.UUID{databaseTag}, PageNum: 1, PageSize: 20, UserID: "reader"}
+	result, err := repo.read(context.Background(), searchInput)
+	if err != nil || result.Total != 1 || result.Groups[0].GroupID != first {
+		t.Fatalf("bad single tag result: %+v %v", result, err)
+	}
+	searchInput.TagIDs = []uuid.UUID{databaseTag, sharedTag}
+	result, err = repo.read(context.Background(), searchInput)
+	if err != nil || result.Total != 2 {
+		t.Fatalf("tags should match any: %+v %v", result, err)
+	}
+	options, err := repo.listTagOptions(context.Background(), TagOptionInput{
+		Scopes: []Scope{{Type: "project", ID: f.project}}, EnvList: []string{"dev"}, PageNum: 1, PageSize: 50, UserID: "reader",
+	})
+	if err != nil || options.Total != 2 || len(options.List) != 2 || options.List[0].TenantID != f.tenant {
+		t.Fatalf("bad scoped tag options: %+v %v", options, err)
+	}
+	options, err = repo.listTagOptions(context.Background(), TagOptionInput{
+		Scopes: []Scope{{Type: "project", ID: f.project}}, EnvList: []string{"dev"}, Keyword: "数据", PageNum: 1, PageSize: 50, UserID: "reader",
+	})
+	if err != nil || options.Total != 1 || options.List[0].ID != databaseTag {
+		t.Fatalf("bad tag option keyword: %+v %v", options, err)
+	}
+	if err = db.Exec("UPDATE tag_info SET is_deleted=true WHERE id=?", databaseTag).Error; err != nil {
+		t.Fatal(err)
+	}
+	searchInput.TagIDs = []uuid.UUID{databaseTag}
+	if _, err = repo.read(context.Background(), searchInput); !errors.Is(err, ErrTag) {
+		t.Fatalf("deleted tag accepted: %v", err)
 	}
 }
 

@@ -12,11 +12,18 @@ import (
 	"env-vault/pkg/page"
 	"env-vault/pkg/userctx"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 type searchFunc func(context.Context, Input) (page.Response[Secret], error)
 
 func (f searchFunc) Search(ctx context.Context, in Input) (page.Response[Secret], error) {
+	return f(ctx, in)
+}
+
+type tagListFunc func(context.Context, TagOptionInput) (page.Response[TagOption], error)
+
+func (f tagListFunc) ListTagOptions(ctx context.Context, in TagOptionInput) (page.Response[TagOption], error) {
 	return f(ctx, in)
 }
 
@@ -100,7 +107,7 @@ func TestHTTPRejectsUnsupportedFiltersAndTrailingJSON(t *testing.T) {
 		t.Fatal("unsupported request reached service")
 		return page.Response[Secret]{}, nil
 	}))
-	for _, body := range []string{`{"tagIdList":["ignored"]}`, `{"scopes":[{"scopeType":"tenant","scopeId":"8b85e3fa-c15a-480f-b4a2-000000000010","extra":true}]}`, `{} {}`, `null`} {
+	for _, body := range []string{`{"tagMatchMode":"all"}`, `{"scopes":[{"scopeType":"tenant","scopeId":"8b85e3fa-c15a-480f-b4a2-000000000010","extra":true}]}`, `{} {}`, `null`} {
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)
 		c.Request = httptest.NewRequest("POST", "/", strings.NewReader(body))
@@ -109,5 +116,46 @@ func TestHTTPRejectsUnsupportedFiltersAndTrailingJSON(t *testing.T) {
 		if !strings.Contains(w.Body.String(), `"code":-1`) {
 			t.Fatalf("accepted %s", body)
 		}
+	}
+}
+
+func TestHTTPSearchPassesTagIDs(t *testing.T) {
+	tagID := uuid.New()
+	h := NewHTTPHandler(searchFunc(func(_ context.Context, in Input) (page.Response[Secret], error) {
+		if len(in.TagIDs) != 1 || in.TagIDs[0] != tagID {
+			t.Fatalf("tag ids not passed: %+v", in.TagIDs)
+		}
+		return page.Response[Secret]{List: []Secret{}}, nil
+	}))
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/", strings.NewReader(fmt.Sprintf(`{"tagIdList":[%q]}`, tagID)))
+	userctx.Set(c, &userctx.User{UserID: "trusted"})
+	h.Search(c)
+	if !strings.Contains(w.Body.String(), `"code":0`) {
+		t.Fatalf("tag search failed: %s", w.Body.String())
+	}
+}
+
+func TestHTTPTagListUsesAuthenticatedIdentity(t *testing.T) {
+	tagID := uuid.New()
+	h := &HTTPHandler{
+		service: searchFunc(func(context.Context, Input) (page.Response[Secret], error) {
+			return page.Response[Secret]{}, nil
+		}),
+		tags: tagListFunc(func(_ context.Context, in TagOptionInput) (page.Response[TagOption], error) {
+			if in.UserID != "trusted" || in.Keyword != "db" || in.PageNum != 1 || in.PageSize != 50 {
+				t.Fatalf("bad tag option input: %+v", in)
+			}
+			return page.Response[TagOption]{Total: 1, List: []TagOption{{ID: tagID, Name: "数据库"}}}, nil
+		}),
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/", strings.NewReader(`{"keyword":"db","pageSize":50}`))
+	userctx.Set(c, &userctx.User{UserID: "trusted"})
+	h.ListTags(c)
+	if !strings.Contains(w.Body.String(), tagID.String()) || !strings.Contains(w.Body.String(), `"total":1`) {
+		t.Fatalf("bad tag option response: %s", w.Body.String())
 	}
 }

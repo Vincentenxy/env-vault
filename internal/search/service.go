@@ -15,17 +15,19 @@ import (
 	"gorm.io/gorm"
 )
 
-// Service 对外只暴露 Search，将匹配、分页、解密和审计留在独立模块
+// Service 集中维护密钥检索和标签候选，将分页、解密和审计留在模块内部
 type Service struct {
-	repo    reader
-	cipher  Decryptor
-	audit   auditdomain.Recorder
-	timeout time.Duration
+	repo       reader
+	tagOptions tagOptionReader
+	cipher     Decryptor
+	audit      auditdomain.Recorder
+	timeout    time.Duration
 }
 
 // NewService 的超时值由统一配置模块提供，不影响其他接口的数据库超时
 func NewService(db *gorm.DB, cipher Decryptor, tags TagReader, audit auditdomain.Recorder, timeout time.Duration) *Service {
-	return &Service{repo: &repository{db: db, tags: tags}, cipher: cipher, audit: audit, timeout: timeout}
+	repo := &repository{db: db, tags: tags}
+	return &Service{repo: repo, tagOptions: repo, cipher: cipher, audit: audit, timeout: timeout}
 }
 
 // Search 先查当前页元数据与密文，再解密本页，任何失败都不返回部分结果
@@ -42,7 +44,7 @@ func (s *Service) Search(ctx context.Context, in Input) (result page.Response[Se
 		event := &auditdomain.Event{
 			ActionCode: "secret.search", ResourceType: "secret", ResultCode: auditdomain.ResultSuccess,
 			CreateBy: in.UserID,
-			EventDetail: map[string]any{"scopeCount": len(in.Scopes), "environmentFilterCount": len(in.EnvList),
+			EventDetail: map[string]any{"scopeCount": len(in.Scopes), "environmentFilterCount": len(in.EnvList), "tagFilterCount": len(in.TagIDs),
 				"keywordLength": utf8.RuneCountInString(in.Keyword), "pageNum": in.PageNum, "pageSize": in.PageSize,
 				"resultCount": len(result.List), "durationMs": time.Since(started).Milliseconds()},
 		}
@@ -95,54 +97,109 @@ func (s *Service) Search(ctx context.Context, in Input) (result page.Response[Se
 	return page.Response[Secret]{Total: stored.Total, List: items}, nil
 }
 
+// ListTagOptions 使用独立分页查询标签元数据，不读取或解密密钥值
+func (s *Service) ListTagOptions(ctx context.Context, in TagOptionInput) (page.Response[TagOption], error) {
+	var result page.Response[TagOption]
+	in, err := normalizeTagOptionInput(in)
+	if err != nil {
+		return result, err
+	}
+	if s.tagOptions == nil {
+		return result, ErrInvalidInput
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	result, err = s.tagOptions.listTagOptions(queryCtx, in)
+	if err != nil && errors.Is(queryCtx.Err(), context.DeadlineExceeded) {
+		return page.Response[TagOption]{}, ErrTimeout
+	}
+	return result, err
+}
+
 // normalizeInput 仅归一化检索条件，分页默认值与上限仍只在 Handler 处理
 func normalizeInput(in Input) (Input, error) {
 	in.Keyword = strings.TrimSpace(in.Keyword)
 	if strings.TrimSpace(in.UserID) == "" || in.PageNum < 1 || in.PageSize < 1 ||
 		in.PageNum-1 > math.MaxInt/in.PageSize || utf8.RuneCountInString(in.Keyword) > 256 ||
+		strings.ContainsRune(in.Keyword, 0) || len(in.Scopes) > 100 || len(in.EnvList) > 200 || len(in.TagIDs) > 100 {
+		return in, ErrInvalidInput
+	}
+	scopes, envs, narrow, err := normalizeScopeEnvironment(in.Scopes, in.EnvList)
+	if err != nil {
+		return in, err
+	}
+	in.Scopes, in.EnvList = scopes, envs
+	tags := make([]uuid.UUID, 0, len(in.TagIDs))
+	tagSeen := make(map[uuid.UUID]bool)
+	for _, id := range in.TagIDs {
+		if id == uuid.Nil {
+			return in, ErrInvalidInput
+		}
+		if !tagSeen[id] {
+			tags = append(tags, id)
+			tagSeen[id] = true
+		}
+	}
+	in.TagIDs = tags
+	if in.Keyword != "" && !hasSearchTrigram(in.Keyword) && !narrow {
+		return in, ErrShortKeyword
+	}
+	return in, nil
+}
+
+// normalizeTagOptionInput 允许标签候选使用短关键词，但范围和环境规则与密钥搜索一致
+func normalizeTagOptionInput(in TagOptionInput) (TagOptionInput, error) {
+	in.Keyword = strings.TrimSpace(in.Keyword)
+	if strings.TrimSpace(in.UserID) == "" || in.PageNum < 1 || in.PageSize < 1 ||
+		in.PageNum-1 > math.MaxInt/in.PageSize || utf8.RuneCountInString(in.Keyword) > 128 ||
 		strings.ContainsRune(in.Keyword, 0) || len(in.Scopes) > 100 || len(in.EnvList) > 200 {
 		return in, ErrInvalidInput
 	}
-	scopes := make([]Scope, 0, len(in.Scopes))
+	scopes, envs, _, err := normalizeScopeEnvironment(in.Scopes, in.EnvList)
+	if err != nil {
+		return in, err
+	}
+	in.Scopes, in.EnvList = scopes, envs
+	return in, nil
+}
+
+// normalizeScopeEnvironment 统一去重结构条件，实际资源归属仍由仓储读取数据库校验
+func normalizeScopeEnvironment(inputScopes []Scope, inputEnvs []string) ([]Scope, []string, bool, error) {
+	scopes := make([]Scope, 0, len(inputScopes))
 	seen := make(map[Scope]bool)
-	narrow := len(in.Scopes) > 0
-	for _, scope := range in.Scopes {
+	narrow := len(inputScopes) > 0
+	for _, scope := range inputScopes {
 		if scope.ID == uuid.Nil {
-			return in, ErrInvalidInput
+			return nil, nil, false, ErrInvalidInput
 		}
 		switch scope.Type {
 		case "tenant", "org":
 			narrow = false
 		case "project", "folder":
 		default:
-			return in, ErrInvalidInput
+			return nil, nil, false, ErrInvalidInput
 		}
 		if !seen[scope] {
 			scopes = append(scopes, scope)
 			seen[scope] = true
 		}
 	}
-	in.Scopes = scopes
-	envs := make([]string, 0, len(in.EnvList))
+	envs := make([]string, 0, len(inputEnvs))
 	envSeen := make(map[string]bool)
-	for _, env := range in.EnvList {
+	for _, env := range inputEnvs {
 		env = strings.TrimSpace(env)
 		if env == "" || strings.ContainsRune(env, 0) {
-			return in, ErrInvalidInput
+			return nil, nil, false, ErrInvalidInput
 		}
 		if !envSeen[env] {
 			envs = append(envs, env)
 			envSeen[env] = true
 		}
 	}
-	in.EnvList = envs
 	if !narrow && len(envs) > 0 {
-		return in, ErrEnvironment
+		return nil, nil, false, ErrEnvironment
 	}
-	if in.Keyword != "" && !hasSearchTrigram(in.Keyword) && !narrow {
-		return in, ErrShortKeyword
-	}
-	return in, nil
+	return scopes, envs, narrow, nil
 }
 
 // 连续三个文字或数字才放行大范围包含查询，分隔符两边的短词不凑长度

@@ -16,6 +16,7 @@ var (
 	ErrShortKeyword = errors.New("搜索全部范围、租户或组织时，关键词需包含至少 3 个连续的中文、字母或数字；短关键词请先选择项目或文件夹")
 	ErrEnvironment  = errors.New("同一项目请指定有效环境，跨项目或租户、组织范围不能指定环境")
 	ErrScope        = errors.New("所选项目或文件夹不存在或已删除，请刷新范围")
+	ErrTag          = errors.New("所选标签已失效，请刷新后重试")
 	ErrDecrypt      = errors.New("decrypt secret value failed")
 	ErrTimeout      = errors.New("搜索超时，请缩小范围或补充关键词后重试")
 )
@@ -30,10 +31,31 @@ type Scope struct {
 type Input struct {
 	Scopes   []Scope
 	EnvList  []string
+	TagIDs   []uuid.UUID
 	Keyword  string
 	PageNum  int
 	PageSize int
 	UserID   string
+}
+
+// TagOptionInput 使用与密钥检索一致的范围和环境条件加载有效标签候选
+type TagOptionInput struct {
+	Scopes   []Scope
+	EnvList  []string
+	Keyword  string
+	PageNum  int
+	PageSize int
+	UserID   string
+}
+
+// TagOption 保留租户身份，避免跨租户时合并同名或同 code 标签
+type TagOption struct {
+	ID         uuid.UUID `json:"id"`
+	TenantID   uuid.UUID `json:"tenantId"`
+	TenantName string    `json:"tenantName"`
+	Code       string    `json:"code"`
+	Name       string    `json:"name"`
+	Remark     string    `json:"remark"`
 }
 
 // ResourceName 是路径中一个资源的身份和展示名称
@@ -84,6 +106,11 @@ type Searcher interface {
 	Search(context.Context, Input) (page.Response[Secret], error)
 }
 
+// TagOptionLister 为搜索页面提供当前范围内实际可用的标签
+type TagOptionLister interface {
+	ListTagOptions(context.Context, TagOptionInput) (page.Response[TagOption], error)
+}
+
 // Decryptor 复用系统主密钥模块，不读取配置中的静态 AES 值
 type Decryptor interface{ Decrypt(string) (string, error) }
 
@@ -110,4 +137,8 @@ type storedPage struct {
 
 type reader interface {
 	read(context.Context, Input) (storedPage, error)
+}
+
+type tagOptionReader interface {
+	listTagOptions(context.Context, TagOptionInput) (page.Response[TagOption], error)
 }

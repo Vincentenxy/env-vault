@@ -321,6 +321,7 @@ func New(ctx context.Context, cfg *config.Config, db *gorm.DB, redisClient redis
 			secretGroup.POST("/update", secretHandler.Update)
 			secretGroup.POST("/list", secretHandler.List)
 			secretGroup.POST("/search", searchHandler.Search)
+			secretGroup.POST("/search/tag/list", searchHandler.ListTags)
 			secretGroup.POST("/info", secretHandler.Detail)
 			secretGroup.POST("/history", secretHandler.History)
 			secretGroup.POST("/history/batch", secretHandler.BatchHistory)

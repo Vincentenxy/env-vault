@@ -29,11 +29,29 @@ func candidates(db *gorm.DB, in Input, matchText bool) *gorm.DB {
 		q = q.Where("e.code IN ?", in.EnvList)
 	}
 	q = applyPermissionFilter(q, in.UserID)
+	q = applyTagFilter(q, in.TagIDs)
 	if matchText && in.Keyword != "" {
 		pattern := containsPattern(in.Keyword)
 		q = q.Where("(s.key ILIKE ? ESCAPE '!' OR s.remark ILIKE ? ESCAPE '!')", pattern, pattern)
 	}
 	return q
+}
+
+// applyTagFilter 使用 EXISTS 保持密钥环境行数量不变，多标签匹配任意一个
+func applyTagFilter(q *gorm.DB, ids []uuid.UUID) *gorm.DB {
+	if len(ids) == 0 {
+		return q
+	}
+	return q.Where(`EXISTS (
+		SELECT 1
+		FROM secret_tag_relation AS search_relation
+		JOIN tag_info AS search_tag ON search_tag.id = search_relation.tag_id
+			AND search_tag.tenant_id = t.id AND search_tag.is_deleted = false
+		WHERE search_relation.target_type = 'group'
+			AND search_relation.target_id = s.group_id
+			AND search_relation.is_deleted = false
+			AND search_relation.tag_id IN ?
+	)`, ids)
 }
 
 // applyScopes 将范围条件整体放在括号内，多个父子范围命中同一记录也不会增加行数

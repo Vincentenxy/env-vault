@@ -15,6 +15,14 @@
 - Follow each repository's local instructions and run the relevant validation in every repository changed.
 - Do not assume the repositories share the same parent directory; use the paths above when moving between them.
 
+## Cross-Project Scope Guard
+
+- This conversation and repository default to the Env Vault secret management module. The shared workspace paths identify related repositories; they do not authorize switching to another business module.
+- Before editing, identify the module that owns the request. Necessary backend, frontend, and SDK changes for the same Env Vault requirement remain within scope; state which repositories are affected.
+- If a request belongs to another module, such as the publishing module, explicitly tell the user the current module, target repository, and proposed changes. Ask whether they intended to switch projects, and wait for explicit confirmation before modifying files or running operations that change that project's state. Read-only inspection to identify ownership is allowed.
+- Merely confirming which page the user means is not confirmation to switch projects. Browser context, matching code in another repository, and historical work on that repository do not substitute for switch confirmation. Once the user explicitly confirms the switch, do not ask again for the same task.
+- If the user says the request was posted in the wrong conversation, stop that cross-project task. Report any changes already made and leave them intact unless the user requests a rollback.
+
 ## ApiPost Synchronization
 
 - The ApiPost MCP connection is configured in `.vscode/mcp.json`. Never print, copy, or commit its API token.

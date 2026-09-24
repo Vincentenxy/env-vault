@@ -67,6 +67,18 @@ func TestInputRules(t *testing.T) {
 	if err != nil || len(in.Scopes) != 1 || len(in.EnvList) != 1 || in.Keyword != "DOMAIN" {
 		t.Fatalf("unexpected normalization: %+v %v", in, err)
 	}
+	tagID := uuid.New()
+	in, err = normalizeInput(Input{TagIDs: []uuid.UUID{tagID, tagID}, PageNum: 1, PageSize: 20, UserID: "reader"})
+	if err != nil || len(in.TagIDs) != 1 || in.TagIDs[0] != tagID {
+		t.Fatalf("unexpected tag normalization: %+v %v", in, err)
+	}
+	if _, err = normalizeInput(Input{TagIDs: []uuid.UUID{uuid.Nil}, PageNum: 1, PageSize: 20, UserID: "reader"}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("nil tag accepted: %v", err)
+	}
+	options, err := normalizeTagOptionInput(TagOptionInput{Keyword: "数", PageNum: 1, PageSize: 50, UserID: "reader"})
+	if err != nil || options.Keyword != "数" {
+		t.Fatalf("short tag option keyword rejected: %+v %v", options, err)
+	}
 }
 
 func TestSearchDoesNotReturnPartialPlaintextAndAuditsSafely(t *testing.T) {
