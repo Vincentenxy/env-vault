@@ -85,6 +85,7 @@ type WithProjectResponse struct {
 type OrganizationWithProjectsDTO struct {
 	ID          uuid.UUID           `json:"id"`
 	Name        string              `json:"name"`
+	TenantID    uuid.UUID           `json:"tenantId"`
 	Manager     string              `json:"manager"`
 	ProjectList []ProjectSummaryDTO `json:"projectList"`
 }
@@ -246,6 +247,7 @@ func (h *OrganizationHandler) WithProject(c *gin.Context) {
 		orgList = append(orgList, OrganizationWithProjectsDTO{
 			ID:          org.ID,
 			Name:        org.Name,
+			TenantID:    org.TenantID,
 			Manager:     org.Manager,
 			ProjectList: projects,
 		})

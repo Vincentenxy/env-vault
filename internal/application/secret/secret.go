@@ -51,6 +51,7 @@ type CreateItemInput struct {
 	FolderGroupID uuid.UUID
 	Key           string
 	Remark        string
+	TagIDList     []uuid.UUID
 	Values        []ValueItemInput
 }
 
@@ -190,11 +191,11 @@ type Service struct {
 	cipher        valueCryptor
 	nameResolver  app.NicknameResolver
 	auditRecorder auditdomain.Recorder
-	tags          tagdomain.GroupReader
+	tags          tagdomain.GroupRepository
 }
 
 // WithTags 为列表和详情批量加载整组标签
-func (s *Service) WithTags(tags tagdomain.GroupReader) *Service {
+func (s *Service) WithTags(tags tagdomain.GroupRepository) *Service {
 	s.tags = tags
 	return s
 }
@@ -373,6 +374,18 @@ func (s *Service) createOne(ctx context.Context, item CreateItemInput, operator 
 
 	if err := s.repo.CreateBatch(ctx, secrets); err != nil {
 		return nil, err
+	}
+	if len(item.TagIDList) > 0 {
+		if s.tags == nil {
+			return nil, ErrInvalidParam
+		}
+		group, err := s.tags.GetSecretGroup(ctx, groupID, true)
+		if err != nil {
+			return nil, err
+		}
+		if _, _, err := s.tags.ReplaceGroupTags(ctx, group, item.TagIDList, operator); err != nil {
+			return nil, err
+		}
 	}
 	return secrets, nil
 }

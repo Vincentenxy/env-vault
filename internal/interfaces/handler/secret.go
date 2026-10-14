@@ -36,6 +36,7 @@ type CreateSecretItemRequest struct {
 	FolderGroupID uuid.UUID                  `json:"folderGroupId"`
 	Key           string                     `json:"key"`
 	Remark        string                     `json:"remark"`
+	TagIDList     []uuid.UUID                `json:"tagIdList"`
 	Values        []CreateSecretValueRequest `json:"values"`
 }
 
@@ -172,6 +173,7 @@ func (h *SecretHandler) Create(c *gin.Context) {
 			FolderGroupID: item.FolderGroupID,
 			Key:           item.Key,
 			Remark:        item.Remark,
+			TagIDList:     item.TagIDList,
 			Values:        values,
 		})
 	}
@@ -463,7 +465,9 @@ func (h *SecretHandler) respondError(c *gin.Context, err error) {
 		errors.Is(err, secretapp.ErrFolderPatternInvalid),
 		errors.Is(err, secretapp.ErrDecrypt),
 		errors.Is(err, secretapp.ErrSecretNotUnderGroup),
-		errors.Is(err, secretapp.ErrVersionConflict):
+		errors.Is(err, secretapp.ErrVersionConflict),
+		errors.Is(err, tagdomain.ErrGroupNotFound),
+		errors.Is(err, tagdomain.ErrTagNotInTenant):
 		// 通用业务错误：统一 code=-1，msg 由 service 给出
 		response.Error(c, err.Error())
 	default:
