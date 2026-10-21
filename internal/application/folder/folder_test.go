@@ -608,7 +608,7 @@ func TestService_List_Success_PassesFilters(t *testing.T) {
 	}}
 	svc := NewService(folderRepo, envRepo)
 	_, total, err := svc.List(context.Background(), ListInput{
-		ProjectID: projectID, Code: "glo", Name: "全局", PageNum: 2, PageSize: 50,
+		ProjectID: projectID, Code: "glo", Name: "全局", Type: "common", PageNum: 2, PageSize: 50,
 	})
 	if err != nil {
 		t.Fatalf("expected nil err, got %v", err)
@@ -616,7 +616,7 @@ func TestService_List_Success_PassesFilters(t *testing.T) {
 	if total != 1 {
 		t.Fatalf("expected total 1, got %d", total)
 	}
-	if captured.Code != "glo" || captured.Name != "全局" {
+	if captured.Code != "glo" || captured.Name != "全局" || captured.Type != "common" {
 		t.Fatalf("filters lost: %+v", captured)
 	}
 	if captured.PageNum != 2 || captured.PageSize != 50 {
@@ -643,7 +643,7 @@ func TestService_List_DefaultPagination(t *testing.T) {
 	svc := NewService(folderRepo, envRepo)
 	// 字段校验与分页归一化均在 handler 层完成；service 直接透传 input
 	_, _, _ = svc.List(context.Background(), ListInput{ProjectID: projectID})
-	if captured.PageNum != 0 || captured.PageSize != 0 {
+	if captured.PageNum != 0 || captured.PageSize != 0 || captured.Type != "" {
 		t.Fatalf("service must not normalize page params, got %+v", captured)
 	}
 }
@@ -694,8 +694,16 @@ func TestService_List_ByParentFolderID(t *testing.T) {
 	if total != 1 {
 		t.Fatalf("expected total 1, got %d", total)
 	}
-	if captured.Code != "ob" || captured.Name != "OB" {
+	if captured.Code != "ob" || captured.Name != "OB" || captured.Type != "" {
 		t.Fatalf("filters lost: %+v", captured)
+	}
+}
+
+func TestService_List_RejectsUnknownType(t *testing.T) {
+	svc := NewService(&stubFolderRepo{}, &stubEnvRepo{})
+	_, _, err := svc.List(context.Background(), ListInput{ProjectID: uuid.New(), Type: "user"})
+	if !errors.Is(err, ErrInvalidType) {
+		t.Fatalf("expected ErrInvalidType, got %v", err)
 	}
 }
 

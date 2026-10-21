@@ -358,7 +358,7 @@ func TestFolderHandler_List_Success(t *testing.T) {
 	}
 	r := newFolderTestEngine(svc, testUser())
 	w := doJSONP(t, r, http.MethodPost, "/api/v1/folder/list", map[string]any{
-		"projectId": projectID, "code": "g", "name": "目录",
+		"projectId": projectID, "code": "g", "name": "目录", "type": "common",
 	})
 	body := decodeBody(t, w)
 	if body["code"].(float64) != 0 {
@@ -382,7 +382,7 @@ func TestFolderHandler_List_Success(t *testing.T) {
 	if list[1].(map[string]any)["folderCount"] != nil {
 		t.Fatalf("customer folderCount must be null: %+v", list[1])
 	}
-	if captured.ProjectID != projectID || captured.Code != "g" || captured.Name != "目录" {
+	if captured.ProjectID != projectID || captured.Code != "g" || captured.Name != "目录" || captured.Type != "common" {
 		t.Fatalf("filters lost: %+v", captured)
 	}
 	if captured.PageNum != 1 || captured.PageSize != 20 {

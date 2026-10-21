@@ -283,6 +283,9 @@ func (r *Repository) ListByGroupIDs(ctx context.Context, groupIDs []uuid.UUID, f
 	var total int64
 	countQ := persistence.TxDB(ctx, r.db).WithContext(ctx).Model(&folderPO{}).
 		Where("group_id IN ? AND is_deleted = false", groupIDs)
+	if filter.Type != "" {
+		countQ = countQ.Where("type = ?", filter.Type)
+	}
 	if filter.Code != "" {
 		countQ = countQ.Where("code ILIKE ?", "%"+filter.Code+"%")
 	}
@@ -298,6 +301,9 @@ func (r *Repository) ListByGroupIDs(ctx context.Context, groupIDs []uuid.UUID, f
 	codeQ := persistence.TxDB(ctx, r.db).WithContext(ctx).Model(&folderPO{}).
 		Select("DISTINCT code").
 		Where("group_id IN ? AND is_deleted = false", groupIDs)
+	if filter.Type != "" {
+		codeQ = codeQ.Where("type = ?", filter.Type)
+	}
 	if filter.Code != "" {
 		codeQ = codeQ.Where("code ILIKE ?", "%"+filter.Code+"%")
 	}
@@ -318,10 +324,13 @@ func (r *Repository) ListByGroupIDs(ctx context.Context, groupIDs []uuid.UUID, f
 
 	// 3. 取这些 code 对应的 group_id（每 code 取一个；多条同 code 共享同一 group_id，自然只返回 1 个）
 	var pageGroupIDs []uuid.UUID
-	if err := persistence.TxDB(ctx, r.db).WithContext(ctx).Model(&folderPO{}).
+	groupQ := persistence.TxDB(ctx, r.db).WithContext(ctx).Model(&folderPO{}).
 		Select("DISTINCT group_id").
-		Where("group_id IN ? AND code IN ? AND is_deleted = false", groupIDs, codes).
-		Pluck("group_id", &pageGroupIDs).Error; err != nil {
+		Where("group_id IN ? AND code IN ? AND is_deleted = false", groupIDs, codes)
+	if filter.Type != "" {
+		groupQ = groupQ.Where("type = ?", filter.Type)
+	}
+	if err := groupQ.Pluck("group_id", &pageGroupIDs).Error; err != nil {
 		return nil, 0, err
 	}
 
@@ -336,7 +345,7 @@ func (r *Repository) ListByGroupIDs(ctx context.Context, groupIDs []uuid.UUID, f
 		`WITH representative AS (
              SELECT DISTINCT ON (group_id) *
              FROM folder_info
-             WHERE group_id IN ? AND is_deleted = false
+             WHERE group_id IN ? AND is_deleted = false AND (? = '' OR type = ?)
              ORDER BY group_id ASC, update_at DESC, create_at ASC
          )
          SELECT representative.*,
@@ -348,7 +357,7 @@ func (r *Repository) ListByGroupIDs(ctx context.Context, groupIDs []uuid.UUID, f
                 ELSE NULL END AS folder_count
          FROM representative
          ORDER BY representative.group_id ASC`,
-		pageGroupIDs,
+		pageGroupIDs, filter.Type, filter.Type,
 	).Scan(&pos).Error
 	if err != nil {
 		return nil, 0, err

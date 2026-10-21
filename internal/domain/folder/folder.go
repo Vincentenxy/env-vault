@@ -43,6 +43,7 @@ type Folder struct {
 
 // ListFilter 文件夹列表查询过滤条件
 type ListFilter struct {
+	Type     string // 目录类别精确匹配，为空时查询全部类别
 	Code     string // 编码模糊匹配（可选）
 	Name     string // 名称模糊匹配（可选）
 	PageNum  int

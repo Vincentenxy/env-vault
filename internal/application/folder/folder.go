@@ -74,6 +74,7 @@ type DeleteInput struct {
 type ListInput struct {
 	ProjectID      uuid.UUID
 	ParentFolderID *uuid.UUID
+	Type           string
 	Code           string
 	Name           string
 	PageNum        int
@@ -457,6 +458,9 @@ func (s *Service) List(ctx context.Context, in ListInput) ([]*folderdomain.Folde
 }
 
 func (s *Service) list(ctx context.Context, in ListInput) ([]*folderdomain.Folder, int64, error) {
+	if in.Type != "" && in.Type != folderdomain.TypeCommon && in.Type != folderdomain.TypeCustomer {
+		return nil, 0, ErrInvalidType
+	}
 	var groupIDs []uuid.UUID
 	if in.ParentFolderID != nil && *in.ParentFolderID != uuid.Nil {
 		// 子目录查询
@@ -490,6 +494,7 @@ func (s *Service) list(ctx context.Context, in ListInput) ([]*folderdomain.Folde
 
 	// 按 group_id 集合分页查询（每 group_id 一条代表记录）
 	folders, total, err := s.repo.ListByGroupIDs(ctx, groupIDs, folderdomain.ListFilter{
+		Type:     in.Type,
 		Code:     in.Code,
 		Name:     in.Name,
 		PageNum:  in.PageNum,

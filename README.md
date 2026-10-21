@@ -487,15 +487,23 @@ logger.Error(ctx, "error msg", ...)   // 错误
 
 ## 认证说明
 
+本地与外部认证网关的完整链路、前端运行时入口、配置切换和错误处理见 [登录认证设计](design/authentication.md)
+
 ### 认证机制
 
 - 认证方式：请求头携带 `Authorization: Bearer <JWT>`
-- 验签方式：**RSA 公钥验签**（仅允许 RS256/384/512，防止算法降级攻击），公钥通过配置注入：
+- 验签方式：**RSA 公钥验签，仅允许 RS256**，按已启用的本地和公司签发方校验 issuer、audience、exp 与可选 kid，公钥通过对应配置注入：
 
 ```yaml
 # configs/config.yaml
 auth:
-  jwt-public-key: <base64 编码的 DER 公钥，或 PEM 文本>
+  company:
+    enabled: true
+    issuer: "<公司 JWT 的 iss>"
+    audience: "<公司 JWT 的 aud>"
+    key_id: ""
+    public_key: "<base64 编码的 DER 公钥，或 PEM 文本>"
+    public_key_file: ""
 ```
 
 公钥兼容两种格式：base64 编码的 DER（Java 侧常见输出）和 PEM 文本（含 `-----BEGIN PUBLIC KEY-----` 标记）。
@@ -516,7 +524,7 @@ HTTP 401
 
 | User 字段 | 来源 | 说明 |
 |-----------|------|------|
-| `UserID` | claims.`staffuserid` | 用户 ID |
+| `UserID` | claims.`staffuserid`，为空时取 `sub` | 字符串用户 ID，与数据库 user_id 一致 |
 | `Name` | claims.`name` | 用户姓名 |
 | `Jwt` | 原始 token | 用于向下游服务透传 |
 | `Cookie` | 请求头 Cookie | 用于向下游服务透传 |

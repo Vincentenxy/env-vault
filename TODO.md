@@ -1,5 +1,14 @@
 # 待办事项
 
+## 外部登录认证
+
+- [x] 记录认证网关 Cookie 到 JWT、后端验签与用户核验、主密钥等待和前端失效重登的完整链路，见 design/authentication.md
+- [x] 合并部署清单加入前端认证 ConfigMap，登录及返回参数可配置，同一镜像可切换入口
+- [ ] 确认当前公司的统一退出地址与 JWT 刷新策略，真实环境验证后更新配置
+- [ ] 后续新认证体系如需自定义 claim 映射、JWKS、OIDC 直连或 opaque token，单独补充协议适配，当前后端仍限定 RS256 与 staffuserid/sub
+
+最近核对：2026-10-20，依据本地前后端代码、测试文件和部署清单更新状态，未验证运行集群和业务数据库的实际部署状态
+
 ## 标签与搜索
 
 - [x] 租户标签定义、按 Secret groupId 绑定和解绑、密钥列表展示与目录内标签筛选，暂不支持单环境标签
@@ -14,7 +23,8 @@
 
 ## 部署与用户
 
-- [ ] 部署一套高可用pgsql: [cnpg](https://cloudnative-pg.io/documentation/1.20/)
+- [x] 提供 CloudNativePG 部署清单，包含应用数据库及所有者初始化和读写服务入口，见 `deploy/k8s/pgsql.yaml`
+- [ ] 完成 CloudNativePG 多副本高可用部署和故障切换验收，当前清单 `spec.instances: 1`，仅单实例配置，不能视为已完成高可用部署
 
 - [ ] 生产入口将 ingress-nginx Service从单节点域名加 NodePort切换为 LoadBalancer、虚拟 IP或其他多节点入口。当前 Controller已有三个跨节点副本，但 `efficient-poc.qiuer.net` 只解析到一个控制节点，该节点不可达时外部流量仍会中断。
 

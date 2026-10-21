@@ -83,6 +83,7 @@ type DetailFolderRequest struct {
 type ListFolderRequest struct {
 	ProjectID      uuid.UUID  `json:"projectId"`
 	ParentFolderID *uuid.UUID `json:"parentFolderId,omitempty"`
+	Type           string     `json:"type,omitempty"` // common / customer，不传时查询全部类别
 	Code           string     `json:"code,omitempty"`
 	Name           string     `json:"name,omitempty"`
 	page.Request
@@ -251,6 +252,7 @@ func (h *FolderHandler) List(c *gin.Context) {
 	folders, total, err := h.svc.List(withHTTPAuditContext(c), folderapp.ListInput{
 		ProjectID:      req.ProjectID,
 		ParentFolderID: req.ParentFolderID,
+		Type:           req.Type,
 		Code:           req.Code,
 		Name:           req.Name,
 		PageNum:        req.PageNum,

@@ -56,10 +56,10 @@ type LocalAuthConfig struct {
 	Issuer         string        `mapstructure:"issuer"`
 	Audience       string        `mapstructure:"audience"`
 	KeyID          string        `mapstructure:"key_id"`
-	PrivateKey     string        `mapstructure:"private_key"`
-	PrivateKeyFile string        `mapstructure:"private_key_file"`
-	PublicKey      string        `mapstructure:"public_key"`
-	PublicKeyFile  string        `mapstructure:"public_key_file"`
+	PrivateKey     string        `mapstructure:"private_key"`      // 内联 PEM 或 Base64 DER 私钥
+	PrivateKeyFile string        `mapstructure:"private_key_file"` // 可选私钥文件路径，配置后优先于内联内容
+	PublicKey      string        `mapstructure:"public_key"`       // 内联 PEM 或 Base64 DER 公钥
+	PublicKeyFile  string        `mapstructure:"public_key_file"`  // 可选公钥文件路径，配置后优先于内联内容
 	AccessTokenTTL time.Duration `mapstructure:"access_token_ttl"`
 }
 

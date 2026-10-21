@@ -1,5 +1,5 @@
 # Env Vault three-replica StatefulSet.
-# Replace every REPLACE_ME value and the example PostgreSQL/Redis service names before applying.
+# Application configuration and JWT keys are stored in ConfigMaps
 # Public ingress sends API traffic through Web Nginx, which falls back to Pod 0 only when no Ready backend exists.
 
 apiVersion: v1
@@ -23,36 +23,89 @@ metadata:
   name: env-vault-config
   namespace: env-vault
 data:
+  # 应用和就绪探针从同一配置项读取节点通信 Token
+  master-key-peer-token: "ES1Gu2txOxcvbPqwcPs+cMd8CCQOE5a7JVczPy0kx7u2mwjqtisWT0tR6WFv4TKb"
   config.yaml: |
     server:
       port: 8090
       mode: release
-
     app:
       name: env-vault
       version: 0.0.1
-
     auth:
       local:
-        enabled: true
+        enabled: false
         issuer: env-vault
         audience: env-vault-web
         key_id: env-vault-local-v1
-        private_key_file: /app/secrets/jwt/jwt-private.pem
-        public_key_file: /app/secrets/jwt/jwt-public.pem
+        # 直接配置 PEM 公私钥，不再挂载 JWT 文件
+        private_key: |
+          -----BEGIN PRIVATE KEY-----
+          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
+          MvjR/yhR7TSvSqhndih+dGw=
+          -----END PRIVATE KEY-----
+        public_key: |
+          -----BEGIN PUBLIC KEY-----
+          MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEA0NaDSMxvk8xlcxZKA98d
+          w1oybOvR/cjIyA1CiZYD5zlp6JqbzVXz3Djq/OqDs6AC1VruKGb9O66Tx8BJbuWg
+          hSHnJXmAdcOAP9gKXXO9OfzeiQNfwYOzyUbinH7hCHlJJ+6ZLwdfeZTNq5rkpsrf
+          R0PwxCjaa25C3Lyb7EOoI0ACaNtA0f4JEXbiq4QeE96qx16vPf+3DtF0peLGdvDb
+          iiHLy0YYiQp5CFAS7n8Grfse2xf9zFcOORQZtQ+oP8U1TWhxNmLmBAA0bpxgCUZ+
+          1bteQ6TjzCmr1rKVpzYlyg1/dqXXEvJ0VaCyowNM8m8BS5W7TuQNy7SuU5AURUJD
+          nXsCvYZrRjkY3gdTKgqmN7RnwWf0L84IKX5CZx7P6f3DkOn4W1glcITswV1ZN0oL
+          Ym9485px2ZahT6Dj7KuDcLjV+rn8/aNwlfRbfPKr6/lic7adqDDF/VKvVKEbCpMN
+          KXrWpwbJr3K+lai5rbUROpY53fXze7WZY9xQsc34xI4lAgMBAAE=
+          -----END PUBLIC KEY-----
         access_token_ttl: 2h
       company:
-        enabled: false
-        issuer: ""
-        audience: ""
+        enabled: true
+        issuer: "https://eiam.qiuer.net/auth/oidc/62F295C3C382499EA2124E6C8B080B8E"
+        audience: "ZmEyMjBjNWFhNmI2NDhlOWE4NzYwNjkyNjQ5ZWQ4NTg"
         key_id: ""
-        public_key: ""
+        public_key: "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAj4uJ5IOD52X+qQwKa/rfctviCqrKTQWFsEKUDo9EDAH5KUziS/1O5qWe3zhtfCBGAEcCnELW3bpQHaSgghazVVXesdnGqIDQZSbMuemt7UXLsp72qDppR/x94o67srTo9Z3Wz0MsrR3/dxArFZuYGW7v8z8BK1UFLLSgA+LJu0YEcrhgVMiMtugOcjZ5NbRGXpo4fFbnIMtslr6xhOpA7zB8ycUjomHZlbakbYQU7tnHuj3Oyoe9BNUEueSVyPTiK3rwUaOl1EAJ8oBd380xVi01yLRriIIQPmCY2r9/RZJ8mUFFn6DlsF3rg5aPuVGHkCJIXAYrOdiruNcEcOn8FwIDAQAB"
         public_key_file: ""
 
     security:
-      # Keep false in a cluster. The encryption key is injected from Secret.
+      # 集群中保持关闭，测试密钥仅在显式启用配置回退时使用
       allow_config_key_fallback: false
-      encryption_key: ""
+      encryption_key: "Pk6V+TnUEZO6R8WOklCSrI/iM4QKHc55VQQrrptmVfk="
+      # 由环境变量 SECURITY_MASTER_KEY_PEER_TOKEN 提供
       master_key_peer_token: ""
       master_key_peer_recovery:
         enabled: true
@@ -73,13 +126,22 @@ data:
           path: /internal/v1/masterKey/ready
 
     database:
+    # 本地配置
     #  host: "192.168.1.110"
-    #    host: "127.0.0.1"
-      host: postgres-rw.postgres.svc.cluster.local
+    #  host: "127.0.0.1"
+      
+    # 集群内配置
+    #  host: postgres-rw.postgres.svc.cluster.local
+    #  user: "env_vault"
+    #  password: "123456"
+    #  name: "env_vault"
+
+    # 开发配置
+      host: 10.77.121.178
       port: 5432
-      user: "env_vault"
-      password: "123456"
-      name: "env_vault"
+      user: "envvault"
+      password: "EnvVault@178#"
+      name: "envvault"
       ssl_mode: "disable"
       max_open_conns: 25
       max_idle_conns: 5
@@ -108,84 +170,7 @@ data:
       dial_timeout: 5s
       read_timeout: 3s
       write_timeout: 3s
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: env-vault-runtime
-  namespace: env-vault
-type: Opaque
-stringData:
-  # Replace all values before applying. Do not commit real values to this file.
-  # 必须与 pg-poc 命名空间下 pg-poc-app Secret 的 password 保持一致
-  # Kubernetes Secret 不能被其他命名空间的 Pod 直接引用，因此在此注入副本
-  database-password: "123456"
-  redis-password: ""
-  # 当前值仅用于本地开发和 POC 测试，生产环境启用分片加载后删除该字段和对应环境变量
-  encryption-key: "Pk6V+TnUEZO6R8WOklCSrI/iM4QKHc55VQQrrptmVfk="
-  master-key-peer-token: "ES1Gu2txOxcvbPqwcPs+cMd8CCQOE5a7JVczPy0kx7u2mwjqtisWT0tR6WFv4TKb"
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: env-vault-jwt
-  namespace: env-vault
-type: Opaque
-stringData:
-  # Replace with the shared local JWT key pair before applying.
-  jwt-private.pem: |
-    -----BEGIN PRIVATE KEY-----
-    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
-    MvjR/yhR7TSvSqhndih+dGw=
-    -----END PRIVATE KEY-----
-  jwt-public.pem: |
-    -----BEGIN PUBLIC KEY-----
-    MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEA0NaDSMxvk8xlcxZKA98d
-    w1oybOvR/cjIyA1CiZYD5zlp6JqbzVXz3Djq/OqDs6AC1VruKGb9O66Tx8BJbuWg
-    hSHnJXmAdcOAP9gKXXO9OfzeiQNfwYOzyUbinH7hCHlJJ+6ZLwdfeZTNq5rkpsrf
-    R0PwxCjaa25C3Lyb7EOoI0ACaNtA0f4JEXbiq4QeE96qx16vPf+3DtF0peLGdvDb
-    iiHLy0YYiQp5CFAS7n8Grfse2xf9zFcOORQZtQ+oP8U1TWhxNmLmBAA0bpxgCUZ+
-    1bteQ6TjzCmr1rKVpzYlyg1/dqXXEvJ0VaCyowNM8m8BS5W7TuQNy7SuU5AURUJD
-    nXsCvYZrRjkY3gdTKgqmN7RnwWf0L84IKX5CZx7P6f3DkOn4W1glcITswV1ZN0oL
-    Ym9485px2ZahT6Dj7KuDcLjV+rn8/aNwlfRbfPKr6/lic7adqDDF/VKvVKEbCpMN
-    KXrWpwbJr3K+lai5rbUROpY53fXze7WZY9xQsc34xI4lAgMBAAE=
-    -----END PUBLIC KEY-----
+
 ---
 apiVersion: v1
 kind: Service
@@ -308,42 +293,18 @@ spec:
               containerPort: 8090
               protocol: TCP
           env:
-            - name: SERVER_PORT
-              value: "8090"
-            - name: DATABASE_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: env-vault-runtime
-                  key: database-password
-            - name: REDIS_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: env-vault-runtime
-                  key: redis-password
-            - name: SECURITY_ENCRYPTION_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: env-vault-runtime
-                  key: encryption-key
             - name: SECURITY_MASTER_KEY_PEER_TOKEN
               valueFrom:
-                secretKeyRef:
-                  name: env-vault-runtime
+                configMapKeyRef:
+                  name: env-vault-config
                   key: master-key-peer-token
             - name: POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            - name: POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
           volumeMounts:
             - name: config
               mountPath: /app/configs
-              readOnly: true
-            - name: jwt-keys
-              mountPath: /app/secrets/jwt
               readOnly: true
           securityContext:
             allowPrivilegeEscalation: false
@@ -393,63 +354,9 @@ spec:
           configMap:
             name: env-vault-config
             defaultMode: 0444
-        - name: jwt-keys
-          secret:
-            secretName: env-vault-jwt
-            defaultMode: 0640
-# ---
-# Gateway API 配置暂时停用，Gateway API 调通后删除注释恢复
-# apiVersion: gateway.networking.k8s.io/v1
-# kind: Gateway
-# metadata:
-#   name: env-vault-higress-gateway
-#   namespace: higress-system
-# spec:
-#   gatewayClassName: higress
-#   listeners:
-#     - name: http-env-vault
-#       hostname: efficient-poc.qiuer.net
-#       protocol: HTTP
-#       port: 80
-#       allowedRoutes:
-#         kinds:
-#           - kind: HTTPRoute
-#         namespaces:
-#           from: Selector
-#           selector:
-#             matchLabels:
-#               env-vault.io/gateway-access: "true"
-# ---
-# apiVersion: gateway.networking.k8s.io/v1
-# kind: HTTPRoute
-# metadata:
-#   name: env-vault
-#   namespace: env-vault
-# spec:
-#   parentRefs:
-#     - name: env-vault-higress-gateway
-#       namespace: higress-system
-#       sectionName: http-env-vault
-#   hostnames:
-#     - efficient-poc.qiuer.net
-#   rules:
-#     - matches:
-#         - path:
-#             type: PathPrefix
-#             value: /envvault/api
-#       filters:
-#         - type: URLRewrite
-#           urlRewrite:
-#             path:
-#               type: ReplacePrefixMatch
-#               replacePrefixMatch: /api
-#       backendRefs:
-#         - group: ""
-#           kind: Service
-#           name: env-vault
-#           port: 80
-#           weight: 1
-
+            items:
+              - key: config.yaml
+                path: config.yaml
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -504,6 +411,23 @@ spec:
 # EnvVault Web deployment.
 # Build and push harbor.gtjaqh.net/lucy-dev/env-vault-web:0.1.0 before applying.
 # The env-vault namespace and backend Service are created by the backend manifest.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: env-vault-web-auth
+  namespace: env-vault
+data:
+  # Public settings only; JWT keys and gateway credentials belong on the backend
+  auth-config.json: |
+    {
+      "mode": "company",
+      "loginUrl": "/tologin.do",
+      "returnUrlParam": "url",
+      "loginLabel": "公司认证",
+      "logoutUrl": "",
+      "logoutReturnUrlParam": "url"
+    }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -576,6 +500,11 @@ spec:
               value: http://env-vault
             - name: API_BOOTSTRAP_UPSTREAM
               value: http://env-vault-bootstrap:8090
+          volumeMounts:
+            - name: auth-config
+              mountPath: /usr/share/nginx/html/auth-config.json
+              subPath: auth-config.json
+              readOnly: true
           resources:
             requests:
               cpu: 20m
@@ -583,6 +512,10 @@ spec:
             limits:
               cpu: 250m
               memory: 128Mi
+      volumes:
+        - name: auth-config
+          configMap:
+            name: env-vault-web-auth
 ---
 apiVersion: v1
 kind: Service
@@ -641,3 +574,87 @@ spec:
                 name: env-vault-web
                 port:
                   number: 80
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: envvault-web-higress
+  namespace: env-vault
+  annotations:
+    higress.io/use-regex: 'true'
+    higress.io/rewrite-target: /$2
+spec:
+  ingressClassName: higress
+  tls:
+    - hosts:
+        - efficient.qiuer.net
+      secretName: qiuer-net
+  rules:
+    - host: efficient.qiuer.net
+      http:
+        paths:
+          - path: /envvault(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: env-vault-web
+                port:
+                  number: 80
+---
+# Register the HTTPS endpoint at https://efficient.qiuer.net/oauth2/auth
+# Only the McpBridge named default in the Higress namespace is watched
+# If default already contains other registries, merge these entries into its list
+apiVersion: networking.higress.io/v1
+kind: McpBridge
+metadata:
+  name: default
+  namespace: higress-system
+spec:
+  registries:
+    - name: env-vault-auth
+      type: dns
+      domain: efficient.qiuer.net
+      port: 443
+      protocol: HTTPS
+      sni: efficient.qiuer.net
+---
+# Authenticate all requests matched by the Env Vault Higress ingress
+# The /oauth2 routes must remain outside this protected ingress to avoid recursion
+#apiVersion: extensions.higress.io/v1alpha1
+#kind: WasmPlugin
+#metadata:
+#  name: env-vault-ext-auth
+#  namespace: higress-system
+#spec:
+#  url: oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/ext-auth:1.0.0
+#  phase: AUTHN
+#  priority: 360
+#  failStrategy: FAIL_CLOSE
+#  defaultConfigDisable: true
+#  matchRules:
+#    - ingress:
+#        - env-vault/envvault-web-higress
+#      configDisable: false
+#      config:
+#        failure_mode_allow: false
+#        status_on_error: 403
+#        http_service:
+#          endpoint_mode: forward_auth
+#          timeout: 3000
+#          endpoint:
+#            service_name: env-vault-auth.dns
+#            service_port: 443
+#            service_host: efficient.qiuer.net
+#            path: /oauth2/auth
+#            request_method: GET
+#          # Forward the browser session and existing credentials to auth
+#          authorization_request:
+#            allowed_headers:
+#              - exact: cookie
+#              - exact: authorization
+#          # Copy auth response headers into the upstream business request
+#          authorization_response:
+#            allowed_upstream_headers:
+#              - exact: x-credential-identifier
+#              - exact: authorization
