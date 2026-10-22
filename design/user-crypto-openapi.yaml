@@ -1,0 +1,208 @@
+openapi: 3.0.3
+info:
+  title: Env Vault Crypto API
+  version: 0.2.0
+  description: |
+    Stateless text encryption with self, authenticated or users access modes embedded in the ciphertext.
+    No policy table. Dynamic viewer permissions belong to the caller's business backend.
+    authenticated permits all authenticated accounts, including accounts in other tenants.
+    Fine-grained API authorization is not yet integrated. Tokens may change without changing identity.
+    Ciphertext is stored by the caller. No business plaintext or ciphertext is persisted by this API.
+    Existing authentication, account locking, PAT revocation and master-key readiness apply.
+    Both operations require authentication. No public endpoints or legacy user/crypto routes are provided.
+    Audit persistence is required before returning results. Production callers must use HTTPS.
+servers:
+  - url: /api/v1
+security:
+  - BearerAuth: []
+paths:
+  /crypto/encrypt:
+    post:
+      operationId: encryptUserText
+      tags: [crypto]
+      summary: Encrypt text with an immutable embedded access rule
+      description: |
+        plaintext is required but may be empty; maximum 65536 UTF-8 bytes, not characters.
+        JSON request body limit is 512 KiB, including escaping. Every encryption uses a fresh nonce.
+        Owner identity is taken exclusively from authentication. Unknown fields are rejected.
+        Default mode is self. users requires 1-100 allowedUserIds, with no implicit owner access.
+        self/authenticated reject nonempty allowedUserIds. Duplicate IDs are deduplicated.
+        IDs are not checked for existence. Changing access rules requires re-encryption.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [plaintext]
+              properties:
+                plaintext:
+                  type: string
+                  maxLength: 65536
+                  description: At most 65536 UTF-8 bytes; multibyte text has a lower character limit.
+                  example: hello env-vault
+                decryptMode:
+                  type: string
+                  enum: [self, authenticated, users, '']
+                  default: self
+                  description: Empty or omitted means self. authenticated allows any authenticated account.
+                allowedUserIds:
+                  type: array
+                  maxItems: 100
+                  items:
+                    type: string
+                    minLength: 1
+                    maxLength: 128
+                  description: Required and nonempty for users; IDs must be at most 128 UTF-8 bytes with no surrounding whitespace or control characters. Owner must be listed to decrypt. Nonempty list forbidden for other modes.
+            examples:
+              self:
+                value: {plaintext: hello env-vault, decryptMode: self}
+              businessAuthorization:
+                value: {plaintext: hello env-vault, decryptMode: authenticated}
+              selectedUsers:
+                value: {plaintext: hello env-vault, decryptMode: users, allowedUserIds: [user-id-001, user-id-002]}
+      responses:
+        '200':
+          description: Success code 0; business failure -1 or master-key not ready -2, with data null.
+          headers:
+            Cache-Control:
+              schema: {type: string}
+              description: Handler responses use no-store, private.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/EncryptSuccess'
+                  - $ref: '#/components/schemas/BusinessFailure'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /crypto/decrypt:
+    post:
+      operationId: decryptUserText
+      tags: [crypto]
+      summary: Verify integrity and embedded access rules before returning text
+      description: |
+        Accepts evu:v2 ciphertext with encrypted owner, access mode, allowed IDs and content.
+        Legacy evu:v1 remains restricted to the original authenticated account.
+        Access rules cannot be overridden in this request. All modes require authentication.
+        Rejects Secret storage envelopes, tampering, unauthorized callers and unknown versions.
+        Invalid ciphertext and access errors share a single error message. Integrity checking cannot repair damaged data.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [ciphertext]
+              properties:
+                ciphertext:
+                  type: string
+                  maxLength: 349613
+                  pattern: '^evu:v[12]:[A-Za-z0-9_-]+$'
+                  description: Complete opaque value returned by encrypt; no Base64 padding or whitespace. Legacy v1 maximum remains 87426 characters.
+      responses:
+        '200':
+          description: Success code 0; business failure -1 or master-key not ready -2, with data null.
+          headers:
+            Cache-Control:
+              schema: {type: string}
+              description: Handler responses use no-store, private.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/DecryptSuccess'
+                  - $ref: '#/components/schemas/BusinessFailure'
+              examples:
+                success:
+                  value: {code: 0, msg: success, data: {plaintext: hello env-vault}}
+                invalidCiphertext:
+                  value: {code: -1, msg: invalid ciphertext or current user is not allowed to decrypt, data: null}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '500': {$ref: '#/components/responses/InternalError'}
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Existing JWT or active personal access token; authenticated identity must satisfy the embedded rule.
+  schemas:
+    EncryptSuccess:
+      type: object
+      required: [code, msg, data]
+      properties:
+        code: {type: integer, enum: [0]}
+        msg: {type: string, enum: [success]}
+        data:
+          type: object
+          required: [ciphertext]
+          properties:
+            ciphertext:
+              type: string
+              pattern: '^evu:v2:[A-Za-z0-9_-]+$'
+              maxLength: 349613
+    DecryptSuccess:
+      type: object
+      required: [code, msg, data]
+      properties:
+        code: {type: integer, enum: [0]}
+        msg: {type: string, enum: [success]}
+        data:
+          type: object
+          required: [plaintext]
+          properties:
+            plaintext: {type: string, maxLength: 65536}
+    BusinessFailure:
+      type: object
+      required: [code, msg, data]
+      properties:
+        code: {type: integer, enum: [-1, -2]}
+        msg: {type: string}
+        data: {nullable: true, enum: [null]}
+    HTTPFailure:
+      type: object
+      required: [code, msg, data]
+      properties:
+        code: {type: integer, enum: [400, 401, 403, 413, 500]}
+        msg: {type: string}
+        data: {nullable: true, enum: [null]}
+  responses:
+    BadRequest:
+      description: Malformed JSON, missing required field, wrong field type, unknown field or trailing JSON.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/HTTPFailure'}
+          example: {code: 400, msg: Bad Request, data: null}
+    Unauthorized:
+      description: Missing, expired, revoked or invalid authentication.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/HTTPFailure'}
+          example: {code: 401, msg: Unauthorized, data: null}
+    Forbidden:
+      description: The authenticated account is locked.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/HTTPFailure'}
+          example: {code: 403, msg: 用户被锁定, data: null}
+    TooLarge:
+      description: JSON request body exceeds 512 KiB.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/HTTPFailure'}
+          example: {code: 413, msg: Request Entity Too Large, data: null}
+    InternalError:
+      description: Existing authentication or its dependencies are unavailable.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/HTTPFailure'}
+          example: {code: 500, msg: internal error, data: null}

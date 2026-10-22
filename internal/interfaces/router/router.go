@@ -25,6 +25,7 @@ import (
 	tenantapp "env-vault/internal/application/tenant"
 	userapp "env-vault/internal/application/user"
 	tokenapp "env-vault/internal/application/useraccesstoken"
+	cryptoapp "env-vault/internal/application/usercrypto"
 	infraauth "env-vault/internal/infrastructure/auth"
 	usercache "env-vault/internal/infrastructure/cache/user"
 	"env-vault/internal/infrastructure/config"
@@ -195,6 +196,7 @@ func New(ctx context.Context, cfg *config.Config, db *gorm.DB, redisClient redis
 	if personalTokenSvc != nil {
 		personalTokenHandler = handler.NewUserAccessTokenHandler(personalTokenSvc)
 	}
+	userCryptoHandler := handler.NewUserCryptoHandler(cryptoapp.NewService(masterKeyManager, auditSvc))
 	auditHandler := handler.NewAuditHandler(auditSvc)
 
 	// 初始化 JWT 认证中间件（加载配置中的公钥）
@@ -222,6 +224,12 @@ func New(ctx context.Context, cfg *config.Config, db *gorm.DB, redisClient redis
 		authGroup := auth.Group("/auth")
 		{
 			authGroup.GET("/me", userHandler.Me)
+		}
+
+		cryptoGroup := auth.Group("/crypto")
+		{
+			cryptoGroup.POST("/encrypt", userCryptoHandler.Encrypt)
+			cryptoGroup.POST("/decrypt", userCryptoHandler.Decrypt)
 		}
 
 		userGroup := auth.Group("/user")
