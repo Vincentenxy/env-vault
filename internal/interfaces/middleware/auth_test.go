@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 
+	infraauth "env-vault/internal/infrastructure/auth"
 	"env-vault/pkg/response"
 )
 
@@ -110,6 +111,71 @@ func TestAuth_PersonalTokenRequiresActiveDatabaseRecord(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized || checker.userID != "user-1" || checker.jti == "" {
 		t.Fatalf("status=%d checkedUser=%q checkedJTI=%q", w.Code, checker.userID, checker.jti)
+	}
+}
+
+// TestAuth_PersonalTokensRemainUsableWithoutLocalLogin 验证密码登录关闭后公司身份与 PAT 仍可访问业务接口
+func TestAuth_PersonalTokensRemainUsableWithoutLocalLogin(t *testing.T) {
+	localKey, localPublic := testRSAKeyPair(t)
+	companyKey, companyPublic := testRSAKeyPair(t)
+	issuer, err := infraauth.NewJWTIssuer(localKey, "env-vault-test", "env-vault-web", "test-key", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localToken, _, err := issuer.Issue("user-1", "Tester")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pat, jti, err := issuer.IssuePersonalAccessToken("user-1", "Tester", time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	companyJWT := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"staffuserid": "user-1", "iss": "company", "aud": "company-web", "exp": time.Now().Add(time.Hour).Unix(),
+	})
+	companyToken, err := companyJWT.SignedString(companyKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name         string
+		token        string
+		localEnabled bool
+		active       bool
+		blocked      bool
+		wantStatus   int
+		checkPAT     bool
+	}{
+		{name: "company identity", token: companyToken, wantStatus: http.StatusNoContent},
+		{name: "active PAT", token: pat, active: true, wantStatus: http.StatusNoContent, checkPAT: true},
+		{name: "revoked PAT", token: pat, wantStatus: http.StatusUnauthorized, checkPAT: true},
+		{name: "blocked PAT owner", token: pat, active: true, blocked: true, wantStatus: http.StatusForbidden},
+		{name: "disabled local login token", token: localToken, wantStatus: http.StatusUnauthorized},
+		{name: "enabled local login token", token: localToken, localEnabled: true, wantStatus: http.StatusNoContent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			checker := &stubPersonalTokenChecker{active: tc.active}
+			auth, err := AuthWithAudit([]JWTProvider{
+				{Issuer: "env-vault-test", Audience: "env-vault-web", KeyID: "test-key", PublicKey: localPublic, PersonalTokensOnly: !tc.localEnabled},
+				{Issuer: "company", Audience: "company-web", PublicKey: companyPublic},
+			}, &stubBlockChecker{blocked: tc.blocked}, nil, checker)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gin.SetMode(gin.TestMode)
+			r := gin.New()
+			r.POST("/api/v1/user/token/list", auth, func(c *gin.Context) { c.Status(http.StatusNoContent) })
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/user/token/list", nil)
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", w.Code, tc.wantStatus)
+			}
+			if tc.checkPAT && (checker.jti != jti.String() || checker.userID != "user-1") {
+				t.Error("PAT must pass database revocation and ownership checks")
+			}
+		})
 	}
 }
 

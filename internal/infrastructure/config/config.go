@@ -46,13 +46,13 @@ type AppConfig struct {
 
 // AuthConfig 认证配置
 type AuthConfig struct {
-	Local   LocalAuthConfig   `mapstructure:"local"`   // EnvVault 本地用户名密码认证
+	Local   LocalAuthConfig   `mapstructure:"local"`   // EnvVault 登录及 PAT 签发配置
 	Company CompanyAuthConfig `mapstructure:"company"` // 公司统一认证 JWT 验签配置
 }
 
 // LocalAuthConfig EnvVault 本地 JWT 签发和验签配置
 type LocalAuthConfig struct {
-	Enabled        bool          `mapstructure:"enabled"`
+	Enabled        bool          `mapstructure:"enabled"` // 仅控制本地密码登录及其登录 Token，PAT 始终启用
 	Issuer         string        `mapstructure:"issuer"`
 	Audience       string        `mapstructure:"audience"`
 	KeyID          string        `mapstructure:"key_id"`

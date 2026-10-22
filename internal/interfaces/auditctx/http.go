@@ -30,7 +30,7 @@ func HTTP(c *gin.Context) context.Context {
 	if route == "" {
 		route = c.Request.URL.Path
 	}
-	baseContext := context.WithValue(c, logger.TraceIDKey, correlationID)
+	baseContext := context.WithValue(c.Request.Context(), logger.TraceIDKey, correlationID)
 	return auditapp.WithEntryContext(baseContext, auditapp.EntryContext{
 		EventSource:    auditdomain.EventSourceServer,
 		EntryType:      auditdomain.EntryTypeHTTP,

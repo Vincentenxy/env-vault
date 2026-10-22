@@ -23,11 +23,14 @@ paths:
       summary: Encrypt text with an immutable embedded access rule
       description: |
         plaintext is required but may be empty; maximum 65536 UTF-8 bytes, not characters.
+        Invalid UTF-8 bytes and unpaired Unicode surrogates are rejected with HTTP 400 before decoding.
         JSON request body limit is 512 KiB, including escaping. Every encryption uses a fresh nonce.
         Owner identity is taken exclusively from authentication. Unknown fields are rejected.
         Default mode is self. users requires 1-100 allowedUserIds, with no implicit owner access.
         self/authenticated reject nonempty allowedUserIds. Duplicate IDs are deduplicated.
         IDs are not checked for existence. Changing access rules requires re-encryption.
+        Audit writes honor request cancellation and have a maximum duration of 5 seconds.
+        Audit failure or timeout returns code=-1 with no cryptographic result.
       requestBody:
         required: true
         content:
@@ -91,6 +94,8 @@ paths:
         Access rules cannot be overridden in this request. All modes require authentication.
         Rejects Secret storage envelopes, tampering, unauthorized callers and unknown versions.
         Invalid ciphertext and access errors share a single error message. Integrity checking cannot repair damaged data.
+        Audit writes honor request cancellation and have a maximum duration of 5 seconds.
+        Audit failure or timeout returns code=-1 with no plaintext.
       requestBody:
         required: true
         content:
@@ -177,7 +182,7 @@ components:
         data: {nullable: true, enum: [null]}
   responses:
     BadRequest:
-      description: Malformed JSON, missing required field, wrong field type, unknown field or trailing JSON.
+      description: Malformed JSON, invalid UTF-8, unpaired Unicode surrogates, missing required field, wrong field type, unknown field or trailing JSON.
       content:
         application/json:
           schema: {$ref: '#/components/schemas/HTTPFailure'}

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -20,6 +21,7 @@ import (
 	infraauth "env-vault/internal/infrastructure/auth"
 	"env-vault/internal/interfaces/middleware"
 	"env-vault/internal/masterkey"
+	"env-vault/pkg/userctx"
 )
 
 type cryptoAuditRepository struct {
@@ -128,7 +130,7 @@ func TestUserCryptoHTTP(t *testing.T) {
 		call(operation, "", `{}`, 401, 401)
 		call(operation, "invalid-token", `{}`, 401, 401)
 	}
-	for _, value := range []string{"", "\n  中文\t\x00\"  ", strings.Repeat("\x00", masterkey.MaxUserPlaintextBytes)} {
+	for _, value := range []string{"", "\n  中文\t\x00\"  ", "\ufffd\U0001f600", `\ud800`, strings.Repeat("\x00", masterkey.MaxUserPlaintextBytes)} {
 		encrypted := call("encrypt", token, bodyFor("plaintext", value), 200, 0).Data["ciphertext"]
 		decrypted := call("decrypt", tokenFor("account-a"), bodyFor("ciphertext", encrypted), 200, 0)
 		if decrypted.Data["plaintext"] != value {
@@ -140,14 +142,24 @@ func TestUserCryptoHTTP(t *testing.T) {
 			t.Fatal("audit leaked cryptographic payload")
 		}
 	}
+	encryptedUnicode := call("encrypt", token, `{"plaintext":"\uD83D\uDE00\ufffd"}`, 200, 0).Data["ciphertext"]
+	if got := call("decrypt", token, bodyFor("ciphertext", encryptedUnicode), 200, 0).Data["plaintext"]; got != "\U0001f600\ufffd" {
+		t.Fatal("valid Unicode escapes must roundtrip without changes")
+	}
 	before := len(repo.events)
 	for _, body := range []string{
 		`{}`, `null`, `{"plaintext":null}`, `{"plaintext":42}`, `{"plaintext":"secret","userId":"account-b"}`,
 		`{"plaintext":"secret"} {}`, `{"plaintext":"secret"} trailing`, `{"plaintext":`,
+		"{\"plaintext\":\"A\xffB\"}", "{\"plaintext\":\"\xc0\xaf\"}",
+		`{"plaintext":"A\ud800B"}`, `{"plaintext":"A\udc00B"}`,
+		`{"plaintext":"\ud800\ud800"}`, `{"plaintext":"\ud800\u0041"}`,
+		`{"plaintext":"\ud800\\udc00"}`, `{"plaintext":"\u12xz"}`,
+		`{"plaintext":"test","decryptMode":"users","allowedUserIds":["A\ud800B"]}`,
 	} {
 		call("encrypt", token, body, 400, 400)
 	}
 	call("decrypt", token, `{"ciphertext":null}`, 400, 400)
+	call("decrypt", token, `{"ciphertext":"\ud800"}`, 400, 400)
 	call("encrypt", token, bodyFor("plaintext", strings.Repeat("x", maxCryptoRequestBytes)), 413, 413)
 	if len(repo.events) != before {
 		t.Fatal("binding failures should not create business audit events")
@@ -198,4 +210,90 @@ func TestUserCryptoHTTP(t *testing.T) {
 	repo.err = errors.New("audit unavailable")
 	call("encrypt", token, `{"plaintext":"must-not-leak"}`, 200, -1)
 	call("decrypt", token, bodyFor("ciphertext", encrypted), 200, -1)
+}
+
+type waitingCryptoAuditRepository struct {
+	cryptoAuditRepository
+	started chan struct{}
+	err     error
+}
+
+func (r *waitingCryptoAuditRepository) CreateBatch(ctx context.Context, _ []*auditdomain.Event) error {
+	close(r.started)
+	select {
+	case <-ctx.Done():
+		r.err = ctx.Err()
+	case <-time.After(time.Minute):
+		r.err = errors.New("audit did not observe request cancellation")
+	}
+	return r.err
+}
+
+func TestUserCryptoHTTPAuditCancellation(t *testing.T) {
+	for _, operation := range []string{"encrypt", "decrypt"} {
+		for _, deadline := range []bool{false, true} {
+			name := operation + "/cancel"
+			if deadline {
+				name = operation + "/deadline"
+			}
+			t.Run(name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					gin.SetMode(gin.TestMode)
+					m := masterkey.NewManager()
+					if err := m.Activate(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)), masterkey.SourceShares); err != nil {
+						t.Fatal(err)
+					}
+					repo := &waitingCryptoAuditRepository{started: make(chan struct{})}
+					h := NewUserCryptoHandler(cryptoapp.NewService(m, auditapp.NewService(repo, nil)))
+					r := gin.New()
+					r.Use(func(c *gin.Context) { userctx.Set(c, &userctx.User{UserID: "account-a"}) })
+					r.POST("/encrypt", h.Encrypt)
+					r.POST("/decrypt", h.Decrypt)
+					body := `{"plaintext":"test"}`
+					if operation == "decrypt" {
+						ciphertext, err := m.EncryptForUser("account-a", "test")
+						if err != nil {
+							t.Fatal(err)
+						}
+						encoded, err := json.Marshal(UserDecryptRequest{Ciphertext: &ciphertext})
+						if err != nil {
+							t.Fatal(err)
+						}
+						body = string(encoded)
+					}
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					wantErr := context.Canceled
+					if deadline {
+						var stop context.CancelFunc
+						ctx, stop = context.WithTimeout(ctx, time.Second)
+						defer stop()
+						wantErr = context.DeadlineExceeded
+					}
+					req := httptest.NewRequest(http.MethodPost, "/"+operation, strings.NewReader(body)).WithContext(ctx)
+					w := httptest.NewRecorder()
+					done := make(chan struct{})
+					go func() {
+						r.ServeHTTP(w, req)
+						close(done)
+					}()
+					<-repo.started
+					if !deadline {
+						cancel()
+					}
+					<-done
+					if !errors.Is(repo.err, wantErr) {
+						t.Fatalf("audit error = %v, want %v", repo.err, wantErr)
+					}
+					var result cryptoHTTPResponse
+					if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+						t.Fatal(err)
+					}
+					if result.Code != -1 || result.Data != nil {
+						t.Fatal("canceled audit must not return a crypto result")
+					}
+				})
+			})
+		}
+	}
 }

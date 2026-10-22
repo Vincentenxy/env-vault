@@ -1,6 +1,6 @@
 # 本地登录与外部认证网关接入
 
-更新：2026-10-21
+更新：2026-10-22
 
 ## 1. 处理链路
 
@@ -56,6 +56,16 @@ auth:
 用户标识优先取字符串 `staffuserid`，为空时取字符串 `sub`，姓名取 `name`。用户标识必须与现有 `user_info.user_id` 对应；公司用户不会因验签成功而被自动创建。`/auth/me` 以数据库用户信息为准，缺少用户时返回 `user not found`
 
 本地 `auth.local` 与公司 `auth.company` 是不同受信任签发方，可以同时开启。公司 JWT 的期限不受本地 `access_token_ttl` 的两小时设置影响，实际使用 JWT 自身 exp；Cookie 八小时不保证某个 JWT 一定有效八小时
+
+### 个人 Token 与登录方式的边界
+
+业务接口的注册不依赖登录方式。`/api/v1/user/token/create`、`list`、`delete` 始终注册在认证路由下，公司认证和本地登录用户均按同一个 `userId` 访问自己的 Token
+
+`auth.local.enabled` 只控制本地用户名密码登录入口和本地登录 JWT 的接收，不关闭 PAT 服务。PAT 继续复用 `auth.local` 的 issuer、audience、key_id 和 RSA 公私钥；即使 enabled=false，这些签名配置及 access_token_ttl 仍需保留。access_token_ttl 只决定登录 JWT 的期限，PAT 使用创建时指定的 expiresAt
+
+关闭本地登录后，EnvVault 签发方仅允许携带完整 PAT 类型标记的 Token，再检查数据库中的撤销状态、到期时间、用户归属和用户锁定状态；之前签发的普通本地登录 JWT 不再放行。PAT 不能创建新的 PAT，软删除和锁定后失效的规则保持不变
+
+签名配置缺失、密钥无效或公私钥不匹配时启动失败并报告配置错误，不会静默隐藏业务路由。公司公钥只用于验证公司 JWT，不能用于签发 EnvVault 的 PAT；多副本必须保留同一套 EnvVault 签名密钥，不能为本次修复重新生成密钥，否则旧 PAT 会失效
 
 JWT 验签后仍检查用户锁定状态；PAT 还会检查类型、数据库有效状态与归属，前端认证方式不会绕过这些逻辑。网关也应覆盖或清理外部伪造的身份 Header，后端继续独立验签
 

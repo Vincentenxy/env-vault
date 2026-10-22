@@ -84,44 +84,45 @@ func New(ctx context.Context, cfg *config.Config, db *gorm.DB, redisClient redis
 	}
 	jwtProviders := make([]middleware.JWTProvider, 0, 2)
 	var localAuthSvc authapp.IService
-	var personalTokenIssuer *infraauth.JWTIssuer
-	if cfg.Auth.Local.Enabled {
-		privateMaterial, err := infraauth.LoadKeyMaterial(cfg.Auth.Local.PrivateKey, cfg.Auth.Local.PrivateKeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("load local JWT private key: %w", err)
-		}
-		privateKey, err := infraauth.ParseRSAPrivateKey(privateMaterial)
-		if err != nil {
-			return nil, fmt.Errorf("parse local JWT private key: %w", err)
-		}
-		publicMaterial, err := infraauth.LoadKeyMaterial(cfg.Auth.Local.PublicKey, cfg.Auth.Local.PublicKeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("load local JWT public key: %w", err)
-		}
-		publicKey, err := infraauth.ParseRSAPublicKey(publicMaterial)
-		if err != nil {
-			return nil, fmt.Errorf("parse local JWT public key: %w", err)
-		}
-		if !privateKey.PublicKey.Equal(publicKey) {
-			return nil, fmt.Errorf("local JWT private and public keys do not match")
-		}
-		issuer, err := infraauth.NewJWTIssuer(
-			privateKey,
-			cfg.Auth.Local.Issuer,
-			cfg.Auth.Local.Audience,
-			cfg.Auth.Local.KeyID,
-			cfg.Auth.Local.AccessTokenTTL,
-		)
-		if err != nil {
-			return nil, err
-		}
-		personalTokenIssuer = issuer
-		localAuthSvc = authapp.NewService(userRepo, passwordHasher, issuer).WithAuditRecorder(auditSvc)
-		jwtProviders = append(jwtProviders, middleware.JWTProvider{
-			Issuer: cfg.Auth.Local.Issuer, Audience: cfg.Auth.Local.Audience,
-			KeyID: cfg.Auth.Local.KeyID, PublicKey: string(publicMaterial),
-		})
+	// EnvVault 签名密钥同时用于 PAT，不随本地密码登录开关停用
+	privateMaterial, err := infraauth.LoadKeyMaterial(cfg.Auth.Local.PrivateKey, cfg.Auth.Local.PrivateKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load local JWT private key: %w", err)
 	}
+	privateKey, err := infraauth.ParseRSAPrivateKey(privateMaterial)
+	if err != nil {
+		return nil, fmt.Errorf("parse local JWT private key: %w", err)
+	}
+	publicMaterial, err := infraauth.LoadKeyMaterial(cfg.Auth.Local.PublicKey, cfg.Auth.Local.PublicKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load local JWT public key: %w", err)
+	}
+	publicKey, err := infraauth.ParseRSAPublicKey(publicMaterial)
+	if err != nil {
+		return nil, fmt.Errorf("parse local JWT public key: %w", err)
+	}
+	if !privateKey.PublicKey.Equal(publicKey) {
+		return nil, fmt.Errorf("local JWT private and public keys do not match")
+	}
+	issuer, err := infraauth.NewJWTIssuer(
+		privateKey,
+		cfg.Auth.Local.Issuer,
+		cfg.Auth.Local.Audience,
+		cfg.Auth.Local.KeyID,
+		cfg.Auth.Local.AccessTokenTTL,
+	)
+	if err != nil {
+		return nil, err
+	}
+	personalTokenIssuer := issuer
+	if cfg.Auth.Local.Enabled {
+		localAuthSvc = authapp.NewService(userRepo, passwordHasher, issuer).WithAuditRecorder(auditSvc)
+	}
+	jwtProviders = append(jwtProviders, middleware.JWTProvider{
+		Issuer: cfg.Auth.Local.Issuer, Audience: cfg.Auth.Local.Audience,
+		KeyID: cfg.Auth.Local.KeyID, PublicKey: string(publicMaterial),
+		PersonalTokensOnly: !cfg.Auth.Local.Enabled,
+	})
 	if cfg.Auth.Company.Enabled {
 		publicMaterial, err := infraauth.LoadKeyMaterial(cfg.Auth.Company.PublicKey, cfg.Auth.Company.PublicKeyFile)
 		if err != nil {
@@ -160,12 +161,9 @@ func New(ctx context.Context, cfg *config.Config, db *gorm.DB, redisClient redis
 	r.Use(readyMiddleware)
 	secretRepo := secretrepo.NewRepository(db)
 	personalSecretRepo := personalrepo.NewRepository(db)
-	var personalTokenSvc *tokenapp.Service
-	if personalTokenIssuer != nil {
-		personalTokenRepo := tokenrepo.NewRepository(db)
-		personalTokenSvc = tokenapp.NewService(personalTokenRepo, userSvc, personalTokenIssuer, masterKeyManager).
-			WithAuditRecorder(auditSvc)
-	}
+	personalTokenRepo := tokenrepo.NewRepository(db)
+	personalTokenSvc := tokenapp.NewService(personalTokenRepo, userSvc, personalTokenIssuer, masterKeyManager).
+		WithAuditRecorder(auditSvc)
 	envSvc := envapp.NewService(
 		envRepo,
 		envapp.WithResourceClone(folderRepo, secretRepo, masterKeyManager),
@@ -192,19 +190,14 @@ func New(ctx context.Context, cfg *config.Config, db *gorm.DB, redisClient redis
 	folderHandler := handler.NewFolderHandler(folderSvc)
 	secretHandler := handler.NewSecretHandler(secretSvc)
 	personalSecretHandler := handler.NewPersonalSecretHandler(personalSecretSvc)
-	var personalTokenHandler *handler.UserAccessTokenHandler
-	if personalTokenSvc != nil {
-		personalTokenHandler = handler.NewUserAccessTokenHandler(personalTokenSvc)
-	}
-	userCryptoHandler := handler.NewUserCryptoHandler(cryptoapp.NewService(masterKeyManager, auditSvc))
+	personalTokenHandler := handler.NewUserAccessTokenHandler(personalTokenSvc)
+	// Crypto audit uses the authenticated actor metadata without an extra nickname lookup.
+	cryptoAuditSvc := auditapp.NewService(auditRepo, nil)
+	userCryptoHandler := handler.NewUserCryptoHandler(cryptoapp.NewService(masterKeyManager, cryptoAuditSvc))
 	auditHandler := handler.NewAuditHandler(auditSvc)
 
 	// 初始化 JWT 认证中间件（加载配置中的公钥）
-	personalTokenCheckers := make([]middleware.PersonalTokenChecker, 0, 1)
-	if personalTokenSvc != nil {
-		personalTokenCheckers = append(personalTokenCheckers, personalTokenSvc)
-	}
-	authMiddleware, err := middleware.AuthWithAudit(jwtProviders, userSvc, auditSvc, personalTokenCheckers...)
+	authMiddleware, err := middleware.AuthWithAudit(jwtProviders, userSvc, auditSvc, personalTokenSvc)
 	if err != nil {
 		return nil, err
 	}
@@ -254,13 +247,11 @@ func New(ctx context.Context, cfg *config.Config, db *gorm.DB, redisClient redis
 				personalSecretGroup.POST("/history/reveal", personalSecretHandler.RevealHistory)
 			}
 
-			if personalTokenHandler != nil {
-				personalTokenGroup := userGroup.Group("/token")
-				{
-					personalTokenGroup.POST("/create", personalTokenHandler.Create)
-					personalTokenGroup.POST("/list", personalTokenHandler.List)
-					personalTokenGroup.POST("/delete", personalTokenHandler.Delete)
-				}
+			personalTokenGroup := userGroup.Group("/token")
+			{
+				personalTokenGroup.POST("/create", personalTokenHandler.Create)
+				personalTokenGroup.POST("/list", personalTokenHandler.List)
+				personalTokenGroup.POST("/delete", personalTokenHandler.Delete)
 			}
 		}
 

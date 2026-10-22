@@ -34,24 +34,26 @@ type PersonalTokenChecker interface {
 
 // JWTProvider 表示一个受信任 JWT 签发方及其验签公钥
 type JWTProvider struct {
-	Issuer    string
-	Audience  string
-	KeyID     string
-	PublicKey string
+	Issuer             string
+	Audience           string
+	KeyID              string
+	PublicKey          string
+	PersonalTokensOnly bool // 关闭本地密码登录后，仅接受该签发方签名的 PAT
 }
 
 type parsedJWTProvider struct {
-	issuer    string
-	audience  string
-	keyID     string
-	publicKey *rsa.PublicKey
+	issuer             string
+	audience           string
+	keyID              string
+	publicKey          *rsa.PublicKey
+	personalTokensOnly bool
 }
 
 // Auth JWT 认证中间件。
 //
 // 规则：
 //   - 从请求头 Authorization: Bearer <token> 提取 JWT
-//   - 使用配置的 RSA 公钥验签（仅允许 RS256/384/512）
+//   - 使用配置的 RSA 公钥验签（仅允许 RS256）
 //   - 解析成功后将用户信息（userId/name/jwt/cookie）写入 gin.Context
 //   - JWT 认证失败返回 HTTP 401，锁定用户返回 HTTP 403，锁定状态查询异常返回 HTTP 500
 //
@@ -90,6 +92,7 @@ func AuthWithAudit(
 		}
 		parsedProviders = append(parsedProviders, parsedJWTProvider{
 			issuer: issuer, audience: audience, keyID: keyID, publicKey: publicKey,
+			personalTokensOnly: provider.PersonalTokensOnly,
 		})
 	}
 	if len(parsedProviders) == 0 {
@@ -97,6 +100,8 @@ func AuthWithAudit(
 	}
 
 	return func(c *gin.Context) {
+		// Gin's context does not forward request cancellation by default.
+		requestCtx := auditctx.HTTP(c)
 		tokenString, err := extractBearerToken(c.GetHeader("Authorization"))
 		if err != nil {
 			logger.Warn(c, "auth failed", zap.Error(err))
@@ -139,7 +144,7 @@ func AuthWithAudit(
 			return
 		}
 		if blockChecker != nil && user.UserID != "" {
-			blocked, err := blockChecker.IsBlocked(c, user.UserID)
+			blocked, err := blockChecker.IsBlocked(requestCtx, user.UserID)
 			if err != nil {
 				logger.Error(c, "check user block status failed", zap.String("userId", user.UserID), zap.Error(err))
 				if !recordAuthFailure(c, auditRecorder, "block_check_failed", "internal error", user.UserID) {
@@ -176,7 +181,7 @@ func AuthWithAudit(
 				response.AbortWithHTTPStatusMessage(c, 500, "internal error")
 				return
 			}
-			active, checkErr := personalTokenChecker.Validate(c, user.TokenID, user.UserID)
+			active, checkErr := personalTokenChecker.Validate(requestCtx, user.TokenID, user.UserID)
 			if checkErr != nil {
 				logger.Error(c, "check personal token status failed", zap.String("userId", user.UserID), zap.Error(checkErr))
 				if !recordAuthFailure(c, auditRecorder, "personal_token_check_failed", "internal error", user.UserID) {
@@ -249,6 +254,12 @@ func verifyJWT(tokenString string, providers []parsedJWTProvider) (*verifiedJWT,
 			return provider.publicKey, nil
 		}, options...)
 		if err == nil && token.Valid {
+			// PAT 类型标记位于已验签内容中，后续仍检查数据库撤销状态和归属
+			if provider.personalTokensOnly && (getClaimString(claims, "authSource") != tokendomain.AuthSource ||
+				getClaimString(claims, "tokenUse") != tokendomain.TokenUse || getHeaderString(token, "typ") != tokendomain.TokenType) {
+				lastErr = errors.New("JWT provider only accepts personal access tokens")
+				continue
+			}
 			return &verifiedJWT{claims: claims, tokenType: getHeaderString(token, "typ")}, nil
 		}
 		lastErr = err

@@ -1,10 +1,14 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 
@@ -108,9 +112,24 @@ func (h *UserCryptoHandler) Decrypt(c *gin.Context) {
 
 func bindCryptoRequest(c *gin.Context, target any) bool {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxCryptoRequestBytes)
-	decoder := json.NewDecoder(c.Request.Body)
+	body, err := io.ReadAll(c.Request.Body)
+	defer clear(body)
+	if err != nil {
+		var oversized *http.MaxBytesError
+		if errors.As(err, &oversized) {
+			response.AbortWithHTTPStatus(c, http.StatusRequestEntityTooLarge)
+		} else {
+			response.AbortWithHTTPStatus(c, http.StatusBadRequest)
+		}
+		return false
+	}
+	if !validCryptoJSONText(body) {
+		response.AbortWithHTTPStatus(c, http.StatusBadRequest)
+		return false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
-	err := decoder.Decode(target)
+	err = decoder.Decode(target)
 	if err == nil {
 		var trailing any
 		if nextErr := decoder.Decode(&trailing); nextErr != io.EOF {
@@ -123,14 +142,46 @@ func bindCryptoRequest(c *gin.Context, target any) bool {
 	if err == nil {
 		return true
 	}
-	var oversized *http.MaxBytesError
-	if errors.As(err, &oversized) {
-		response.AbortWithHTTPStatus(c, http.StatusRequestEntityTooLarge)
-	} else {
-		// Decoder errors can contain caller input; do not echo or log them.
-		response.AbortWithHTTPStatus(c, http.StatusBadRequest)
-	}
+	// Decoder errors can contain caller input; do not echo or log them.
+	response.AbortWithHTTPStatus(c, http.StatusBadRequest)
 	return false
+}
+
+// encoding/json replaces malformed Unicode with U+FFFD. Reject it before decoding;
+// the standard decoder still handles all JSON syntax and field validation.
+func validCryptoJSONText(body []byte) bool {
+	if !utf8.Valid(body) {
+		return false
+	}
+	for i := 0; i < len(body); i++ {
+		if body[i] != '\\' {
+			continue
+		}
+		i++
+		if i >= len(body) || body[i] != 'u' {
+			continue
+		}
+		if i+4 >= len(body) {
+			return false
+		}
+		value, err := strconv.ParseUint(string(body[i+1:i+5]), 16, 16)
+		if err != nil {
+			return false
+		}
+		i += 4
+		if !utf16.IsSurrogate(rune(value)) {
+			continue
+		}
+		if value >= 0xdc00 || i+6 >= len(body) || body[i+1] != '\\' || body[i+2] != 'u' {
+			return false
+		}
+		low, err := strconv.ParseUint(string(body[i+3:i+7]), 16, 16)
+		if err != nil || low < 0xdc00 || low > 0xdfff {
+			return false
+		}
+		i += 6
+	}
+	return true
 }
 
 func respondCryptoError(c *gin.Context, err error) bool {

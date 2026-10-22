@@ -4,12 +4,15 @@ package usercrypto
 import (
 	"context"
 	"errors"
+	"time"
 
 	auditdomain "env-vault/internal/domain/audit"
 	"env-vault/internal/masterkey"
 )
 
 var ErrAuditUnavailable = errors.New("crypto audit unavailable")
+
+const cryptoAuditTimeout = 5 * time.Second
 
 type Cryptor interface {
 	EncryptForUserWithPolicy(userID, plaintext string, policy masterkey.DecryptPolicy) (string, error)
@@ -52,7 +55,9 @@ func (s *Service) finish(ctx context.Context, userID, operation string, size int
 		event.FailureReason = "crypto operation failed"
 	}
 	// No business rows are written. Return the result only after its audit is durable.
-	if s.audit == nil || s.audit.Record(ctx, event) != nil {
+	auditCtx, cancel := context.WithTimeout(ctx, cryptoAuditTimeout)
+	defer cancel()
+	if s.audit == nil || auditCtx.Err() != nil || s.audit.Record(auditCtx, event) != nil || auditCtx.Err() != nil {
 		return "", ErrAuditUnavailable
 	}
 	if operationErr != nil {

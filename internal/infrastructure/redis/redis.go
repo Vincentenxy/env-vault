@@ -31,47 +31,50 @@ func New(cfg config.RedisConfig) (redis.UniversalClient, error) {
 	switch cfg.Mode {
 	case "", config.RedisModeSingle:
 		client = redis.NewClient(&redis.Options{
-			Addr:         cfg.Addrs[0],
-			Username:     cfg.Username,
-			Password:     cfg.Password,
-			DB:           cfg.Db,
-			PoolSize:     cfg.PoolSize,
-			MinIdleConns: cfg.MinIdleConns,
-			MaxRetries:   cfg.MaxRetries,
-			DialTimeout:  cfg.DialTimeout,
-			ReadTimeout:  cfg.ReadTimeout,
-			WriteTimeout: cfg.WriteTimeout,
+			Addr:                  cfg.Addrs[0],
+			Username:              cfg.Username,
+			Password:              cfg.Password,
+			DB:                    cfg.Db,
+			PoolSize:              cfg.PoolSize,
+			MinIdleConns:          cfg.MinIdleConns,
+			MaxRetries:            cfg.MaxRetries,
+			DialTimeout:           cfg.DialTimeout,
+			ReadTimeout:           cfg.ReadTimeout,
+			WriteTimeout:          cfg.WriteTimeout,
+			ContextTimeoutEnabled: true,
 		})
 	case config.RedisModeCluster:
 		client = redis.NewClusterClient(&redis.ClusterOptions{
-			Addrs:        cfg.Addrs,
-			Username:     cfg.Username,
-			Password:     cfg.Password,
-			PoolSize:     cfg.PoolSize,
-			MinIdleConns: cfg.MinIdleConns,
-			MaxRetries:   cfg.MaxRetries,
-			DialTimeout:  cfg.DialTimeout,
-			ReadTimeout:  cfg.ReadTimeout,
-			WriteTimeout: cfg.WriteTimeout,
+			Addrs:                 cfg.Addrs,
+			Username:              cfg.Username,
+			Password:              cfg.Password,
+			PoolSize:              cfg.PoolSize,
+			MinIdleConns:          cfg.MinIdleConns,
+			MaxRetries:            cfg.MaxRetries,
+			DialTimeout:           cfg.DialTimeout,
+			ReadTimeout:           cfg.ReadTimeout,
+			WriteTimeout:          cfg.WriteTimeout,
+			ContextTimeoutEnabled: true,
 		})
 	case config.RedisModeSentinel:
 		if strings.TrimSpace(cfg.MasterName) == "" {
 			return nil, fmt.Errorf("redis master_name is required in sentinel mode")
 		}
 		client = redis.NewFailoverClient(&redis.FailoverOptions{
-			MasterName:       cfg.MasterName,
-			SentinelAddrs:    cfg.Addrs,
-			SentinelUsername: cfg.SentinelUsername,
-			SentinelPassword: cfg.SentinelPassword,
-			Username:         cfg.Username,
-			Password:         cfg.Password,
-			DB:               cfg.Db,
-			PoolSize:         cfg.PoolSize,
-			MinIdleConns:     cfg.MinIdleConns,
-			MaxRetries:       cfg.MaxRetries,
-			DialTimeout:      cfg.DialTimeout,
-			ReadTimeout:      cfg.ReadTimeout,
-			WriteTimeout:     cfg.WriteTimeout,
+			MasterName:            cfg.MasterName,
+			SentinelAddrs:         cfg.Addrs,
+			SentinelUsername:      cfg.SentinelUsername,
+			SentinelPassword:      cfg.SentinelPassword,
+			Username:              cfg.Username,
+			Password:              cfg.Password,
+			DB:                    cfg.Db,
+			PoolSize:              cfg.PoolSize,
+			MinIdleConns:          cfg.MinIdleConns,
+			MaxRetries:            cfg.MaxRetries,
+			DialTimeout:           cfg.DialTimeout,
+			ReadTimeout:           cfg.ReadTimeout,
+			WriteTimeout:          cfg.WriteTimeout,
+			ContextTimeoutEnabled: true,
 		})
 	default:
 		return nil, fmt.Errorf("unsupported redis mode: %q", cfg.Mode)
