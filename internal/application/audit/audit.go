@@ -16,6 +16,7 @@ import (
 	app "env-vault/internal/application"
 	auditdomain "env-vault/internal/domain/audit"
 	"env-vault/pkg/logger"
+	"env-vault/pkg/permission"
 )
 
 var (
@@ -68,13 +69,15 @@ type ListInput struct {
 // IService is used by the HTTP handler.
 type IService interface {
 	List(ctx context.Context, in ListInput) ([]*auditdomain.Event, int64, error)
+	GlobalList(ctx context.Context, in GlobalListInput) ([]*auditdomain.Event, int64, error)
 }
 
 // Service implements both the business recorder and audit query service.
 type Service struct {
-	repo         auditdomain.Repository
-	nameResolver app.NicknameResolver
-	now          func() time.Time
+	repo              auditdomain.Repository
+	nameResolver      app.NicknameResolver
+	now               func() time.Time
+	globalPermissions *permission.Factory
 }
 
 func NewService(repo auditdomain.Repository, resolver app.NicknameResolver) *Service {

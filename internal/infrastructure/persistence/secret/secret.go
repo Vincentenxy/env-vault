@@ -184,6 +184,9 @@ func (r *Repository) ListByProjectFolder(ctx context.Context, filter secretdomai
 		Where("environment_info.project_id = ?", filter.ProjectID).
 		Where("folder_info.code = ?", filter.FolderCode).
 		Where("environment_info.code IN ?", filter.EnvCodes)
+	if len(filter.FolderIDs) > 0 {
+		query = query.Where("secret_info.folder_id IN ?", filter.FolderIDs)
+	}
 	if len(filter.Keys) > 0 {
 		query = query.Where("secret_info.key IN ?", filter.Keys)
 	}

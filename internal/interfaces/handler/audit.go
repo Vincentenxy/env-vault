@@ -55,6 +55,7 @@ type AuditEventDTO struct {
 	FailureCode   string           `json:"failureCode"`
 	FailureReason string           `json:"failureReason"`
 	CorrelationID string           `json:"correlationId"`
+	TraceID       string           `json:"traceId"`
 	EntryStatus   string           `json:"protocolStatus"`
 	CreateBy      string           `json:"createBy"`
 	CreateByName  string           `json:"createByName"`
@@ -120,7 +121,7 @@ func toAuditEventDTO(event *auditdomain.Event) AuditEventDTO {
 		ResourceName: event.ResourceName, ScopeType: event.ScopeType, ScopeID: event.ScopeID,
 		BatchID: event.BatchID, ChangeDetail: changes, EventDetail: event.EventDetail,
 		FailureCode: event.FailureCode, FailureReason: event.FailureReason,
-		CorrelationID: event.CorrelationID, EntryStatus: event.ProtocolStatus,
+		CorrelationID: event.CorrelationID, TraceID: event.TraceID, EntryStatus: event.ProtocolStatus,
 		CreateBy: event.CreateBy, CreateByName: event.CreateByName, CreateAt: event.CreateAt,
 	}
 }

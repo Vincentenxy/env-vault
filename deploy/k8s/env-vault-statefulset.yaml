@@ -34,6 +34,7 @@ data:
       version: 0.0.1
     auth:
       local:
+        # 仅关闭本地密码登录，以下 JWT 签名配置仍用于个人 Token
         enabled: false
         issuer: env-vault
         audience: env-vault-web
@@ -286,7 +287,7 @@ spec:
               app.kubernetes.io/component: server
       containers:
         - name: env-vault
-          image: harbor.gtjaqh.net/lucy-dev/env-vault:0.0.1-alpha.5
+          image: harbor.gtjaqh.net/lucy-dev/env-vault:0.0.1-alpha.7
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -466,7 +467,7 @@ spec:
               app.kubernetes.io/component: web
       containers:
         - name: env-vault-web
-          image: harbor.gtjaqh.net/lucy-dev/env-vault-web:0.0.1-alpha.4
+          image: harbor.gtjaqh.net/lucy-dev/env-vault-web:0.0.1-alpha.7
           imagePullPolicy: Always
           ports:
             - name: http

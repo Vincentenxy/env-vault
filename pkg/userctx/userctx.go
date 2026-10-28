@@ -26,9 +26,16 @@ type User struct {
 	TokenID    string `json:"tokenId"`    // JWT jti
 }
 
-// Set 将用户信息写入 gin.Context
+// Set 将认证用户同时写入 Gin 和标准请求上下文。
 func Set(c *gin.Context, u *User) {
 	c.Set(string(userKey), u)
+	c.Request = c.Request.WithContext(WithUser(c.Request.Context(), u))
+}
+
+// WithUser attaches an authenticated identity for trusted server-side callers.
+// Never populate it from an unverified request body or header.
+func WithUser(ctx context.Context, u *User) context.Context {
+	return context.WithValue(ctx, userKey, u)
 }
 
 // FromContext 从 context 中获取用户信息，支持 gin.Context 和标准 context.Context

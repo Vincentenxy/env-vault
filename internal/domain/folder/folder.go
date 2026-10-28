@@ -70,6 +70,8 @@ type Repository interface {
 	GetByEnvIDsCode(ctx context.Context, envIDs []uuid.UUID, code string) (*Folder, error)
 	// GetByEnvCode 按环境 + 编码查询文件夹（不含已删除，CreateSub 中定位 groups 顶级目录），不存在返回 nil, nil
 	GetByEnvCode(ctx context.Context, envID uuid.UUID, code string) (*Folder, error)
+	// FindByEnvCode 查询同一环境的精确编码，最多返回两条，用于区分不存在、唯一和重名
+	FindByEnvCode(ctx context.Context, envID uuid.UUID, code string) ([]*Folder, error)
 	// GetByParentCode 按父文件夹 + 编码查询文件夹（不含已删除，CreateSub 中校验 groups 下编码唯一性），不存在返回 nil, nil
 	GetByParentCode(ctx context.Context, parentID uuid.UUID, code string) (*Folder, error)
 	// ListTopGroupIDsByEnvIDs 列出指定环境集合下的顶级 folder 的全部 group_id（去重），用于顶级 List 接口的中间步骤

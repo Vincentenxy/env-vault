@@ -9,6 +9,8 @@ import (
 	"github.com/google/uuid"
 
 	orgdomain "env-vault/internal/domain/organization"
+	permissionbiz "env-vault/pkg/permission/biz"
+	"env-vault/pkg/userctx"
 )
 
 // stubRepo 内存实现的 Repository，便于 application 层单测
@@ -235,13 +237,28 @@ func TestService_GetByID_Success(t *testing.T) {
 			return want, nil
 		},
 	}
-	svc := NewService(repo)
-	got, err := svc.GetByID(context.Background(), id)
+	checks := 0
+	permissions, err := permissionbiz.NewTenantAccessFactory(func(_ context.Context, request permissionbiz.CheckRequest) (bool, error) {
+		checks++
+		if request.Subject.ID != "u-1" || request.Resource.ID != want.TenantID.String() {
+			t.Fatalf("unexpected tenant check: %+v", request)
+		}
+		return true, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(repo).WithPermissions(permissions)
+	ctx := userctx.WithUser(context.Background(), &userctx.User{UserID: "u-1"})
+	got, err := svc.GetByID(ctx, id)
 	if err != nil {
 		t.Fatalf("expected nil err, got %v", err)
 	}
 	if got.ID != id {
 		t.Fatalf("expected id %s, got %s", id, got.ID)
+	}
+	if checks != 1 {
+		t.Fatalf("tenant permission checked %d times", checks)
 	}
 }
 

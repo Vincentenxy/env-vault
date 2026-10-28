@@ -45,6 +45,7 @@ type ValueUpdateItem struct {
 type ProjectFolderListFilter struct {
 	ProjectID  uuid.UUID
 	FolderCode string
+	FolderIDs  []uuid.UUID // 可选，应用读取时限定已经定位的具体环境目录
 	EnvCodes   []string
 	Keys       []string
 	TagIDs     []uuid.UUID

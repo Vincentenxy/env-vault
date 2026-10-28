@@ -99,13 +99,36 @@ func (r *Repository) CreateBatch(ctx context.Context, events []*auditdomain.Even
 
 func (r *Repository) List(ctx context.Context, filter auditdomain.ListFilter) ([]*auditdomain.Event, int64, error) {
 	db := persistence.TxDB(ctx, r.db).WithContext(ctx).
-		Model(&auditEventPO{}).
-		Where("resource_type = ? AND resource_id = ?", filter.ResourceType, filter.ResourceID)
+		Model(&auditEventPO{})
+	if filter.ResourceType != "" {
+		db = db.Where("resource_type = ?", filter.ResourceType)
+	}
+	if filter.ResourceID != "" {
+		db = db.Where("resource_id = ?", filter.ResourceID)
+	}
 	if filter.ActionCode != "" {
 		db = db.Where("action_code = ?", filter.ActionCode)
 	}
 	if filter.ResultCode != "" {
 		db = db.Where("result_code = ?", filter.ResultCode)
+	}
+	if filter.CreateBy != "" {
+		db = db.Where("create_by = ?", filter.CreateBy)
+	}
+	if filter.BatchID != nil {
+		db = db.Where("batch_id = ?", *filter.BatchID)
+	}
+	if filter.CorrelationID != "" {
+		db = db.Where("correlation_id = ?", filter.CorrelationID)
+	}
+	if filter.TraceID != "" {
+		db = db.Where("trace_id = ?", filter.TraceID)
+	}
+	if filter.StartAt != nil {
+		db = db.Where("create_at >= ?", *filter.StartAt)
+	}
+	if filter.EndAt != nil {
+		db = db.Where("create_at <= ?", *filter.EndAt)
 	}
 	db = applyPermissionFilter(db, filter.UserID)
 
@@ -128,7 +151,10 @@ func (r *Repository) List(ctx context.Context, filter auditdomain.ListFilter) ([
 	return events, total, nil
 }
 
-// applyPermissionFilter is the reserved resource-manager permission boundary.
+// applyPermissionFilter is deliberately a no-op in this first stage. Replace it
+// with trusted scope_type/scope_id constraints from the permission center before
+// enabling resource-level authorization. It must run before BOTH count and page.
+// UserID is the authenticated caller, not the searched CreateBy operator.
 func applyPermissionFilter(db *gorm.DB, _ string) *gorm.DB { return db }
 
 func toPO(event *auditdomain.Event) (*auditEventPO, error) {

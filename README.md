@@ -4,6 +4,8 @@
 
 基于 Go + Gin 的 DDD 分层 Web 服务，使用 PostgreSQL 持久化、Redis 缓存，最终部署于 Kubernetes。
 
+全局审计日志中心：`POST /api/v1/audit/global/list` 支持跨资源、已删除资源和组合筛选查询，Web 入口 `/app/audit`。当前仍要求 JWT 认证，全局查看策略按第一阶段要求暂时允许，数据范围过滤尚待权限中心接入；详见 [功能与权限边界](design/audit-global.md) 和 [OpenAPI 契约](design/audit-global-openapi.yaml)。
+
 ## 技术栈
 
 | 组件 | 选型 | 版本 |
@@ -101,7 +103,7 @@ docker buildx build \
   --platform linux/amd64 \
   --build-arg BASE_IMAGE_REGISTRY=m.daocloud.io/docker.io \
   --build-arg GOPROXY=https://goproxy.cn,direct \
-  -t harbor.gtjaqh.net/lucy-dev/env-vault:0.0.1-alpha.5 \
+  -t harbor.gtjaqh.net/lucy-dev/env-vault:0.0.1-alpha.7 \
   --push \
   .
 
@@ -127,6 +129,14 @@ kubectl -n env-vault get pods -o wide
 集群中的新 Pod 通过 `security.master_key_peer_recovery` 启动后台恢复任务，统一调用正常 `env-vault` Service 的 `/internal/v1/masterKey/transfer`。首次启动没有 Ready Endpoint 时会退避重试；Pod 0 通过三份分片激活后，其他 Pod 自动获取 RSA 加密的主密钥并进入 Ready。滚动更新时，新 Pod 从任意仍处于 Ready 的副本恢复，不固定依赖 Pod 0。所有副本同时丢失内存状态时仍需重新输入三份分片。
 
 健康检查：`GET /api/v1/pub/health`
+
+## gRPC 目录密钥读取
+
+原生 gRPC 目录密钥读取已提供，默认关闭，可通过 `GRPC_ENABLED=true GRPC_ADDRESS=127.0.0.1:9090 go run ./cmd` 启动；支持 `folderCode + projectId + envCode`、`folderGroupId + envCode` 和具体 `folderId` 查询，应用认证将在后续阶段接入
+
+完整协议、返回字段、主密钥就绪行为、grpcurl 示例和生成命令见 [gRPC 目录密钥读取](design/grpc-secret-read.md)
+
+Java SDK 的启动配置加载、应用身份与后续接入计划见 [Java SDK 设计](design/java-sdk.md)，讨论原稿与可视化页面已归档到 [design/archive/20261028](design/archive/20261028/README.md)
 
 ## 本地认证初始化
 

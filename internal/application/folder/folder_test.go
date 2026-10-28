@@ -76,6 +76,9 @@ func (s *stubFolderRepo) GetByParentCode(ctx context.Context, parentID uuid.UUID
 	}
 	return nil, nil
 }
+func (s *stubFolderRepo) FindByEnvCode(ctx context.Context, envID uuid.UUID, code string) ([]*folderdomain.Folder, error) {
+	return nil, nil
+}
 func (s *stubFolderRepo) ListByGroupID(ctx context.Context, groupID uuid.UUID) ([]*folderdomain.Folder, error) {
 	if s.listByGroupID != nil {
 		return s.listByGroupID(ctx, groupID)

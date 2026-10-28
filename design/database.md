@@ -929,7 +929,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uk_audit_event_log_source_event
 | 权限预留 | 当前查询接口只要求通过认证，`applyPermissionFilter` 保留为空实现。后续由独立权限管控系统提供授权结果，再按 `userId + scope_type + scope_id` 接入资源管理员过滤并支持超管全局查询；在该系统接入前禁止将当前实现误认为已具备资源级日志查看权限 |
 | 保留期 | 每条记录默认写入一年后的 `expire_at`，当前阶段不实现清理任务。后续由系统保留期任务按 `expire_at` 分批物理清理到期数据，清理行为自身也必须留下系统审计事件 |
 | 数据库变更 | 本项目维护表结构设计和代码字段映射，但暂不内置 migration；实际建表、加列和索引变更由外部数据库变更系统执行。应用版本发布前必须由外部系统先完成对应 DDL，避免代码与数据库结构不一致 |
-| gRPC / SDK | 当前仅保留统一事件模型、入口类型和调用方字段，不实现 gRPC interceptor、SDK adapter 或离线事件接收；相关接入在对应协议能力开发时补充 |
+| gRPC / SDK | 已接入原生 gRPC 目录密钥读取的调用关联 ID、主密钥就绪判断与结果审计，记录 `entry_type=grpc`、实际协议状态及匿名主体；应用认证、Java SDK adapter 和离线事件接收待后续接入 |
 
 不同接入方式的字段映射如下。`action_code` 始终表示业务动作，不随接入协议变化；例如下面三种入口执行相同业务时均使用 `secret.update`。
 
@@ -968,7 +968,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uk_audit_event_log_source_event
 | `pkg/userctx` | 从请求上下文取得 `create_by` / `create_by_name`，不允许业务请求自行声明操作人 |
 | `middleware.RequestID` / `logger.TraceIDKey` | 首期复用现有 `x-request-id` 写入 `correlation_id`；它是请求关联 ID，不冒充分布式 `trace_id` |
 | Gin 请求上下文 | HTTP adapter 统一填充入口类型、路由模板、状态码、client IP 和 User-Agent；禁止读取并序列化 body |
-| 后续 gRPC interceptor | 从 FullMethod、status code、peer 和白名单 metadata 构造同一套审计上下文；禁止保存完整 metadata 或 message |
+| gRPC interceptor 与读取 adapter | 已从 FullMethod、status code、peer 和白名单 metadata 构造同一套审计上下文；禁止保存完整 metadata 或 message，应用认证和其他业务方法后续接入 |
 | 后续 SDK adapter | 填充 SDK 名称、版本、语言和调用 ID；若 SDK 底层使用 HTTP/gRPC，则入口类型仍记录实际协议，调用方类型记录为 `sdk` |
 | `persistence.WithTx` / `persistence.TxDB` | 让审计仓储复用业务事务，保证业务写入和 success 审计原子提交 |
 | `application.NicknameResolver` | 仅在上下文缺少姓名时补齐操作人姓名快照，查询失败保留空字符串 |

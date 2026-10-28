@@ -241,6 +241,7 @@ func (s *stubSecretRepo) WithTx(ctx context.Context, fn func(ctx context.Context
 type stubFolderRepo struct {
 	listByGroupID func(ctx context.Context, groupID uuid.UUID) ([]*folderdomain.Folder, error)
 	getByID       func(ctx context.Context, id uuid.UUID) (*folderdomain.Folder, error)
+	findByEnvCode func(ctx context.Context, envID uuid.UUID, code string) ([]*folderdomain.Folder, error)
 }
 
 func (s *stubFolderRepo) CreateBatch(ctx context.Context, folders []*folderdomain.Folder) error {
@@ -273,6 +274,12 @@ func (s *stubFolderRepo) GetByEnvIDsCode(ctx context.Context, envIDs []uuid.UUID
 func (s *stubFolderRepo) GetByEnvCode(ctx context.Context, envID uuid.UUID, code string) (*folderdomain.Folder, error) {
 	return nil, nil
 }
+func (s *stubFolderRepo) FindByEnvCode(ctx context.Context, envID uuid.UUID, code string) ([]*folderdomain.Folder, error) {
+	if s.findByEnvCode != nil {
+		return s.findByEnvCode(ctx, envID, code)
+	}
+	return nil, nil
+}
 func (s *stubFolderRepo) GetByParentCode(ctx context.Context, parentID uuid.UUID, code string) (*folderdomain.Folder, error) {
 	return nil, nil
 }
@@ -288,7 +295,8 @@ func (s *stubFolderRepo) ListByGroupIDs(ctx context.Context, groupIDs []uuid.UUI
 
 // stubEnvRepo 内存实现的环境 Repository（secret 应用服务依赖）
 type stubEnvRepo struct {
-	getByID func(ctx context.Context, id uuid.UUID) (*envdomain.Environment, error)
+	getByID          func(ctx context.Context, id uuid.UUID) (*envdomain.Environment, error)
+	getByProjectCode func(ctx context.Context, projectID uuid.UUID, code string) (*envdomain.Environment, error)
 }
 
 func (s *stubEnvRepo) CreateBatch(ctx context.Context, environments []*envdomain.Environment) error {
@@ -307,6 +315,9 @@ func (s *stubEnvRepo) GetByID(ctx context.Context, id uuid.UUID) (*envdomain.Env
 	return nil, nil
 }
 func (s *stubEnvRepo) GetByProjectCode(ctx context.Context, projectID uuid.UUID, code string) (*envdomain.Environment, error) {
+	if s.getByProjectCode != nil {
+		return s.getByProjectCode(ctx, projectID, code)
+	}
 	return nil, nil
 }
 func (s *stubEnvRepo) List(ctx context.Context, projectID uuid.UUID) ([]*envdomain.Environment, error) {

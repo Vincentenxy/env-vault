@@ -82,6 +82,12 @@ func TestPersonalTokenRoutesIndependentOfLoginMode(t *testing.T) {
 					}
 				}
 			}
+			if !routes["POST /api/v1/audit/global/list"] || !routes["POST /api/v1/audit/list"] {
+				t.Error("both global and single-resource audit routes must remain available")
+			}
+			if routes["POST /api/v1/pub/audit/global/list"] {
+				t.Error("global audit must not expose a public route")
+			}
 			// sqlmock 的 rowsWereClosed 不支持并发读取；通过连接池状态等待查询归还连接。
 			deadline := time.Now().Add(time.Second)
 			for {

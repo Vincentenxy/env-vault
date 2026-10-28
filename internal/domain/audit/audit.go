@@ -83,13 +83,19 @@ type Event struct {
 
 // ListFilter carries normalized pagination and optional event filters.
 type ListFilter struct {
-	ResourceType string
-	ResourceID   string
-	ActionCode   string
-	ResultCode   string
-	UserID       string
-	Offset       int
-	Limit        int
+	ResourceType  string
+	ResourceID    string
+	ActionCode    string
+	ResultCode    string
+	CreateBy      string
+	BatchID       *uuid.UUID
+	CorrelationID string
+	TraceID       string
+	StartAt       *time.Time
+	EndAt         *time.Time
+	UserID        string
+	Offset        int
+	Limit         int
 }
 
 // Repository is the audit persistence port.

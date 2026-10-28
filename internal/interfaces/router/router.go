@@ -40,11 +40,13 @@ import (
 	tenantrepo "env-vault/internal/infrastructure/persistence/tenant"
 	userrepo "env-vault/internal/infrastructure/persistence/user"
 	tokenrepo "env-vault/internal/infrastructure/persistence/useraccesstoken"
+	"env-vault/internal/interfaces/grpcserver"
 	"env-vault/internal/interfaces/handler"
 	"env-vault/internal/interfaces/middleware"
 	"env-vault/internal/masterkey"
 	"env-vault/internal/search"
 	"env-vault/pkg/logger"
+	permissionbiz "env-vault/pkg/permission/biz"
 )
 
 // New 初始化 gin 引擎并注册路由
@@ -52,6 +54,15 @@ import (
 //   - /api/v1/pub/... 无认证接口，可随意调用
 //   - /api/v1/...     需认证接口，挂载 JWT 认证中间件
 func New(ctx context.Context, cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) (*gin.Engine, error) {
+	application, err := NewApplication(ctx, cfg, db, redisClient)
+	if err != nil {
+		return nil, err
+	}
+	return application.HTTP, nil
+}
+
+// NewApplication 组装共享业务依赖，HTTP 和 gRPC 使用同一个主密钥管理器
+func NewApplication(ctx context.Context, cfg *config.Config, db *gorm.DB, redisClient redislib.UniversalClient) (*Application, error) {
 	gin.SetMode(cfg.Server.Mode)
 
 	r := gin.New()
@@ -75,7 +86,11 @@ func New(ctx context.Context, cfg *config.Config, db *gorm.DB, redisClient redis
 		userapp.WithAllocationRepositories(tenantRepo, orgRepo, projRepo),
 	)
 	auditRepo := auditrepo.NewRepository(db)
-	auditSvc := auditapp.NewService(auditRepo, userSvc)
+	auditPermissions, err := permissionbiz.NewAuditAccessFactory(permissionbiz.CheckAuditGlobalPermission)
+	if err != nil {
+		return nil, fmt.Errorf("initialize audit permissions: %w", err)
+	}
+	auditSvc := auditapp.NewService(auditRepo, userSvc).WithGlobalPermissions(auditPermissions)
 	userSvc.WithAuditRecorder(auditSvc)
 
 	passwordHasher, err := infraauth.NewPasswordHasher()
@@ -135,7 +150,11 @@ func New(ctx context.Context, cfg *config.Config, db *gorm.DB, redisClient redis
 	}
 
 	tenantSvc := tenantapp.NewService(tenantRepo, orgRepo, userSvc).WithAuditRecorder(auditSvc)
-	orgSvc := orgapp.NewService(orgRepo, userSvc).WithAuditRecorder(auditSvc)
+	tenantPermissions, err := permissionbiz.NewTenantAccessFactory(permissionbiz.CheckBackendPermission)
+	if err != nil {
+		return nil, fmt.Errorf("initialize tenant permission chain: %w", err)
+	}
+	orgSvc := orgapp.NewService(orgRepo, userSvc).WithAuditRecorder(auditSvc).WithPermissions(tenantPermissions)
 	projSvc := projapp.NewService(
 		projRepo,
 		projapp.WithEnvironmentRepository(envRepo),
@@ -329,10 +348,11 @@ func New(ctx context.Context, cfg *config.Config, db *gorm.DB, redisClient redis
 			secretGroup.POST("/tag/update", secretTagHandler.Update)
 		}
 
-		// 业务审计日志是跨资源独立模块；本期先由 Secret 写入并在密钥页面查询。
+		// 资源局部查询和全局审计中心均必须经过 JWT 认证。
 		auditGroup := auth.Group("/audit")
 		{
 			auditGroup.POST("/list", auditHandler.List)
+			auditGroup.POST("/global/list", auditHandler.GlobalList)
 		}
 	}
 
@@ -341,11 +361,18 @@ func New(ctx context.Context, cfg *config.Config, db *gorm.DB, redisClient redis
 	internal := r.Group("/internal/v1")
 	masterkey.RegisterInternalRoutes(internal, masterKeyManager, cfg.Security.MasterKeyPeerToken, auditSvc)
 
+	application := &Application{HTTP: r}
+	if cfg.GRPC.Enabled {
+		application.GRPC, err = grpcserver.New(secretSvc, masterKeyManager, auditSvc)
+		if err != nil {
+			return nil, fmt.Errorf("initialize gRPC server: %w", err)
+		}
+	}
 	if cfg.Security.MasterKeyPeerRecovery.Enabled {
 		go runMasterKeyPeerRecovery(ctx, peerRecovery)
 	}
 	go warmUpUsers(userSvc)
-	return r, nil
+	return application, nil
 }
 
 func newMasterKeyPeerRecovery(manager *masterkey.Manager, security config.SecurityConfig) (*masterkey.PeerRecovery, error) {

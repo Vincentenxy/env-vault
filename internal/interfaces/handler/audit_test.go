@@ -16,7 +16,15 @@ import (
 )
 
 type stubAuditService struct {
-	list func(context.Context, auditapp.ListInput) ([]*auditdomain.Event, int64, error)
+	list       func(context.Context, auditapp.ListInput) ([]*auditdomain.Event, int64, error)
+	globalList func(context.Context, auditapp.GlobalListInput) ([]*auditdomain.Event, int64, error)
+}
+
+func (s *stubAuditService) GlobalList(ctx context.Context, in auditapp.GlobalListInput) ([]*auditdomain.Event, int64, error) {
+	if s.globalList != nil {
+		return s.globalList(ctx, in)
+	}
+	return nil, 0, nil
 }
 
 func (s *stubAuditService) List(ctx context.Context, in auditapp.ListInput) ([]*auditdomain.Event, int64, error) {
@@ -34,6 +42,7 @@ func newAuditTestEngine(svc auditapp.IService) *gin.Engine {
 		c.Next()
 	})
 	r.POST("/api/v1/audit/list", NewAuditHandler(svc).List)
+	r.POST("/api/v1/audit/global/list", NewAuditHandler(svc).GlobalList)
 	return r
 }
 

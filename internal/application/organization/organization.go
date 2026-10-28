@@ -13,6 +13,8 @@ import (
 	auditapp "env-vault/internal/application/audit"
 	auditdomain "env-vault/internal/domain/audit"
 	orgdomain "env-vault/internal/domain/organization"
+	"env-vault/pkg/permission"
+	permissionbiz "env-vault/pkg/permission/biz"
 )
 
 // 业务错误（应用层显式定义，handler 映射为业务错误码）
@@ -68,6 +70,13 @@ type Service struct {
 	repo          orgdomain.Repository
 	nameResolver  app.NicknameResolver
 	auditRecorder auditdomain.Recorder
+	permissions   *permission.Factory
+}
+
+// WithPermissions configures tenant authorization for organization details.
+func (s *Service) WithPermissions(factory *permission.Factory) *Service {
+	s.permissions = factory
+	return s
 }
 
 func (s *Service) WithAuditRecorder(recorder auditdomain.Recorder) *Service {
@@ -190,6 +199,9 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*orgdomain.Organiz
 			}
 			if o == nil {
 				return nil, ErrNotFound
+			}
+			if err := s.permissions.Check(readCtx, permissionbiz.TenantAccess, o.TenantID.String()); err != nil {
+				return nil, err
 			}
 			s.setManagerName(readCtx, o)
 			return o, nil

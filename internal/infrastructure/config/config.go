@@ -12,6 +12,7 @@ import (
 // Config 全局配置结构体，yaml key 使用 viper 推荐的下划线命名
 type Config struct {
 	Server   ServerConfig   `mapstructure:"server"`
+	GRPC     GRPCConfig     `mapstructure:"grpc"`
 	App      AppConfig      `mapstructure:"app"`
 	Auth     AuthConfig     `mapstructure:"auth"`
 	Database DatabaseConfig `mapstructure:"database"`
@@ -151,6 +152,8 @@ func Load(path string) (*Config, error) {
 	v.AutomaticEnv()
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.SetDefault("search.query_timeout", "5s")
+	v.SetDefault("grpc.enabled", false)
+	v.SetDefault("grpc.address", DefaultGRPCAddress)
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("read config file: %w", err)

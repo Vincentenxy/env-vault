@@ -179,6 +179,18 @@ func (h *OrganizationHandler) Delete(c *gin.Context) {
 }
 
 // Detail 组织详情
+// @Summary 查询组织详情
+// @Description 返回详情前校验当前用户对组织所属租户的访问权限
+// @Tags org
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param request body DetailOrgRequest true "组织 ID"
+// @Success 200 {object} response.Response{data=OrganizationDTO}
+// @Failure 401 {object} response.Response
+// @Failure 403 {object} response.Response
+// @Failure 500 {object} response.Response
+// @Router /api/v1/org/info [post]
 func (h *OrganizationHandler) Detail(c *gin.Context) {
 	var req DetailOrgRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -269,6 +281,9 @@ func (h *OrganizationHandler) WithProject(c *gin.Context) {
 // respondError 应用层错误统一映射为业务错误码
 func (h *OrganizationHandler) respondError(c *gin.Context, err error) {
 	if err == nil {
+		return
+	}
+	if response.AbortPermissionError(c, err) {
 		return
 	}
 	switch {

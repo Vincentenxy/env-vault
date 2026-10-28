@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os/signal"
 	"syscall"
@@ -16,6 +17,7 @@ import (
 	"env-vault/pkg/logger"
 
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
 )
 
 func main() {
@@ -52,15 +54,27 @@ func main() {
 	appCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// 初始化路由
-	r, err := router.New(appCtx, cfg, db, redisClient)
+	// HTTP 与 gRPC 共享一次依赖组装，避免生成两套主密钥状态
+	application, err := router.NewApplication(appCtx, cfg, db, redisClient)
 	if err != nil {
 		logger.L().Fatal("init router failed", zap.Error(err))
 	}
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler: r,
+		Handler: application.HTTP,
+	}
+	if application.GRPC != nil {
+		listener, err := net.Listen("tcp", cfg.GRPC.ListenAddress())
+		if err != nil {
+			logger.L().Fatal("gRPC listen failed", zap.Error(err))
+		}
+		go func() {
+			logger.L().Info("gRPC server started", zap.String("addr", listener.Addr().String()))
+			if err := application.GRPC.Serve(listener); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+				logger.L().Fatal("gRPC serve failed", zap.Error(err))
+			}
+		}()
 	}
 
 	// 异步启动 HTTP 服务
@@ -81,8 +95,18 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	// 两个协议并行停止接收新请求，共用同一个退出期限
+	grpcStopped := make(chan error, 1)
+	if application.GRPC != nil {
+		go func() { grpcStopped <- application.GRPC.Shutdown(ctx) }()
+	} else {
+		grpcStopped <- nil
+	}
 	if err := srv.Shutdown(ctx); err != nil {
-		logger.L().Fatal("server shutdown failed", zap.Error(err))
+		logger.L().Error("server shutdown failed", zap.Error(err))
+	}
+	if err := <-grpcStopped; err != nil {
+		logger.L().Warn("gRPC shutdown deadline reached", zap.Error(err))
 	}
 	logger.L().Info("server exited")
 }

@@ -106,6 +106,9 @@ PostgreSQL 集成测试只连接显式提供的 `ENV_VAULT_SEARCH_TEST_DSN` 并�
 
 ## 验证与上线
 
+分阶段核验方案见 [密钥搜索性能核验方案](secret-search-performance.md)，本轮本地核验结果见 [密钥搜索性能核验结果](secret-search-performance-results-20261028.md)
+已完成本地专用库、HTTP 并发、长值与浏览器验证，百万规模标签 / 大范围查询存在瓶颈，实际集群与业务库仍需独立核验
+
 ```sh
 # DSN 必须指向专用测试数据库，每次运行会创建并清理独立 schema
 ENV_VAULT_SEARCH_TEST_DSN='host=127.0.0.1 port=5432 user=test_user dbname=search_test sslmode=disable' go test ./internal/search

@@ -1,0 +1,155 @@
+openapi: 3.0.3
+info:
+  title: Env Vault Global Audit
+  version: 1.0.0
+  description: |
+    全局只读审计查询，复用现有 audit_event_log，不增加数据库表。
+    必须通过 JWT 认证；全局查看责任链当前按阶段要求默认允许，资源范围过滤暂为 no-op。
+    后续权限中心接入后，必须在数据库 count 和分页前按可信 scopeType/scopeId 过滤。
+servers:
+  - url: "{{server}}"
+security:
+  - BearerAuth: []
+paths:
+  /api/v1/audit/global/list:
+    post:
+      tags: [audit]
+      operationId: listGlobalAuditRecords
+      summary: 跨资源分页查询审计日志
+      description: |
+        筛选条件均可省略，多个条件以 AND 组合，字符串去除首尾空白后精确匹配。
+        createBy 是被查询的操作人，不是用于授权的当前用户；客户端不能指定授权主体。
+        startAt/endAt 为带时区 RFC3339 时间，均包含边界，startAt 不得晚于 endAt。
+        不关联业务资源表，不过滤已删除资源；仍可用原 resourceType/resourceId 查询。
+        无法由此判断资源当前是否已删除，因此响应没有推测性的 isDeleted 字段。
+        不返回 Secret 明文、密文、JWT、密钥分片、客户端 IP 或 User-Agent。
+        保留原 /api/v1/audit/list 单资源接口，不增加写入、修改、删除或导出操作。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GlobalAuditRequest'
+            example:
+              resourceType: folder
+              actionCode: folder.delete
+              resultCode: success
+              startAt: '2026-10-01T00:00:00+08:00'
+              endAt: '2026-10-28T23:59:59.999+08:00'
+              pageNum: 1
+              pageSize: 20
+      responses:
+        '200':
+          description: 成功；若系统主密钥尚未就绪，既有 Ready 中间件可能返回 code=-2、data=null
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, msg, data]
+                properties:
+                  code: { type: integer }
+                  msg: { type: string }
+                  data:
+                    type: object
+                    nullable: true
+                    required: [total, list]
+                    properties:
+                      total: { type: integer, format: int64, minimum: 0 }
+                      list:
+                        type: array
+                        items: { $ref: '#/components/schemas/AuditEvent' }
+              example:
+                code: 0
+                msg: success
+                data:
+                  total: 0
+                  list: []
+        '400':
+          description: JSON、UUID、时间、结果类型、字段长度或分页偏移无效
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { code: 400, msg: Bad Request, data: null }
+        '401':
+          description: 缺少或无效认证身份
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { code: 401, msg: Unauthorized, data: null }
+        '403':
+          description: 责任链明确拒绝；当前默认允许策略不会主动返回此结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { code: 403, msg: Forbidden, data: null }
+        '500':
+          description: 查询失败或权限评估失败；不会回传内部异常详情
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { code: 500, msg: Internal Server Error, data: null }
+components:
+  securitySchemes:
+    BearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+  schemas:
+    GlobalAuditRequest:
+      type: object
+      properties:
+        resourceType: { type: string, maxLength: 512, description: '如 tenant、organization、project、folder、secret、personalSecret、user、masterKey、authentication、userAccount' }
+        resourceId: { type: string, maxLength: 512, description: '资源原 ID；允许查询已删除资源，不限于 UUID' }
+        actionCode: { type: string, maxLength: 512, description: '精确动作，如 secret.update、auth.login、auth.authorize' }
+        resultCode: { type: string, enum: ['', success, failure] }
+        createBy: { type: string, maxLength: 512, description: '操作人 ID / 工号，精确匹配' }
+        batchId: { type: string, format: uuid, nullable: true, description: '非全零 UUID' }
+        correlationId: { type: string, maxLength: 512 }
+        traceId: { type: string, maxLength: 512 }
+        startAt: { type: string, format: date-time, nullable: true }
+        endAt: { type: string, format: date-time, nullable: true }
+        pageNum: { type: integer, default: 1, description: '小于等于 0 时归一为 1；偏移溢出返回 400' }
+        pageSize: { type: integer, default: 20, description: '小于等于 0 时归一为 20；大于 200 时归一为 200' }
+    AuditChange:
+      type: object
+      required: [field, redacted]
+      properties:
+        field: { type: string }
+        before: { description: '安全字段的原值；redacted=true 时不提供' }
+        after: { description: '安全字段的新值；redacted=true 时不提供' }
+        changed: { type: boolean }
+        redacted: { type: boolean }
+    AuditEvent:
+      type: object
+      required: [id, resourceType, resourceId, actionCode, resultCode, changeDetail, eventDetail, createAt]
+      properties:
+        id: { type: string, format: uuid }
+        eventSource: { type: string }
+        entryType: { type: string }
+        callerType: { type: string }
+        callerName: { type: string }
+        callerVersion: { type: string }
+        operationName: { type: string }
+        actionCode: { type: string }
+        resultCode: { type: string, enum: [success, failure] }
+        actorType: { type: string }
+        resourceType: { type: string }
+        resourceId: { type: string }
+        resourceName: { type: string, description: '事件发生时的名称快照' }
+        scopeType: { type: string }
+        scopeId: { type: string }
+        batchId: { type: string, format: uuid, nullable: true }
+        changeDetail: { type: array, items: { $ref: '#/components/schemas/AuditChange' } }
+        eventDetail: { type: object, additionalProperties: true, description: '写入时已校验的安全事件摘要' }
+        failureCode: { type: string }
+        failureReason: { type: string }
+        correlationId: { type: string }
+        traceId: { type: string }
+        protocolStatus: { type: string }
+        createBy: { type: string }
+        createByName: { type: string }
+        createAt: { type: string, format: date-time }
+    Error:
+      type: object
+      required: [code, msg, data]
+      properties:
+        code: { type: integer }
+        msg: { type: string }
+        data: { nullable: true, example: null }
